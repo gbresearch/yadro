@@ -16,8 +16,10 @@ namespace gbr
 {
     namespace container
     {
+        template<class T, class index_t, bool = std::is_class_v<T>> struct tree_node;
+
         template<class T, class index_t>
-        struct tree_node final
+        struct tree_node<T, index_t, false> final
         {
             index_t parent;
             index_t child;
@@ -28,10 +30,30 @@ namespace gbr
             tree_node(index_t parent, index_t child, index_t sibling, Args&&...args)
                 : parent(parent), child(child), sibling(sibling), data(std::forward<Args>(args)...)
             {}
+
+            decltype(auto) get_data() { return (data); }
+            decltype(auto) get_data() const { return (data); }
+        };
+
+        template<class T, class index_t>
+        struct tree_node<T, index_t, true> final : T
+        {
+            index_t parent;
+            index_t child;
+            index_t sibling;
+            //T data;
+
+            template<class ...Args>
+            tree_node(index_t parent, index_t child, index_t sibling, Args&& ...args)
+                : T(std::forward<Args>(args)...), parent(parent), child(child), sibling(sibling)
+            {}
+
+            decltype(auto) get_data() { return *static_cast<T*>(this); }
+            decltype(auto) get_data() const { return *static_cast<const T*>(this); }
         };
 
         template<class index_t>
-        struct tree_node<void, index_t> final
+        struct tree_node<void, index_t, false> final
         {
             index_t parent;
             index_t child;
@@ -42,43 +64,64 @@ namespace gbr
             {}
         };
 
+        template<class StorageT>
+        struct storage_traits final
+        {
+            constexpr static auto size(const StorageT& storage) { return storage.size(); }
+
+            template<class index_t>
+            constexpr static decltype(auto) get(const StorageT& storage, index_t index) { return (storage[index]); }
+            
+            template<class index_t>
+            constexpr static decltype(auto) get(StorageT& storage, index_t index) { return (storage[index]); }
+
+            template<class...Args>
+            constexpr static void emplace_back(StorageT& storage, Args&& ... args) { storage.emplace_back(std::forward<Args>(args)...); }
+        };
+
         template<class T>
         using vector_storage = std::vector<T>;
 
         template<class T, template<class> class StorageT = vector_storage>
-        class tree
+        struct indexed_tree final
         {
+            static_assert(!std::is_reference_v<T>);
+
             using container_t = StorageT<tree_node<T, std::size_t>>;
-            container_t _nodes;
-        public:
+
+            using data_t = T;
+
+            template<class U> using rebind = indexed_tree<U, StorageT>;
+
+            constexpr static bool has_data = !std::is_same_v<std::remove_cv_t<T>, void>;
+
             using index_t = typename container_t::size_type;
+
             enum : index_t { invalid_index = (index_t)(-1) };
 
             // test index
-            bool is_valid_index(index_t index) const { return index < _nodes.size(); }
-            bool is_hole(index_t index) const
+            auto is_valid_index(index_t index) const { return index < nodes_size(); }
+            auto is_hole(index_t index) const
             {
-                return index < _nodes.size() && _nodes[index].parent == invalid_index;
+                return index < nodes_size() && get_node(index).parent == invalid_index;
             }
 
             // accessors
-            template<class TT = T>
-            auto get_value(index_t node)->
-                std::enable_if_t< !std::is_same_v<void, std::decay_t<TT>>, std::add_lvalue_reference_t<TT>>
+            template<class TT = T, bool = rebind<TT>::has_data>
+            decltype(auto) get_value(index_t node)
             {
-                return _nodes[node].data;
+                return (get_node(node).get_data());
             }
 
             template<class TT = T>
-            auto get_value(index_t node) const ->
-                std::enable_if_t< !std::is_same_v<void, std::decay_t<TT>>, std::add_lvalue_reference_t<std::add_const_t<TT>>>
+            decltype(auto) get_value(index_t node, bool = rebind<TT>::has_data) const
             {
-                return _nodes[node].data;
+                return (get_node(node).get_data());
             }
-
-            auto get_parent(index_t node) const { return _nodes[node].parent; }
-            auto get_child(index_t node) const { return _nodes[node].child; }
-            auto get_sibling(index_t node) const { return _nodes[node].sibling; }
+            
+            auto get_parent(index_t node) const { return get_node(node).parent; }
+            auto get_child(index_t node) const { return get_node(node).child; }
+            auto get_sibling(index_t node) const { return get_node(node).sibling; }
 
             // insertions and deletions
             template<class...Args>
@@ -122,13 +165,13 @@ namespace gbr
             index_t foreach_child(index_t parent, Function vis) const;
 
             template<class Function>
-            index_t foreach_sibling(index_t node, Function vis) const;
+            auto foreach_sibling(index_t node, Function vis) const;
 
             template<class Function>
-            index_t foreach_depth_first(index_t parent, Function vis) const;
+            auto foreach_depth_first(index_t parent, Function vis) const;
 
             template<class Function>
-            index_t foreach_breadth_first(index_t parent, Function vis) const;
+            auto foreach_breadth_first(index_t parent, Function vis) const;
 
             // reordering
             void reverse_children(index_t parent);
@@ -137,7 +180,17 @@ namespace gbr
             void sort_children(index_t parent, Compare comp);
 
         private:
+            container_t _nodes;
+
             void destroy_subtree(index_t node);
+
+            decltype(auto) get_node(index_t index) { return storage_traits< container_t>::template get(_nodes, index); }
+            decltype(auto) get_node(index_t index) const { return storage_traits<container_t>::template get(_nodes, index); }
+
+            template<class...Args>
+            void emplace_back(Args&& ...args) { storage_traits<container_t>::template emplace_back(_nodes, std::forward<Args>(args)...); }
+
+            constexpr auto nodes_size() const { return storage_traits<container_t>::size(_nodes); }
         };
 
         //---------------------------------------------------------------------
@@ -146,67 +199,67 @@ namespace gbr
 
         template<class T, template<class> class StorageT>
         template<class...Args>
-        auto tree<T, StorageT>::insert_child(index_t parent, Args&&... args)
+        auto indexed_tree<T, StorageT>::insert_child(index_t parent, Args&&... args)
         {
-            auto node_index = _nodes.size();
-            _nodes.emplace_back(parent, invalid_index, _nodes[parent].child, std::forward<Args>(args)...);
-            _nodes[parent].child = node_index;
+            auto node_index = nodes_size();
+            emplace_back(parent, invalid_index, get_node(parent).child, std::forward<Args>(args)...);
+            get_node(parent).child = node_index;
             return node_index;
         }
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class...Args>
-        auto tree<T, StorageT>::insert_after_sibling(index_t sibling, Args&&... args)
+        auto indexed_tree<T, StorageT>::insert_after_sibling(index_t sibling, Args&&... args)
         {
-            auto node_index = _nodes.size();
-            _nodes.emplace_back(_nodes[sibling].parent, invalid_index, _nodes[sibling].sibling, std::forward<Args>(args)...);
-            _nodes[sibling].sibling = node_index;
+            auto node_index = nodes_size();
+            emplace_back(get_node(sibling).parent, invalid_index, get_node(sibling).sibling, std::forward<Args>(args)...);
+            get_node(sibling).sibling = node_index;
             return node_index;
         }
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        auto tree<T, StorageT>::detach_subtree(index_t node)
+        auto indexed_tree<T, StorageT>::detach_subtree(index_t node)
         {
             if (get_child(get_parent(node)) == node)
             {   // this node is the first child
-                _nodes[get_parent(node)].child = get_sibling(node);
+                get_node(get_parent(node)).child = get_sibling(node);
             }
             else
             {   // find previous sibling
-                auto pred = find_child(_nodes[node].parent, [&](auto n) { return _nodes[n].sibling == node; });
-                _nodes[pred].sibling = _nodes[node].sibling;
+                auto pred = find_child(get_node(node).parent, [&](auto n) { return this->get_node(n).sibling == node; });
+                get_node(pred).sibling = get_node(node).sibling;
             }
 
-            _nodes[node].parent = invalid_index;
-            _nodes[node].sibling = invalid_index;
+            get_node(node).parent = invalid_index;
+            get_node(node).sibling = invalid_index;
         }
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        auto tree<T, StorageT>::attach_subtree(index_t to_parent, index_t node)
+        auto indexed_tree<T, StorageT>::attach_subtree(index_t to_parent, index_t node)
         {
-            _nodes[node].parent = to_parent;
-            _nodes[node].sibling = _nodes[to_parent].child;
-            _nodes[to_parent].child = node;
+            get_node(node).parent = to_parent;
+            get_node(node).sibling = get_node(to_parent).child;
+            get_node(to_parent).child = node;
         }
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        auto tree<T, StorageT>::attach_subtree_after_sibling(index_t sibling, index_t node)
+        auto indexed_tree<T, StorageT>::attach_subtree_after_sibling(index_t sibling, index_t node)
         {
-            _nodes[node].parent = get_parent(sibling);
-            _nodes[node].sibling = get_sibling(sibling);
-            _nodes[sibling].sibling = node;
+            get_node(node).parent = get_parent(sibling);
+            get_node(node).sibling = get_sibling(sibling);
+            get_node(sibling).sibling = node;
         }
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        void tree<T, StorageT>::destroy_subtree(index_t node)
+        void indexed_tree<T, StorageT>::destroy_subtree(index_t node)
         {
-            _nodes[node].parent = invalid_index;
-            if constexpr (!std::is_same_v<void, std::decay_t<T>>)
+            get_node(node).parent = invalid_index;
+            if constexpr(has_data)
             {
                 std::destroy_at(std::addressof(get_value(node)));
             }
@@ -215,7 +268,7 @@ namespace gbr
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        void tree<T, StorageT>::delete_subtree(index_t node)
+        void indexed_tree<T, StorageT>::delete_subtree(index_t node)
         {
             detach_subtree(node);
             destroy_subtree(node);
@@ -223,14 +276,14 @@ namespace gbr
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        auto tree<T, StorageT>::copy_subtree(index_t to_parent, index_t node)
+        auto indexed_tree<T, StorageT>::copy_subtree(index_t to_parent, index_t node)
         {
             index_t new_subtree = invalid_index;
 
-            if constexpr (std::is_same_v<void, std::decay_t<T>>)
+            if constexpr (std::is_same_v<void, std::remove_cv_t<T>>)
                 new_subtree = insert_child(to_parent);
             else
-                new_subtree = insert_child(to_parent, _nodes[node].data);
+                new_subtree = insert_child(to_parent, get_node(node).get_data());
 
             foreach_child(node, [&](auto n) { copy_subtree(new_subtree, n); });
 
@@ -239,14 +292,14 @@ namespace gbr
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        auto tree<T, StorageT>::copy_subtree_after_sibling(index_t sibling, index_t node)
+        auto indexed_tree<T, StorageT>::copy_subtree_after_sibling(index_t sibling, index_t node)
         {
             index_t new_subtree = invalid_index;
 
-            if constexpr (std::is_same_v<void, std::decay_t<T>>)
+            if constexpr (std::is_same_v<void, std::remove_cv_t<T>>)
                 new_subtree = insert_after_sibling(sibling);
             else
-                new_subtree = insert_after_sibling(sibling, _nodes[node].data);
+                new_subtree = insert_after_sibling(sibling, get_node(node).get_data());
 
             foreach_child(node, [&](auto n) { copy_subtree(new_subtree, n); });
 
@@ -255,14 +308,14 @@ namespace gbr
 
         //---------------------------------------------------------------------
         template<class T, template <class> class StorageT>
-        void tree<T, StorageT>::copy_children(index_t from_parent, index_t to_parent)
+        void indexed_tree<T, StorageT>::copy_children(index_t from_parent, index_t to_parent)
         {
             foreach_child(from_parent, [&](auto n) { copy_subtree(to_parent, n); });
         }
 
         //---------------------------------------------------------------------
         template<class T, template <class>  class StorageT>
-        inline void tree<T, StorageT>::move_subtree(index_t to_parent, index_t node)
+        inline void indexed_tree<T, StorageT>::move_subtree(index_t to_parent, index_t node)
         {
             detach_subtree(node);
             attach_subtree(to_parent, node);
@@ -270,7 +323,7 @@ namespace gbr
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        void tree<T, StorageT>::move_subtree_after_sibling(index_t sibling, index_t node)
+        void indexed_tree<T, StorageT>::move_subtree_after_sibling(index_t sibling, index_t node)
         {
             detach_subtree(node);
             attach_subtree_after_sibling(sibling, node);
@@ -278,7 +331,7 @@ namespace gbr
 
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
-        void tree<T, StorageT>::move_children(index_t from_parent, index_t to_parent)
+        void indexed_tree<T, StorageT>::move_children(index_t from_parent, index_t to_parent)
         {
             foreach_child(from_parent, [&](auto n) { move_subtree(to_parent, n); });
         }
@@ -286,7 +339,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Predicate>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::find_ancestor(index_t node, Predicate pred) const
+        typename indexed_tree<T, StorageT>::index_t indexed_tree<T, StorageT>::find_ancestor(index_t node, Predicate pred) const
         {
             for (node = get_parent(node); node != invalid_index; node = get_parent(node))
             {
@@ -300,7 +353,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Predicate>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::find_child(index_t parent, Predicate pred) const
+        typename indexed_tree<T, StorageT>::index_t indexed_tree<T, StorageT>::find_child(index_t parent, Predicate pred) const
         {
             for (auto node = get_child(parent); node != invalid_index; node = get_sibling(node))
             {
@@ -314,7 +367,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Predicate>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::find_sibling(index_t node, Predicate pred) const
+        typename indexed_tree<T, StorageT>::index_t indexed_tree<T, StorageT>::find_sibling(index_t node, Predicate pred) const
         {
             for (; node != invalid_index; node = get_sibling(node))
             {
@@ -328,7 +381,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Predicate>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::find_depth_first(index_t node, Predicate pred) const
+        typename indexed_tree<T, StorageT>::index_t indexed_tree<T, StorageT>::find_depth_first(index_t node, Predicate pred) const
         {
             if (node == invalid_index || std::invoke(pred, node))
             {
@@ -347,7 +400,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Predicate>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::find_breadth_first(index_t node, Predicate pred) const
+        typename indexed_tree<T, StorageT>::index_t indexed_tree<T, StorageT>::find_breadth_first(index_t node, Predicate pred) const
         {
             auto search = [&](index_t node, std::vector<index_t>& nodes)->index_t
             {
@@ -365,6 +418,7 @@ namespace gbr
 
             std::vector<index_t> in_nodes(node, 1);
             std::vector<index_t> out_nodes;
+
             while (!in_nodes.empty())
             {
                 out_nodes.clear();
@@ -387,7 +441,7 @@ namespace gbr
         // iterations
         template<class T, template<class> class StorageT>
         template<class Function>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::foreach_child(index_t parent, Function vis) const
+        typename indexed_tree<T, StorageT>::index_t indexed_tree<T, StorageT>::foreach_child(index_t parent, Function vis) const
         {
             auto node = get_child(parent);
 
@@ -412,7 +466,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Function>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::foreach_sibling(index_t node, Function vis) const
+        auto indexed_tree<T, StorageT>::foreach_sibling(index_t node, Function vis) const
         {
             if constexpr (std::is_convertible_v<decltype(std::invoke(vis, 0)), bool>)
             {
@@ -435,7 +489,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Function>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::foreach_depth_first(index_t parent, Function vis) const
+        auto indexed_tree<T, StorageT>::foreach_depth_first(index_t parent, Function vis) const
         {
             if constexpr (std::is_convertible_v<decltype(std::invoke(vis, 0)), bool>)
             {
@@ -450,7 +504,7 @@ namespace gbr
         //---------------------------------------------------------------------
         template<class T, template<class> class StorageT>
         template<class Function>
-        typename tree<T, StorageT>::index_t tree<T, StorageT>::foreach_breadth_first(index_t parent, Function vis) const
+        auto indexed_tree<T, StorageT>::foreach_breadth_first(index_t parent, Function vis) const
         {
             if constexpr (std::is_convertible_v<decltype(std::invoke(vis, 0)), bool>)
             {

@@ -63,5 +63,8 @@
     <ClCompile Include="..\container\src\tree.cpp">
       <Filter>container</Filter>
     </ClCompile>
+    <ClCompile Include="..\container\src\graph.cpp">
+      <Filter>container</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>
