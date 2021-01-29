@@ -16,6 +16,7 @@ namespace gbr
 {
     namespace container
     {
+        //---------------------------------------------------------------------
         template<class T, class index_t, bool = std::is_class_v<T>> struct tree_node;
 
         template<class T, class index_t>
@@ -64,6 +65,7 @@ namespace gbr
             {}
         };
 
+        //---------------------------------------------------------------------
         template<class StorageT>
         struct storage_traits final
         {
@@ -79,9 +81,11 @@ namespace gbr
             constexpr static void emplace_back(StorageT& storage, Args&& ... args) { storage.emplace_back(std::forward<Args>(args)...); }
         };
 
+        //---------------------------------------------------------------------
         template<class T>
         using vector_storage = std::vector<T>;
 
+        //---------------------------------------------------------------------
         template<class T, template<class> class StorageT = vector_storage>
         struct indexed_tree final
         {
