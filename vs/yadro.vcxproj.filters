@@ -17,6 +17,9 @@
     <Filter Include="container">
       <UniqueIdentifier>{83cfb80c-2ff0-4e0d-b1ec-748d5d4dccfd}</UniqueIdentifier>
     </Filter>
+    <Filter Include="test">
+      <UniqueIdentifier>{20b5cbdf-4ac8-4bc1-89ce-12e907b60183}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\archive\include\archive.h">
