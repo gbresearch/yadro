@@ -1,0 +1,9 @@
+[2022-07-23 23:33:35] [pid: 31320, tid: 25056]	suite2.mytest:	DISABLED
+[2022-07-23 23:33:35] [pid: 31320, tid: 27524]	util.misc:	PASSED (0 ms)
+[2022-07-23 23:33:35] [pid: 31320, tid: 15984]	suite1.X:	PASSED (0 ms)
+[2022-07-23 23:33:35] [pid: 31320, tid: 30244]	util.logtest:	PASSED (0 ms)
+[2022-07-23 23:33:35] [pid: 31320, tid: 25056]	suite2.Z:	DISABLED
+[2022-07-23 23:33:35] [pid: 31320, tid: 19180]	archive.serialization:	PASSED (2 ms)
+[2022-07-23 23:33:35] [pid: 31320, tid: 32924]	suite1.Y:	PASSED (10 ms)
+[2022-07-23 23:33:35] [pid: 31320, tid: 25056]	run time: 13 ms
+[2022-07-23 23:33:35] [pid: 31320, tid: 25056]	tests passed: 5, failed: 0, disabled: 2

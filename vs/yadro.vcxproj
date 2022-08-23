@@ -20,12 +20,12 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -39,34 +39,50 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(OutDir)obj\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(OutDir)obj\</IntDir>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\archive\include\archive.h" />
-    <ClInclude Include="..\archive\include\archive_traits.h" />
-    <ClInclude Include="..\async\include\taskcontainer.h" />
-    <ClInclude Include="..\async\include\threadpool.h" />
-    <ClInclude Include="..\container\include\graph.h" />
-    <ClInclude Include="..\container\include\static_string.h" />
-    <ClInclude Include="..\container\include\static_vector.h" />
-    <ClInclude Include="..\container\include\tree.h" />
+    <ClInclude Include="..\archive\archive.h" />
+    <ClInclude Include="..\archive\archive_traits.h" />
+    <ClInclude Include="..\async\taskcontainer.h" />
+    <ClInclude Include="..\async\threadpool.h" />
+    <ClInclude Include="..\container\graph.h" />
+    <ClInclude Include="..\container\static_string.h" />
+    <ClInclude Include="..\container\static_vector.h" />
+    <ClInclude Include="..\container\tree.h" />
+    <ClInclude Include="..\util\gberror.h" />
+    <ClInclude Include="..\util\gblog.h" />
+    <ClInclude Include="..\util\gbtest.h" />
+    <ClInclude Include="..\util\gbtimer.h" />
+    <ClInclude Include="..\util\misc.h" />
+    <ClInclude Include="..\util\traits.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\archive\src\archive.cpp" />
-    <ClCompile Include="..\async\src\taskcontainer.cpp" />
-    <ClCompile Include="..\async\src\threadpool.cpp" />
-    <ClCompile Include="..\container\src\graph.cpp" />
-    <ClCompile Include="..\container\src\static_string.cpp" />
-    <ClCompile Include="..\container\src\static_vector.cpp" />
-    <ClCompile Include="..\container\src\tree.cpp" />
+    <ClCompile Include="..\archive\archive.cpp" />
+    <ClCompile Include="..\async\taskcontainer.cpp" />
+    <ClCompile Include="..\async\threadpool.cpp" />
+    <ClCompile Include="..\container\graph.cpp" />
+    <ClCompile Include="..\container\static_string.cpp" />
+    <ClCompile Include="..\container\static_vector.cpp" />
+    <ClCompile Include="..\container\tree.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

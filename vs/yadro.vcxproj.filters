@@ -17,56 +17,71 @@
     <Filter Include="container">
       <UniqueIdentifier>{83cfb80c-2ff0-4e0d-b1ec-748d5d4dccfd}</UniqueIdentifier>
     </Filter>
-    <Filter Include="test">
-      <UniqueIdentifier>{20b5cbdf-4ac8-4bc1-89ce-12e907b60183}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\archive\include\archive.h">
+    <ClInclude Include="..\archive\archive.h">
       <Filter>archive</Filter>
     </ClInclude>
-    <ClInclude Include="..\archive\include\archive_traits.h">
+    <ClInclude Include="..\archive\archive_traits.h">
       <Filter>archive</Filter>
     </ClInclude>
-    <ClInclude Include="..\async\include\taskcontainer.h">
+    <ClInclude Include="..\async\taskcontainer.h">
       <Filter>async</Filter>
     </ClInclude>
-    <ClInclude Include="..\async\include\threadpool.h">
+    <ClInclude Include="..\async\threadpool.h">
       <Filter>async</Filter>
     </ClInclude>
-    <ClInclude Include="..\container\include\graph.h">
+    <ClInclude Include="..\container\graph.h">
       <Filter>container</Filter>
     </ClInclude>
-    <ClInclude Include="..\container\include\static_string.h">
+    <ClInclude Include="..\container\static_string.h">
       <Filter>container</Filter>
     </ClInclude>
-    <ClInclude Include="..\container\include\static_vector.h">
+    <ClInclude Include="..\container\static_vector.h">
       <Filter>container</Filter>
     </ClInclude>
-    <ClInclude Include="..\container\include\tree.h">
+    <ClInclude Include="..\container\tree.h">
       <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\gblog.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\gbtest.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\gbtimer.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\misc.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\gberror.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\traits.h">
+      <Filter>util</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\archive\src\archive.cpp">
+    <ClCompile Include="..\archive\archive.cpp">
       <Filter>archive</Filter>
     </ClCompile>
-    <ClCompile Include="..\async\src\taskcontainer.cpp">
+    <ClCompile Include="..\async\taskcontainer.cpp">
       <Filter>async</Filter>
     </ClCompile>
-    <ClCompile Include="..\async\src\threadpool.cpp">
+    <ClCompile Include="..\async\threadpool.cpp">
       <Filter>async</Filter>
     </ClCompile>
-    <ClCompile Include="..\container\src\static_string.cpp">
+    <ClCompile Include="..\container\graph.cpp">
       <Filter>container</Filter>
     </ClCompile>
-    <ClCompile Include="..\container\src\static_vector.cpp">
+    <ClCompile Include="..\container\static_string.cpp">
       <Filter>container</Filter>
     </ClCompile>
-    <ClCompile Include="..\container\src\tree.cpp">
+    <ClCompile Include="..\container\static_vector.cpp">
       <Filter>container</Filter>
     </ClCompile>
-    <ClCompile Include="..\container\src\graph.cpp">
+    <ClCompile Include="..\container\tree.cpp">
       <Filter>container</Filter>
     </ClCompile>
   </ItemGroup>

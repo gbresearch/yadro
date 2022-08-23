@@ -1,20 +1,39 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 16.0.29306.81
+# Visual Studio Version 17
+VisualStudioVersion = 17.2.32616.157
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "yadro", "yadro.vcxproj", "{A7F59762-97B8-42B4-B337-974D42E4715D}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "yadro_test", "yadro_test.vcxproj", "{70F3C465-6884-4160-A2CF-29876DA04659}"
+	ProjectSection(ProjectDependencies) = postProject
+		{A7F59762-97B8-42B4-B337-974D42E4715D} = {A7F59762-97B8-42B4-B337-974D42E4715D}
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
 		Release|x64 = Release|x64
+		Release|x86 = Release|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{A7F59762-97B8-42B4-B337-974D42E4715D}.Debug|x64.ActiveCfg = Debug|x64
 		{A7F59762-97B8-42B4-B337-974D42E4715D}.Debug|x64.Build.0 = Debug|x64
+		{A7F59762-97B8-42B4-B337-974D42E4715D}.Debug|x86.ActiveCfg = Debug|x64
+		{A7F59762-97B8-42B4-B337-974D42E4715D}.Debug|x86.Build.0 = Debug|x64
 		{A7F59762-97B8-42B4-B337-974D42E4715D}.Release|x64.ActiveCfg = Release|x64
 		{A7F59762-97B8-42B4-B337-974D42E4715D}.Release|x64.Build.0 = Release|x64
+		{A7F59762-97B8-42B4-B337-974D42E4715D}.Release|x86.ActiveCfg = Release|x64
+		{A7F59762-97B8-42B4-B337-974D42E4715D}.Release|x86.Build.0 = Release|x64
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Debug|x64.ActiveCfg = Debug|x64
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Debug|x64.Build.0 = Debug|x64
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Debug|x86.ActiveCfg = Debug|Win32
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Debug|x86.Build.0 = Debug|Win32
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Release|x64.ActiveCfg = Release|x64
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Release|x64.Build.0 = Release|x64
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Release|x86.ActiveCfg = Release|Win32
+		{70F3C465-6884-4160-A2CF-29876DA04659}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

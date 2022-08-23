@@ -1,8 +1,8 @@
 
-#include "../include/tree.h"
+#include "tree.h"
 #include <iostream>
 
-using namespace gbr::container;
+using namespace gb::yadro::container;
 
 template<class Tree>
 void calls(Tree& t)
