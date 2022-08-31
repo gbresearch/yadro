@@ -22,6 +22,7 @@
 #include <map>
 #include <set>
 #include <optional>
+#include "../archive/archive.h"
 
 namespace gb::yadro::container
 {
@@ -47,14 +48,20 @@ namespace gb::yadro::container
     template<class T, bool = std::is_class_v<T>>
     struct data_wrapper : T
     {
+        data_wrapper() requires(std::is_default_constructible_v<T>) {}
+
         template<class ... Args>
         data_wrapper(Args&& ... args) : T(std::forward<Args>(args)...) {}
+
+        auto operator== (const data_wrapper& other) const { return get() == other.get(); }
 
         decltype(auto) get() const { return *this; }
         decltype(auto) get() { return *this; }
 
         template<class Arg>
         void set(Arg&& arg) { *this = std::forward<Arg>(arg); }
+
+        void serialize(auto&& a) { a(static_cast<T&>(*this)); }
     };
 
     //-------------------------------------------------------------------------
@@ -63,20 +70,27 @@ namespace gb::yadro::container
     {
         T data;
 
+        data_wrapper() requires(std::is_default_constructible_v<T>) {}
+
         template<class ... Args>
         data_wrapper(Args&& ... args) : data(std::forward<Args>(args)...) {}
+
+        auto operator== (const data_wrapper& other) const { return data == other.data; }
 
         decltype(auto) get() const { return data; }
         decltype(auto) get() { return data; }
 
         template<class Arg>
         void set(Arg&& arg) { data = std::forward<Arg>(arg); }
+        void serialize(auto&& a) { a(data); }
     };
 
     //-------------------------------------------------------------------------
     template<>
     struct data_wrapper<void, false>
     {
+        void serialize(auto&&) {}
+        auto operator== (const data_wrapper& other) const { return true; }
     };
 
     //-------------------------------------------------------------------------
@@ -89,28 +103,37 @@ namespace gb::yadro::container
         index_t out_sibling;
         using data_t = T;
 
-        edge() requires(std::is_default_constructible_v<T>) {}
+        edge() requires(std::is_default_constructible_v<data_wrapper<T>>) {}
 
         template<class ... Args>
         edge(index_t from, index_t to, index_t in_sibling, index_t out_sibling, Args&&... args)
             : data_wrapper<T>(std::forward<Args>(args)...), from(from), to(to), in_sibling(in_sibling), out_sibling(out_sibling)
         {}
 
+        auto operator== (const edge& other) const
+        {
+            return from == other.from && to == other.to && in_sibling == other.in_sibling && out_sibling == other.out_sibling
+                && static_cast<const data_wrapper<T>&>(*this) == static_cast<const data_wrapper<T>&>(other);
+        }
+
         template<class Archive>
         void serialize(Archive&& a)
         {
-            auto& data = data_wrapper<T>::get();
-            a(data, from, to, in_sibling, out_sibling);
+            a(static_cast<data_wrapper<T>&>(*this));
+            a(from, to, in_sibling, out_sibling);
         }
 
         void dump(std::ostream& os) const
         {
             os << "{";
-            detail::dump_index(os, from) << ',';
-            detail::dump_index(os, to) << ',';
-            detail::dump_index(os, in_sibling) << ',';
-            detail::dump_index(os, out_sibling);
-            os << "} -> " << data_wrapper<T>::get();
+            os << "from: "; detail::dump_index(os, from);
+            os << ", to: "; detail::dump_index(os, to);
+            os << ", in_sibling: "; detail::dump_index(os, in_sibling);
+            os << ", out_sibling: "; detail::dump_index(os, out_sibling);
+            os << "}";
+            if constexpr(!std::is_same_v<void, data_t>)
+                os << ", value: " << data_wrapper<T>::get();
+            os << "\n";
         }
     };
 
@@ -122,65 +145,63 @@ namespace gb::yadro::container
         index_t out_edge;
         using data_t = T;
 
-        node() requires(std::is_default_constructible_v<T>) {}
+        node() requires(std::is_default_constructible_v<data_wrapper<T>>) {}
 
         template<class... Args>
         node(index_t in_edge, index_t out_edge, Args&&... args)
             : data_wrapper<T>(std::forward<Args>(args)...), in_edge(in_edge), out_edge(out_edge)
         {}
 
+        auto operator== (const node& other) const 
+        { 
+            return in_edge == other.in_edge && out_edge == other.out_edge &&
+                static_cast<const data_wrapper<T>&>(*this) == static_cast<const data_wrapper<T>&>(other);
+        }
+
         template<class Archive>
         void serialize(Archive&& a)
         {
-            auto& data = data_wrapper<T>::get();
-            a(data, in_edge, out_edge);
+            a(static_cast<data_wrapper<T>&>(*this));
+            a(in_edge, out_edge);
         }
 
         void dump(std::ostream& os) const
         {
-            os << "{";
-            detail::dump_index(os, in_edge) << ',';
+            os << "{ in:";
+            detail::dump_index(os, in_edge) << ", out:";
             detail::dump_index(os, out_edge);
             os << "}";
+            if constexpr (!std::is_same_v<void, data_t>)
+                os << ", value: " << data_wrapper<T>::get();
         }
     };
 
     //-------------------------------------------------------------------------
-    template<class NodeT, class EdgeT>
+    template<class NodeT = void, class EdgeT = void>
     class graph
     {
         std::vector<edge<EdgeT>> edges;
         std::vector<node<NodeT>> nodes;
     public:
+        // create graph with specified number of disconnected nodes, each data initialized with specified arguments
         template<class ...NodeArgs>
         explicit graph(std::size_t node_count, const NodeArgs&... init)
             : nodes(node_count, node<NodeT>(invalid_index, invalid_index, init...))
         {}
 
-        void dump(std::ostream& os) const
+        template<class Archive>
+        explicit graph(Archive&& a) requires(gb::yadro::archive::is_iarchive_v<Archive>)
         {
-            os << "nodes " << nodes.size() << ":\n";
-
-            auto index = index_t(0);
-
-            for (auto&& n : nodes)
-            {
-                os << '[' << index << "]: ";
-                n.dump(os);
-                os << "\n";
-                ++index;
-            }
-
-            os << "edges " << edges.size() << ":\n";
-            index = 0;
-            for (auto&& e : edges)
-            {
-                os << '[' << index << "]: ";
-                e.dump(os);
-                os << "\n";
-                ++index;
-            }
+            serialize(a);
         }
+
+        auto operator== (const graph& other) const
+        {
+            return edges == other.edges && nodes == other.nodes;
+        }
+
+        auto& get_nodes() const { return nodes; }
+        auto& get_edges() const { return edges; }
 
         decltype(auto) get_edge(index_t edge) const { return edges[edge]; }
         decltype(auto) get_node(index_t node) const { return nodes[node]; }
@@ -238,6 +259,25 @@ namespace gb::yadro::container
         {
             foreach_in_edge(node, fn);
             foreach_out_edge(node, fn);
+        }
+
+        template<class Fn>
+        auto foreach_in_neighbor(index_t node, Fn fn) const
+        {
+            foreach_in_edge(node, [&](auto edge) { std::invoke(fn, edges[edge].from); });
+        }
+
+        template<class Fn>
+        auto foreach_out_neighbor(index_t node, Fn fn) const
+        {
+            foreach_out_edge(node, [&](auto edge) { std::invoke(fn, edges[edge].to); });
+        }
+
+        template<class Fn>
+        auto foreach_neighbor(index_t node, Fn fn) const
+        {
+            foreach_in_neighbor(node, fn);
+            foreach_out_neighbor(node, fn);
         }
 
         template<class Pred>
@@ -302,5 +342,40 @@ namespace gb::yadro::container
         {
             a(edges, nodes);
         }
+
+        auto& dump_nodes(std::ostream& os) const
+        {
+            for (std::size_t n = 0; n < nodes.size(); ++n)
+            {
+                os << "[" << n << "]: {";
+                foreach_out_neighbor(n, [&](auto neighbor)
+                    {
+                        os << ' ' << neighbor;
+                    });
+
+                os << " }";
+
+                if constexpr (!std::is_same_v<void, NodeT>)
+                    os << ", value: " << get_node_value(n);
+                os << "\n";
+            }
+            return os;
+        }
+
+        void dump(std::ostream& os) const
+        {
+            os << "nodes " << nodes.size() << ":\n";
+            dump_nodes(os);
+
+            os << "edges " << edges.size() << ":\n";
+            auto index = 0;
+            for (auto&& e : edges)
+            {
+                os << '[' << index << "]: ";
+                e.dump(os);
+                ++index;
+            }
+        }
+
     };
 }

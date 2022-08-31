@@ -180,6 +180,44 @@ namespace
 
     GB_TEST(yadro, graph_test)
     {
+        // [0]->[1]->[2]->[3]->[4]
+        //  |------------>
+        //        <--------|
+        //  <------------------|
 
+        // testing construction
+        auto dump = R"(nodes 5:
+[0]: { 3 1 }, value: 0
+[1]: { 2 }, value: 0
+[2]: { 3 }, value: 0
+[3]: { 4 1 }, value: 0
+[4]: { 0 }, value: 0
+edges 7:
+[0]: {from: 0, to: 1, in_sibling: x, out_sibling: x}
+[1]: {from: 1, to: 2, in_sibling: x, out_sibling: x}
+[2]: {from: 2, to: 3, in_sibling: x, out_sibling: x}
+[3]: {from: 0, to: 3, in_sibling: 2, out_sibling: 0}
+[4]: {from: 3, to: 1, in_sibling: 0, out_sibling: x}
+[5]: {from: 3, to: 4, in_sibling: x, out_sibling: 4}
+[6]: {from: 4, to: 0, in_sibling: x, out_sibling: x}
+)";
+        graph<int> g(5, 0);
+        auto e01 = g.add_edge(0, 1);
+        auto e12 = g.add_edge(1, 2);
+        auto e23 = g.add_edge(2, 3);
+        auto e03 = g.add_edge(0, 3);
+        auto e31 = g.add_edge(3, 1);
+        auto e34 = g.add_edge(3, 4);
+        auto e40 = g.add_edge(4, 0);
+        std::ostringstream os;
+        g.dump(os);
+        gbassert(os.str() == dump);
+
+        // testing serialization
+        omem_archive ma;
+        ma(g);
+        imem_archive ima(std::move(ma));
+        graph<int> g1(ima);
+        gbassert(g == g1);
     }
 }
