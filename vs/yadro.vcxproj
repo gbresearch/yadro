@@ -68,8 +68,10 @@
     <ClInclude Include="..\container\static_string.h" />
     <ClInclude Include="..\container\static_vector.h" />
     <ClInclude Include="..\container\tree.h" />
+    <ClInclude Include="..\util\file_mutex.h" />
     <ClInclude Include="..\util\gberror.h" />
     <ClInclude Include="..\util\gblog.h" />
+    <ClInclude Include="..\util\gbmemory.h" />
     <ClInclude Include="..\util\gbtest.h" />
     <ClInclude Include="..\util\gbtimer.h" />
     <ClInclude Include="..\util\misc.h" />
@@ -83,6 +85,7 @@
     <ClCompile Include="..\container\static_string.cpp" />
     <ClCompile Include="..\container\static_vector.cpp" />
     <ClCompile Include="..\container\tree.cpp" />
+    <ClCompile Include="..\util\file_mutex.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

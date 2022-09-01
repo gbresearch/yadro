@@ -61,6 +61,12 @@
     <ClInclude Include="..\util\traits.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\gbmemory.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\file_mutex.h">
+      <Filter>util</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">
@@ -83,6 +89,9 @@
     </ClCompile>
     <ClCompile Include="..\container\tree.cpp">
       <Filter>container</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\file_mutex.cpp">
+      <Filter>util</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
