@@ -19,14 +19,24 @@ namespace
 
     GB_TEST(util, misc)
     {
-        std::mutex m1, m2;
-        gbassert(locked_call([] { return 1; }, m1, m2) == 1);
-
-        auto v1{ 0 }, v2{ 0 };
+        std::int64_t dur{};
+        std::uint64_t cnt{};
         {
-            raii r{ [&] { v1 = 1; }, [&] { v2 = 2; } };
-            gbassert(v1 == 1);
+            accumulating_timer<std::chrono::microseconds> t{
+                [&](auto duration, auto count) { dur = duration.count(); cnt = count; }};
+
+            std::mutex m1, m2;
+            gbassert(locked_call([] { return 1; }, m1, m2) == 1);
+
+            auto v1{ 0 }, v2{ 0 };
+            {
+                auto _1{ t.make_scope_timer() };
+                raii r{ [&] { v1 = 1; }, [&] { v2 = 2; } };
+                gbassert(v1 == 1);
+            }
+            gbassert(v2 == 2);
         }
-        gbassert(v2 == 2);
+        gbassert(dur < 10);
+        gbassert(cnt == 1);
     }
 }
