@@ -131,11 +131,11 @@ namespace gb::yadro::util
                             }
                             catch (std::exception& ex)
                             {
-                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "FAILED, ", ex.what());
+                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED\n", ex.what());
                             }
                             catch (...)
                             {
-                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "FAILED, unknown exception");
+                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED, unknown exception");
                             }
                         };
 
