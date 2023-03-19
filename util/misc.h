@@ -107,6 +107,26 @@ namespace gb::yadro::util
     template<class OnExit, class OnEntry>
     raii(OnEntry, OnExit)->raii<OnExit>;
 
+    //-------------------------------------------------------------------------
+    // retainer class exchanges value of the variable with the new_value
+    // restores original value on destruction
+    template<class T>
+    struct retainer
+    {
+        template<class U>
+        retainer(T& var, U&& new_value) : _var(var), _old_value(std::move(var)) 
+        {
+            var = std::forward<U>(new_value);
+        }
+        ~retainer() { _var = std::move(_old_value); }
+    private:
+        T& _var;
+        T _old_value;
+    };
+
+    template<class T, class U>
+    retainer(T&, U&&) -> retainer<T>;
+
     //---------------------
     // span 3-way comparison
     template<class T1, std::size_t Extent1, class T2, std::size_t Extent2>

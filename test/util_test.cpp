@@ -66,5 +66,12 @@ namespace
         }
         gbassert(dur < 10);
         gbassert(cnt == 1);
+
+        auto v{ 123 };
+        {
+            auto _{ retainer(v, 321) };
+            gbassert(v == 321);
+        }
+        gbassert(v == 123);
     }
 }
