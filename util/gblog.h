@@ -39,6 +39,7 @@
 #include <fstream>
 #include <concepts>
 #include <process.h> // for getpid
+#include <cassert>
 
 // log utilities
 namespace gb::yadro::util
@@ -54,8 +55,9 @@ namespace gb::yadro::util
         friend auto& operator<< (std::ostream& os, const tab& p)
         {
             auto pos = os.tellp();
+            assert(pos != -1);
             if (pos < p.position)
-                os << std::string(p.position - pos, p.fill_char);
+                os << std::string(static_cast<std::size_t>(p.position - pos), p.fill_char);
             else
                 os << p.fill_char;
             return os;

@@ -46,7 +46,12 @@
 namespace gb::yadro::container
 {
     // compact graph representation: container of edges and container of nodes (vertexes)
+#ifdef YADRO_PRESERVE_LAYOUT
+    // to preserve data layout between 32-bit and 64-bit datastructures
     using index_t = std::uint64_t;
+#else
+    using index_t = std::size_t;
+#endif
     constexpr index_t invalid_index = -1;
 
     namespace detail
