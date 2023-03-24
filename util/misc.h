@@ -165,14 +165,4 @@ namespace gb::yadro::util
             std::char_traits<char>::compare(
                 s1, s2, std::char_traits<char>::length(s1)) == 0;
     }
-
-    //-------------------------------------------------------------------------
-    const auto to_string = [](auto&&... args)
-    {
-        std::stringstream ss;
-        if constexpr (sizeof ...(args) != 0) // avoid -Werror=unused-value
-            (ss << ... << args);
-        return ss.str();
-    };
-
 }

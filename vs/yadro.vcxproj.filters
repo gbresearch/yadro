@@ -67,6 +67,10 @@
     <ClInclude Include="..\util\file_mutex.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\include\yadro.h" />
+    <ClInclude Include="..\util\gbwin.h">
+      <Filter>util</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

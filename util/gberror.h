@@ -34,10 +34,19 @@
 #include <functional>
 #include <string>
 #include <source_location>
-#include "misc.h"
 
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    // to_string function to convert multiple parameters to a string
+    const auto to_string = [](auto&&... args)
+    {
+        std::stringstream ss;
+        if constexpr (sizeof ...(args) != 0) // avoid -Werror=unused-value
+            (ss << ... << args);
+        return ss.str();
+    };
+
     //-------------------------------------------------------------------------
     // a generic error type
     template<unsigned ErrNo, class ErrorBase = std::runtime_error>
