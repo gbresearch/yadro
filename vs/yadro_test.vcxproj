@@ -71,19 +71,19 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(OutDir)obj\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <OutDir>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(OutDir)obj\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(OutDir)obj\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(OutDir)obj\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -100,7 +100,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
+      <Command>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Running tests</Message>
@@ -120,7 +120,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
+      <Command>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Running tests</Message>
@@ -144,7 +144,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
+      <Command>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Running tests</Message>
@@ -168,7 +168,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>$(SolutionDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
+      <Command>$(ProjectDir)$(ProjectName)\$(Platform)\$(Configuration)\$(TargetFileName)</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Running tests</Message>
