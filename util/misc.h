@@ -33,11 +33,44 @@
 #include <span>
 #include <compare>
 #include <utility>
+#include <iostream>
+#include <chrono>
+#include <cmath>
 
 // miscellaneous utilities
 
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    // hash functions
+    //-------------------------------------------------------------------------
+    inline auto make_hash(const char* str) { return std::hash<std::string>{}(str); }
+    inline auto make_hash(const wchar_t* str) { return std::hash<std::wstring>{}(str); }
+    inline auto make_hash(auto&& v) { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
+    // TODO: remove after experiment
+    inline auto make_hash(unsigned v) { return v; };
+
+    inline auto make_hash(auto&& v, auto&&... ts)
+    {
+        auto seed = make_hash(v);
+        ((seed ^= make_hash(ts) + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
+        return seed;
+    }
+
+    //-------------------------------------------------------------------------
+    // DateTime conversion
+    inline auto datetime_to_chrono(double datetime)
+    {
+        using namespace std::chrono_literals;
+        auto days = unsigned(datetime);
+        auto hours = unsigned((datetime - days) * 24);
+        auto mins = unsigned(((datetime - days) * 24 - hours) * 60);
+        auto secs = std::lround((((datetime - days) * 24 - hours) * 60 - mins) * 60);
+        return std::chrono::sys_days{ 1899y / 12 / 30 } + std::chrono::days(days)
+            + std::chrono::hours(hours)
+            + std::chrono::minutes(mins)
+            + std::chrono::seconds(secs);
+    }
     //-------------------------------------------------------------------------
     // resource locked with mutex from construction to destruction
     //-------------------------------------------------------------------------

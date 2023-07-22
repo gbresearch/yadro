@@ -419,12 +419,14 @@ namespace gb::yadro::archive
             {
                 if constexpr (std::is_same_v<key_type, value_type>)
                 {
+                    // set
                     key_type tmp;
                     a(tmp);
                     t.insert(std::move(tmp));
                 }
                 else
                 {
+                    // map
                     std::pair<typename std::remove_cvref_t<T>::key_type, typename std::remove_cvref_t<T>::mapped_type> tmp;
                     a(tmp);
                     t.insert(std::move(tmp));
@@ -468,12 +470,14 @@ namespace gb::yadro::archive
             {
                 if constexpr (std::is_same_v<key_type, value_type>)
                 {
+                    // set
                     key_type tmp;
                     a(tmp);
                     t.insert(std::move(tmp));
                 }
                 else
                 {
+                    // map
                     std::pair<typename std::remove_cvref_t<T>::key_type, typename std::remove_cvref_t<T>::mapped_type> tmp;
                     a(tmp);
                     t.insert(std::move(tmp));

@@ -182,7 +182,7 @@ namespace gb::yadro::util
         return accumulating_timer<time_unit, clock, mutex>(
             [timer_name = std::move(name), master = &master_timer](auto duration, auto count)
         {
-            const auto& duration_s = std::to_string(duration.count()) + ' ' + get_duration_suffix<time_unit>();
+            auto duration_s = std::to_string(duration.count()) + ' ' + get_duration_suffix<time_unit>();
 
             if (master->get_duration().count()) {
                 auto percentage = 100.0 * duration.count() / std::chrono::duration_cast<time_unit>(master->get_duration()).count();
@@ -190,7 +190,7 @@ namespace gb::yadro::util
                     timer_name.c_str(), duration_s.c_str(), percentage, count);
             }
             else {
-                printf(":SLAVE TIMER: %s time: %s, count: %zu%s\n",
+                printf(":SLAVE TIMER: %s time: %s, count: %zu\n",
                     timer_name.c_str(), duration_s.c_str(), count);
             }
         });
