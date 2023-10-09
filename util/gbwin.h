@@ -27,8 +27,8 @@ namespace gb::yadro::util
             _handle = LoadLibraryW(dll_name);
         }
 #if defined(__cplusplus) && (__cplusplus >= 201103L)
-        dll(dll&& other) : _handle(other._handle) { other._handle = nullptr; }
-        dll& operator = (dll&& other)
+        dll(dll&& other) noexcept : _handle(other._handle) { other._handle = nullptr; }
+        dll& operator = (dll&& other) noexcept
         {
             _handle = other._handle;
             other._handle = nullptr;

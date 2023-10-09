@@ -36,11 +36,15 @@
 #include <iostream>
 #include <chrono>
 #include <cmath>
+#include <variant>
 
 // miscellaneous utilities
 
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    inline auto almost_equal = [](auto first, auto second, auto error) { return std::abs(first - second) <= error; };
+
     //-------------------------------------------------------------------------
     // hash functions
     //-------------------------------------------------------------------------
@@ -53,10 +57,35 @@ namespace gb::yadro::util
     inline auto make_hash(auto&& v, auto&&... ts)
     {
         auto seed = make_hash(v);
-        ((seed ^= make_hash(ts) + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
+        if constexpr (sizeof ...(ts) != 0)
+            ((seed ^= make_hash(ts) + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
+        
         return seed;
     }
 
+    // pair, tuple, array
+    inline constexpr auto make_hash(auto&& v) requires requires { std::get<0>(v); }
+    {
+        return std::apply([](auto&&... t) { return make_hash(t...); }, v);
+    }
+
+    template<class ...T>
+    inline constexpr auto make_hash(std::variant<T...>&& var)
+    {
+        return std::visit([](auto&& v) { return make_hash(v); }, var);
+    }
+
+#if defined(clang_p1061)
+    // https://gcc.godbolt.org/z/sMdqMY4Yv
+    // https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/p1061r5.html
+    inline constexpr auto make_hash(auto&& t) requires (std::is_class_v<std::remove_cvref_t<decltype(t)>>)
+    {
+        auto [...a] = std::forward<decltype(t)>(t);
+        return make_hash(a...);
+    }
+#endif
+
+    using make_hash_t = decltype([](auto&& v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)); });
     //-------------------------------------------------------------------------
     // DateTime conversion
     inline auto datetime_to_chrono(double datetime)
