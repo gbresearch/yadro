@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cmath>
 #include <variant>
+#include <string>
 
 // miscellaneous utilities
 
@@ -227,4 +228,64 @@ namespace gb::yadro::util
             std::char_traits<char>::compare(
                 s1, s2, std::char_traits<char>::length(s1)) == 0;
     }
+
 }
+
+//-------------------------------------------------------------------------------------------------
+// Windows specific
+
+#if defined(_WIN32) || defined(_WIN64) || defined(_MSC_VER)
+#include <filesystem>
+
+#include <Windows.h>
+#include <Rpcdce.h>
+#undef min
+#undef max
+
+#pragma comment(lib, "Rpcrt4")
+
+namespace gb::yadro::util
+{
+    //------------------------------------------------------------------------------
+    // GUID 36 chars including the hyphens: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    inline auto get_uuid_wstring()
+    {
+        UUID uuid;
+
+        if (auto status = UuidCreate(&uuid); status == RPC_S_OK)
+        {
+            wchar_t guid_string[40]{};
+            if (auto result = StringFromGUID2(uuid, guid_string, sizeof(guid_string) / sizeof(guid_string[0])); result > 0)
+                return std::wstring(guid_string);
+            else
+                throw std::runtime_error("StringFromGUID2 failed with error " + std::to_string(result));
+        }
+        else
+            throw std::runtime_error("UuidCreate failed with error " + std::to_string(status));
+    }
+    
+    
+    inline auto get_uuid_string()
+    {
+        auto wuuid = get_uuid_wstring();
+        if (auto size_needed = WideCharToMultiByte(CP_UTF8, 0, wuuid.data(), (int)wuuid.size(), nullptr, 0, nullptr, nullptr);
+            size_needed > 0)
+        {
+            std::string result(size_needed, 0);
+            WideCharToMultiByte(CP_UTF8, 0, wuuid.data(), (int)wuuid.size(), result.data(), size_needed, nullptr, nullptr);
+            return result;
+        }
+        else
+            throw std::runtime_error("WideCharToMultiByte() failed: " + std::to_string(size_needed));
+
+        // deprecated
+        //return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.to_bytes(get_uuid_wstring());
+    }
+
+    inline auto get_temp_file_path(const std::string& extension = ".tmp")
+    {
+        return std::filesystem::temp_directory_path() / (get_uuid_string() + extension);
+    }
+}
+
+#endif
