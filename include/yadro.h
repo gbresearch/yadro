@@ -16,3 +16,4 @@
 #include "../util/misc.h"
 #include "../util/traits.h"
 #include "../util/gbwin.h"
+#include "../util/gnuplot.h"

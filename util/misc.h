@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2022, Gene Bushuyev
+//  Copyright (C) 2011-2023, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -101,6 +101,22 @@ namespace gb::yadro::util
             + std::chrono::minutes(mins)
             + std::chrono::seconds(secs);
     }
+
+    //-------------------------------------------------------------------------
+    // tokenize string based on specified delimiter
+    //-------------------------------------------------------------------------
+    template<class T>
+    auto tokenize(const std::basic_string<T>& input, T separator)
+    {
+        std::vector<std::basic_string<T>> tokens;
+        std::basic_istringstream<T> token_stream(input);
+
+        for (std::string token;  std::getline(token_stream, token, separator);)
+            tokens.push_back(token);
+
+        return tokens;
+    }
+
     //-------------------------------------------------------------------------
     // resource locked with mutex from construction to destruction
     //-------------------------------------------------------------------------
@@ -247,27 +263,33 @@ namespace gb::yadro::util
 namespace gb::yadro::util
 {
     //------------------------------------------------------------------------------
-    // GUID 36 chars including the hyphens: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    inline auto get_uuid_wstring()
+    // GUID 38 chars including the hyphens: "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}"
+    inline auto get_uuid_wstring(bool use_hyphens = false, bool use_braces = false)
     {
         UUID uuid;
 
         if (auto status = UuidCreate(&uuid); status == RPC_S_OK)
         {
             wchar_t guid_string[40]{};
-            if (auto result = StringFromGUID2(uuid, guid_string, sizeof(guid_string) / sizeof(guid_string[0])); result > 0)
-                return std::wstring(guid_string);
+            if (auto ret = StringFromGUID2(uuid, guid_string, sizeof(guid_string) / sizeof(guid_string[0])); ret > 0)
+            {
+                std::wstring result(guid_string);
+                if (!use_hyphens)
+                    std::erase(result, '-');
+                if (!use_braces)
+                    return result.substr(1, result.size() - 2);
+                return result;
+            }
             else
-                throw std::runtime_error("StringFromGUID2 failed with error " + std::to_string(result));
+                throw std::runtime_error("StringFromGUID2 failed with error " + std::to_string(ret));
         }
         else
             throw std::runtime_error("UuidCreate failed with error " + std::to_string(status));
     }
     
-    
-    inline auto get_uuid_string()
+    inline auto get_uuid_string(bool use_hyphens = false, bool use_braces = false)
     {
-        auto wuuid = get_uuid_wstring();
+        auto wuuid = get_uuid_wstring(use_hyphens, use_braces);
         if (auto size_needed = WideCharToMultiByte(CP_UTF8, 0, wuuid.data(), (int)wuuid.size(), nullptr, 0, nullptr, nullptr);
             size_needed > 0)
         {
@@ -282,6 +304,7 @@ namespace gb::yadro::util
         //return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.to_bytes(get_uuid_wstring());
     }
 
+    // unique file name in Windows temporary directory
     inline auto get_temp_file_path(const std::string& extension = ".tmp")
     {
         return std::filesystem::temp_directory_path() / (get_uuid_string() + extension);

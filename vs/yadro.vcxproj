@@ -126,6 +126,7 @@
     <ClInclude Include="..\util\gbtest.h" />
     <ClInclude Include="..\util\gbtimer.h" />
     <ClInclude Include="..\util\gbwin.h" />
+    <ClInclude Include="..\util\gnuplot.h" />
     <ClInclude Include="..\util\misc.h" />
     <ClInclude Include="..\util\traits.h" />
   </ItemGroup>
