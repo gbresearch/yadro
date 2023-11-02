@@ -37,10 +37,10 @@
 #include <stdexcept>
 #include <format>
 #include <cstdlib>
-#include "misc.h"
+#include "gbwin.h"
 
 //-------------------------------------------------------------------------------------------------
-// C++ interface for gnuplot
+// C++ interface for gnuplot (Windows only)
 //-------------------------------------------------------------------------------------------------
 
 namespace gb::yadro::util
