@@ -27,7 +27,6 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
-#include <vector>
 #include <thread>
 #include <mutex>
 #include <string>
@@ -40,12 +39,12 @@
 #include <concepts>
 #include <process.h> // for getpid
 #include <cassert>
+#include <map>
+#include <iostream>
 
 // log utilities
 namespace gb::yadro::util
 {
-    struct logger;
-
     //-----------------------------------------------------------------
     struct tab
     {
@@ -70,7 +69,7 @@ namespace gb::yadro::util
 
         log_record(auto&& ... msgs) : time_stamp(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())),
             thread_id(std::this_thread::get_id()),
-            pid(::getpid()) 
+            pid(::getpid())
         {
             write(std::forward<decltype(msgs)>(msgs)...);
         }
@@ -79,7 +78,7 @@ namespace gb::yadro::util
         {
             if (verbose)
                 output << "[" << std::put_time(std::localtime(&time_stamp), "%F %T") << "] [pid: " << pid << ", tid: " << thread_id
-                    << "]\t";
+                << "]\t";
             output << _msg << "\n";
         }
 
@@ -91,77 +90,175 @@ namespace gb::yadro::util
         }
 
     private:
-        friend struct logger;
-
         std::time_t time_stamp;
         std::thread::id thread_id;
         int pid;
         std::string _msg;
     };
 
+    template<class T1, class T2>
+    concept not_same_as = !std::same_as<T1, T2>;
+
+    template<class T>
+    concept c_binder = requires { {std::declval<T>().id}->std::convertible_to<int>; std::declval<T>() >> std::cout; };
+    template<class T>
+    concept c_not_binder = !c_binder<T>;
+
     //-----------------------------------------------------------------
-    // usage: logger.write(a,b,c,pad_to(n),...);
+    // thread-safe logger
+    // 
+    // example:
+    // 
+    // logger log(0_log >> std::cout >> "file.txt" >> std::err, 1_log >> "debug.log");
+    // log.writeln(a,b,c,pad_to(n),...); // writes to 0_log, i.e. std::cout, file "file.txt", and std::err
+    // log.writeln(1_log, "debug stream"); // writes to 1_log, i.e. file "debug.log"
+    // log.add_streams(1_log >> "another.file"); // add file stream "another.file" to 1_log
+    // log.add_stream("another_file.log"); // add file stream "another.file" to 0_log
+    //
+    // another example, create a log hierarchy:
+    // inline const auto debug_log = 2_log >> "program-debug.log"; // debug logs go to only "program-debug.log" file
+    // inline const auto info_log = 1_log >> "program-info.log" >> debug_log; // info logs go to "program-info.log" and debug logs
+    // inline const auto default_log = 0_log >> std::cout >> "program.log" >> info_log; // default logs go to all streams
+    // logger log1(default_log, debug_log, info_log); // enable all logs
+    // write to specific logs
+    // log.writeln(default_log, "default log");
+    // log.writeln(info_log, "info log");
+    // log.writeln(debug_log, "debug log");
     //-----------------------------------------------------------------
-    struct logger
+    class logger
     {
-        logger(auto&& ... streams)
+        template<class ...T> struct stream_binder;
+    public:
+
+        logger() = default;
+
+        logger(auto&& ...binders) try
+            // can't move outside, because of VC++ bug
+            // error C2600: cannot define a compiler-generated special member function (must be declared in the class first)
+            // https://developercommunity.visualstudio.com/t/C-compiler-bug:-error-C2600:-logger::/10509123
         {
-            add_streams(std::forward<decltype(streams)>(streams)...);
-        }
-
-        auto writeln(auto&& ... msg) const
-        {
-            log_record rec{ std::forward<decltype(msg)>(msg)... };
-
-            if (_file_streams.empty() && _streams.empty())
-                throw std::runtime_error("logger: no associated streams");
-
-            if (!_file_streams.empty())
-            {
-                std::lock_guard _(_m1);
-                for (auto& fs : _file_streams)
-                    rec.print(*fs, _verbose);
-            }
-            if (!_streams.empty())
-            {
-                std::lock_guard _(_m2);
-                for (auto& fs : _streams)
-                    rec.print(*fs, _verbose);
-            }
-        }
-
-        void add_streams(auto&& ... streams) try
-        {
-            (add_stream(std::forward<decltype(streams)>(streams)), ...);
+            add_streams(std::forward<decltype(binders)>(binders)...);
         }
         catch (std::exception& e)
         {
-            std::cerr << e.what() << std::endl;
+            std::cerr << "failed to initialize logger: " << e.what() << std::endl;
         }
         catch (...)
         {
-            std::cerr << "failed to initialize streams" << std::endl;
+            std::cerr << "failed to initialize logger: unknown error" << std::endl;
         }
+
+        auto& writeln(const stream_binder<>& binder, auto&& ... msg) const;
+
+        auto& writeln(not_same_as<stream_binder<>> auto&& ... msgs) const;
+
+        auto& add_streams(c_binder auto&& ... binders);
+
+        auto& add_streams(c_not_binder auto&& ... streams);
+
+        void flush();
 
         void set_verbose(bool v) { _verbose = v; }
         bool get_verbose() const { return _verbose; }
 
     private:
-        void add_stream(const std::string& file_name)
-        {
-            auto ofs = std::make_unique<std::ofstream>(file_name);
-            if (!ofs)
-                throw std::runtime_error("failed to open: " + file_name);
-            _file_streams.push_back(std::move(ofs));
-        }
-        void add_stream(std::ostream& os)
-        {
-            _streams.push_back(&os);
-        }
         bool _verbose{ false };
-        std::vector<std::unique_ptr<std::ofstream>> _file_streams;
-        std::vector<std::ostream*> _streams;
-        mutable std::mutex _m1;
-        mutable std::mutex _m2;
+        std::map<std::string, std::unique_ptr<std::ofstream>> _name_map; // {file_name, stream}
+        std::multimap<int, std::ostream*> _log_map; // { category, stream }
+        mutable std::mutex _m;
+
+        template<class ...T>
+        struct stream_binder
+        {
+            const int id;
+            std::tuple<T...> streams;
+
+            auto operator>> (const std::string& name) const
+            {
+                return stream_binder<T..., std::string>{id, std::tuple_cat(streams, std::tuple(name))};
+            }
+            auto operator>> (std::ostream& os) const
+            {
+                return stream_binder<T..., std::ostream*>{id, std::tuple_cat(streams, std::tuple(&os))};
+            }
+            template<class ...U>
+            auto operator>> (const stream_binder<U...>& other) const
+            {
+                return stream_binder<T..., U...>{id, std::tuple_cat(streams, other.streams)};
+            }
+        };
+
+        friend consteval auto operator""_log(unsigned long long id);
+
+        template<class...T>
+        auto add_stream_binder(const stream_binder<T...>& binder)
+        {
+            auto add = [this]<std::size_t ...I>(auto && binder, std::index_sequence<I...>)
+            {
+                (add_stream(binder.id, std::get<I>(binder.streams)), ...);
+            };
+            add(binder, std::index_sequence_for<T...>{});
+        }
+
+        auto add_stream(int cat, const std::string& file_name)
+        {
+            if (auto it = _name_map.find(file_name); it != _name_map.end())
+            {
+                _log_map.insert({ cat, it->second.get() });
+            }
+            else
+            {
+                auto ofs = std::make_unique<std::ofstream>(file_name);
+                if (!*ofs)
+                    throw std::runtime_error("failed to open log file: " + file_name);
+
+                _log_map.insert({ cat, ofs.get() });
+                _name_map[file_name] = std::move(ofs);
+            }
+        }
+
+        auto add_stream(int cat, std::ostream* os)
+        {
+            _log_map.insert({ cat, os });
+        }
     };
+
+    inline consteval auto operator""_log(unsigned long long id) { return logger::stream_binder<>{ (int)id }; }
+
+
+    inline auto& logger::writeln(const stream_binder<>& binder, auto&& ... msg) const
+    {
+        log_record rec{ std::forward<decltype(msg)>(msg)... };
+
+        std::lock_guard _(_m);
+        for (auto [beg, end] = _log_map.equal_range(binder.id); beg != end; ++beg)
+            rec.print(*beg->second, _verbose);
+
+        return *this;
+    }
+
+    inline auto& logger::writeln(not_same_as<stream_binder<>> auto&& ... msgs) const
+    {
+        return writeln(stream_binder<>{0}, msgs...);
+    }
+
+    inline auto& logger::add_streams(c_binder auto&& ... binders)
+    {
+        std::lock_guard _(_m);
+        (add_stream_binder(binders), ...);
+        return *this;
+    }
+
+    inline auto& logger::add_streams(c_not_binder auto&& ... streams)
+    {
+        return add_streams((stream_binder<>{0} >> std::forward<decltype(streams)>(streams)) ...);
+    }
+
+    inline void logger::flush()
+    {
+        for (auto&& stream : _name_map)
+            stream.second->flush();
+        for (auto&& stream : _log_map)
+            stream.second->flush();
+    }
 }

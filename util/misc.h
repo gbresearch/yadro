@@ -38,6 +38,7 @@
 #include <cmath>
 #include <variant>
 #include <string>
+#include <tuple>
 
 // miscellaneous utilities
 
@@ -87,6 +88,62 @@ namespace gb::yadro::util
 #endif
 
     using make_hash_t = decltype([](auto&& v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)); });
+    
+    //-------------------------------------------------------------------------
+    // tuple functions
+    //-------------------------------------------------------------------------
+
+    //-------------------------------------------------------------------------
+    // split tuple by index I
+    template<std::size_t I, class...T>
+    inline auto tuple_split(const std::tuple<T...>& t)
+    {
+        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<Index...>)
+        {
+            return std::tuple(std::get<First + Index>(t)...);
+        };
+
+        if constexpr (I == 0)
+            return std::tuple(std::tuple{}, t);
+        else if constexpr (I >= sizeof ...(T))
+            return std::tuple(t, std::tuple{});
+        else
+            return std::tuple(make_tuple_from<0>(t, std::make_index_sequence<I>), 
+                make_tuple_from<I>(t, std::make_index_sequence<sizeof...(T) - I>));
+    }
+
+    //-------------------------------------------------------------------------
+    // call function fn for each element of the tuple
+    inline auto tuple_foreach(auto&& t, auto&& fn) requires requires { std::get<0>(t); }
+    {
+        auto call = []<std::size_t ...Index>(auto&& t, auto&& fn, std::index_sequence<Index...>)
+        {
+            (std::invoke(std::forward<decltype(fn)>(fn), std::get<Index>(std::forward<decltype(t)>(t))), ...);
+        };
+
+        call(std::forward<decltype(t), decltype(fn)>(fn), std::index_sequence_for<decltype(t)>{});
+    }
+
+    //-------------------------------------------------------------------------
+    // transform a tuple to another tuple where each element is the result of calling transform_fn
+    inline auto tuple_transform(auto&& t, auto&& transform_fn) requires requires { std::get<0>(t); }
+    {
+        auto call = []<std::size_t ...Index>(auto && t, auto && fn, std::index_sequence<Index...>)
+        {
+            return std::tuple(std::invoke(std::forward<decltype(fn)>(fn), std::get<Index>(std::forward<decltype(t)>(t)))...);
+        };
+
+        return call(std::forward<decltype(t)>(t), std::forward<decltype(transform_fn)>(transform_fn), std::index_sequence_for<decltype(t)>{});
+    }
+
+    //-------------------------------------------------------------------------
+    // apply reduce_fn to a tuple which is transformed using transfrom_fn
+    inline auto tuple_transform_reduce(auto&& t, auto&& transform_fn, auto&& reduce_fn) requires requires { std::get<0>(t); }
+    {
+        return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(std::forward<decltype(t)>(t), 
+            std::forward<decltype(transform_fn)>(transform_fn)));
+    }
+
     //-------------------------------------------------------------------------
     // DateTime conversion
     inline auto datetime_to_chrono(double datetime)
