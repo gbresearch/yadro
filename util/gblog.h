@@ -69,7 +69,10 @@ namespace gb::yadro::util
     concept c_binder = requires { {std::declval<T>().id}->std::convertible_to<int>; std::declval<T>() >> std::cout; };
     template<class T>
     concept c_not_binder = !c_binder<T>;
-
+    namespace literals
+    {
+        consteval auto operator""_log(unsigned long long id);
+    }
     //-----------------------------------------------------------------
     // thread-safe logger
     // 
@@ -97,7 +100,7 @@ namespace gb::yadro::util
 
     struct logger
     {
-        friend consteval auto operator""_log(unsigned long long id);
+        friend consteval auto literals::operator""_log(unsigned long long id);
 
         logger() = default;
 
@@ -210,9 +213,6 @@ namespace gb::yadro::util
         }
     };
 
-    inline consteval auto operator""_log(unsigned long long id) { return logger::stream_binder<>{ (int)id }; }
-
-
     inline auto& logger::writeln(c_binder auto&& binder, auto&& ... msg) const
     {
         std::lock_guard _(_m);
@@ -262,5 +262,7 @@ namespace gb::yadro::util
             stream.second->flush();
     }
 
-    inline auto logger::operator() () const { return log_proxy(*this, 0_log); }
+    inline consteval auto literals::operator""_log(unsigned long long id) { return logger::stream_binder<>{ (int)id }; }
+
+    inline auto logger::operator() () const { using namespace literals;  return log_proxy(*this, 0_log); }
 }
