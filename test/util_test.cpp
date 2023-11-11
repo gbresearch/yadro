@@ -42,7 +42,7 @@ namespace
         std::ostringstream oss;
         logger log(oss);
         log() << "abc" << 1 << 2 << tab{ 10, '.' } << "pi=" << tab{ 15 } << 3.14;
-        gbassert(oss.str() == "abc12.....pi=  3.14\n");
+        gbassert(oss.str() == "abc12.....pi=  3.14");
     }
 
     GB_TEST(util, misc)

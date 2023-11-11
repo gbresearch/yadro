@@ -65,14 +65,15 @@ namespace gb::yadro::util
         }
     };
 
-    template<class T>
-    concept c_binder = requires { {std::declval<T>().id}->std::convertible_to<int>; std::declval<T>() >> std::cout; };
-    template<class T>
-    concept c_not_binder = !c_binder<T>;
     namespace literals
     {
         consteval auto operator""_log(unsigned long long id);
     }
+
+    template<class T>
+    concept c_binder = requires { {std::declval<T>().id}->std::convertible_to<int>; std::declval<T>() >> std::cout; };
+    template<class T>
+    concept c_not_binder = !c_binder<T>;
     //-----------------------------------------------------------------
     // thread-safe logger
     // 
@@ -86,7 +87,7 @@ namespace gb::yadro::util
     // log.add_stream("another_file.log"); // add file stream "another.file" to 0_log
     //
     // another example, create a log hierarchy:
-    // inline const auto debug_log = 2_log >> "program-debug.log"; // debug logs go to only "program-debug.log" file
+    // inline const auto debug_log = 2_log >> "program-debug.log" >> logger::verbose_tag{}; // debug logs go to only "program-debug.log" file, set verbose true
     // inline const auto info_log = 1_log >> "program-info.log" >> debug_log; // info logs go to "program-info.log" and debug logs
     // inline const auto default_log = 0_log >> std::cout >> "program.log" >> info_log; // default logs go to all streams
     // logger log1(default_log, debug_log, info_log); // enable all logs
@@ -101,6 +102,7 @@ namespace gb::yadro::util
     struct logger
     {
         friend consteval auto literals::operator""_log(unsigned long long id);
+        struct verbose_tag {};
 
         logger() = default;
 
@@ -123,8 +125,9 @@ namespace gb::yadro::util
         auto operator() (c_binder auto&& ...binders) const { return log_proxy(*this, std::forward<decltype(binders)>(binders)...); }
         auto operator() () const; // using default binder
 
-        auto& writeln(c_binder auto&& binder, auto&& ... msg) const;
-        auto& writeln(c_not_binder auto&& ... msgs) const; // using default binder
+        auto& write(c_binder auto&& binder, auto&& ... msg) const;
+        auto& write(c_not_binder auto&& ... msgs) const; // using default binder
+        auto& writeln(auto&& ... params) const;
 
         auto& add_streams(c_binder auto&& ... binders);
         auto& add_streams(c_not_binder auto&& ... streams); // using default binder
@@ -145,7 +148,12 @@ namespace gb::yadro::util
         {
             const int id;
             std::tuple<T...> streams;
+            bool verbose = false;
 
+            auto operator>> (verbose_tag) const
+            {
+                return stream_binder<T...>{id, streams, true};
+            }
             template<class char_t>
             auto operator>> (const char_t* name) const
             {
@@ -167,14 +175,14 @@ namespace gb::yadro::util
                 return stream_binder<T..., U...>{id, std::tuple_cat(streams, other.streams)};
             }
         };
-
+        
         template<class ...Binder>
         struct log_proxy 
         {
             log_proxy(const logger& log, const Binder& ...binders) : log(log), binders(binders...) {}
-            ~log_proxy() { std::apply([this](auto&& binder) { log.writeln(binder, oss.str()); }, binders); }
+            ~log_proxy() { std::apply([this](auto&& binder) { log.write(binder, oss.str()); }, binders); }
             log_proxy& operator<< (auto&& v) { oss << std::forward<decltype(v)>(v); return *this; }
-        
+
         private:
             const logger& log;
             std::tuple<Binder...> binders;
@@ -213,7 +221,7 @@ namespace gb::yadro::util
         }
     };
 
-    inline auto& logger::writeln(c_binder auto&& binder, auto&& ... msg) const
+    inline auto& logger::write(c_binder auto&& binder, auto&& ... msg) const
     {
         std::lock_guard _(_m);
         std::set<std::ostream*> outputs;
@@ -224,22 +232,26 @@ namespace gb::yadro::util
             if (!outputs.contains(output)) // logs may countain the same streams, avoid repeating
             {
                 outputs.insert(output);
-                if (_verbose)
+                if (_verbose || binder.verbose)
                 {
                     auto time_stamp{ std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) };
                     (*output) << "[" << std::put_time(std::localtime(&time_stamp), "%F %T") << "] [pid: " << ::getpid()
                         << ", tid: " << std::this_thread::get_id() << "]\t";
                 }
                 ((*output) << ... << std::forward<decltype(msg)>(msg));
-                (*output) << "\n";
             }
         }
         return *this;
     }
 
-    inline auto& logger::writeln(c_not_binder auto&& ... msgs) const
+    inline auto& logger::write(c_not_binder auto&& ... msgs) const
     {
-        return writeln(stream_binder<>{0}, msgs...);
+        return write(stream_binder<>{0}, msgs...);
+    }
+
+    inline auto& logger::writeln(auto&& ... params) const
+    {
+        return write(std::forward<decltype(params)>(params), "\n");
     }
 
     inline auto& logger::add_streams(c_binder auto&& ... binders)
