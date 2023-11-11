@@ -182,6 +182,9 @@ namespace gb::yadro::util
             log_proxy(const logger& log, const Binder& ...binders) : log(log), binders(binders...) {}
             ~log_proxy() { std::apply([this](auto&& binder) { log.write(binder, oss.str()); }, binders); }
             log_proxy& operator<< (auto&& v) { oss << std::forward<decltype(v)>(v); return *this; }
+            log_proxy& operator<< (std::ios_base& (*func)(std::ios_base&)) { func(oss); return *this; }
+            log_proxy& operator<< (std::basic_ios<char, std::char_traits<char>>& (*func)(std::basic_ios<char, std::char_traits<char>>&)) { func(oss); return *this; }
+            log_proxy& operator<< (std::basic_ostream<char, std::char_traits<char>>& (*func)(std::basic_ostream<char, std::char_traits<char>>&)) { func(oss); return *this; }
 
         private:
             const logger& log;
