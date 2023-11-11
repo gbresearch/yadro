@@ -123,19 +123,19 @@ namespace gb::yadro::util
                                 test->run();
                                 test->_result = true;
                                 if(_log.get_verbose())
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "PASSED (",
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
-                                        " ms)");
+                                    _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "PASSED (" <<
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count() <<
+                                        " ms)";
                                 else
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "PASSED");
+                                    _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "PASSED";
                             }
                             catch (std::exception& ex)
                             {
-                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED\n", ex.what());
+                                _log() << rec.first << "." << test->_test_name << ":" << tab(20) << "FAILED\n" << ex.what();
                             }
                             catch (...)
                             {
-                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED, unknown exception");
+                                _log() << rec.first << "." << test->_test_name << ":" << tab(20) << "FAILED, unknown exception";
                             }
                         };
 
@@ -146,7 +146,7 @@ namespace gb::yadro::util
                     }
                     else
                     {
-                        _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "DISABLED");
+                        _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "DISABLED";
                     }
                 }
             }
@@ -155,9 +155,9 @@ namespace gb::yadro::util
                 f.get();
             if (_log.get_verbose())
             {
-                _log.writeln("run time: ",
-                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time).count(), 
-                    " ms");
+                _log() << "run time: " <<
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time).count()
+                    << " ms";
             }
             return _statistics();
         }
@@ -175,7 +175,7 @@ namespace gb::yadro::util
                     else ++failed;
                 }
             }
-            _log.writeln("tests passed: ", passed, ", failed: ", failed, ", disabled: ", disabled);
+            _log() << "tests passed: " << passed << ", failed: " << failed << ", disabled: " << disabled;
             return failed == 0;
         }
 
