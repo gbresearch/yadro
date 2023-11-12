@@ -100,10 +100,12 @@ namespace gb::yadro::util
 
         static void set_verbose(bool verbose)
         {
-            get()._log.set_verbose(verbose);
+            get()._verbose = verbose;
         }
 
     private:
+        bool _verbose{};
+
         bool _run()
         {
             std::vector<std::future<void>> futures;
@@ -122,10 +124,13 @@ namespace gb::yadro::util
                                 auto t = std::chrono::system_clock::now();
                                 test->run();
                                 test->_result = true;
-                                if(_log.get_verbose())
-                                    _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "PASSED (" <<
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count() <<
-                                        " ms)\n";
+                                if (_verbose)
+                                {
+                                    auto ts = time_stamp() + " ";
+                                    _log() << ts << rec.first << "." << test->_test_name << ":" << tab(ts.size() + 50) << "PASSED (" <<
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count()
+                                        << " ms)" << std::endl;
+                                }
                                 else
                                     _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "PASSED\n";
                             }
@@ -153,7 +158,7 @@ namespace gb::yadro::util
 
             for (auto&& f : futures)
                 f.get();
-            if (_log.get_verbose())
+            if (_verbose)
             {
                 _log() << "run time: " <<
                     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time).count()

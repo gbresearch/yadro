@@ -42,6 +42,8 @@
 #include <map>
 #include <set>
 #include <iostream>
+#include <type_traits>
+#include "misc.h"
 
 // log utilities
 namespace gb::yadro::util
@@ -65,53 +67,37 @@ namespace gb::yadro::util
         }
     };
 
-    namespace literals
-    {
-        consteval auto operator""_log(unsigned long long id);
-    }
-
-    template<class T>
-    concept c_binder = requires { {std::declval<T>().id}->std::convertible_to<int>; std::declval<T>() >> std::cout; };
-    template<class T>
-    concept c_not_binder = !c_binder<T>;
     //-----------------------------------------------------------------
     // thread-safe logger
     // 
     // example:
     // 
-    // logger log(0_log >> std::cout >> "file.txt" >> std::err, 1_log >> "debug.log");
-    // log.writeln(a,b,c,pad_to(n),...); // writes to 0_log, i.e. std::cout, file "file.txt", and std::err
-    // log.writeln(1_log, "debug stream"); // writes to 1_log, i.e. file "debug.log"
-    // log(1_log) << "debug stream"; // same as above
-    // log.add_streams(1_log >> "another.file"); // add file stream "another.file" to 1_log
-    // log.add_stream("another_file.log"); // add file stream "another.file" to 0_log
+    // logger log(std::cout, "file.txt"); // logger with default category, cout and file "file.txt" streams
+    // log() << a << b << pad_to(10) << c; // writes to default category
+    // log.add_streams("another.file"); // add file stream "another.file" to default category
+    // log() << abc ; // writes to default category
     //
     // another example, create a log hierarchy:
-    // inline const auto debug_log = 2_log >> "program-debug.log" >> logger::verbose_tag{}; // debug logs go to only "program-debug.log" file, set verbose true
-    // inline const auto info_log = 1_log >> "program-info.log" >> debug_log; // info logs go to "program-info.log" and debug logs
-    // inline const auto default_log = 0_log >> std::cout >> "program.log" >> info_log; // default logs go to all streams
-    // logger log1(default_log, debug_log, info_log); // enable all logs
-    // write to specific logs
-    // log.writeln(default_log, "default log");
-    // log.writeln(info_log, "info log");
-    // log.writeln(debug_log, "debug log #", 5);
-    // log(debug_log) << "debug log #5"; // same as above
-    // log(0_log, 1_log) << "message goes to 0_log and 1_log";
+    // inline gb::yadro::util::logger log;
+    // inline const auto debug_log = log >> R"*(tae_debug.log)*";
+    // inline const auto info_log = log >> R"*(tae_info.log)*";
+    // inline const auto default_log = log >> std::cout >> debug_log >> info_log >> R"*(tae.log)*";
+    // inline const auto cout_log = log >> std::cout >> nullptr; // binding to nullptr removes the category, used for debugging
+    // default_log << a << b << pad_to(10) << c;
+    // cout_log << abc; // writes nothing
     //-----------------------------------------------------------------
 
     struct logger
     {
-        friend consteval auto literals::operator""_log(unsigned long long id);
-        struct verbose_tag {};
-
         logger() = default;
 
-        logger(auto&& ...binders_or_streams) try
+        // logger constructor, adding streams in default category
+        logger(auto&& ...streams) try
             // can't move outside, because of VC++ bug
             // error C2600: cannot define a compiler-generated special member function (must be declared in the class first)
             // https://developercommunity.visualstudio.com/t/C-compiler-bug:-error-C2600:-logger::/10509123
         {
-            add_streams(std::forward<decltype(binders_or_streams)>(binders_or_streams)...);
+            add_streams(std::forward<decltype(streams)>(streams)...);
         }
         catch (std::exception& e)
         {
@@ -122,86 +108,155 @@ namespace gb::yadro::util
             std::cerr << "failed to initialize logger: unknown error" << std::endl;
         }
 
-        auto operator() (c_binder auto&& ...binders) const { return log_proxy(*this, std::forward<decltype(binders)>(binders)...); }
-        auto operator() () const; // using default binder
+        auto operator() () { return cat_log{ 0, *this }; } // using default binder
 
-        auto& write(c_binder auto&& binder, auto&& ... msg) const;
-        auto& write(c_not_binder auto&& ... msgs) const; // using default binder
-        auto& writeln(auto&& ... params) const;
+        auto& write(auto&& ... args) const;
+        auto& writeln(auto&& ... args) const;
 
-        auto& add_streams(c_binder auto&& ... binders);
-        auto& add_streams(c_not_binder auto&& ... streams); // using default binder
+        auto& add_streams(auto&& ... streams); // adding streams in default category
+        void remove_category(auto&& category);
 
         void flush();
-
-        void set_verbose(bool v) { _verbose = v; }
-        bool get_verbose() const { return _verbose; }
+        auto operator>> (auto&& v) { return cat_log{ ++counter, *this } >> std::forward<decltype(v)>(v); }
 
     private:
-        bool _verbose{ false };
         std::map<std::string, std::unique_ptr<std::ofstream>> _name_map; // {file_name, stream}
         std::multimap<int, std::ostream*> _log_map; // { category, stream }
+        int counter{0};
         mutable std::mutex _m;
 
-        template<class ...T>
-        struct stream_binder
+        auto& write_cat(int cat, auto&& ... msg) const
         {
-            const int id;
-            std::tuple<T...> streams;
-            bool verbose = false;
+            std::lock_guard _(_m);
+            std::set<std::ostream*> outputs;
 
-            auto operator>> (verbose_tag) const
+            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
             {
-                return stream_binder<T...>{id, streams, true};
-            }
-            template<class char_t>
-            auto operator>> (const char_t* name) const
-            {
-                return stream_binder<T..., const char_t*>{id, std::tuple_cat(streams, std::tuple(name))};
-            }
-            template<class char_t, class traits_t, class alloc_t>
-            auto operator>> (const std::basic_string< char_t, traits_t, alloc_t>& name) const
-            {
-                return stream_binder<T..., std::basic_string< char_t, traits_t, alloc_t>>{id, std::tuple_cat(streams, std::tuple(name))};
-            }
-            template<class char_t, class traits_t>
-            auto operator>> (std::basic_ostream<char_t, traits_t>& os) const
-            {
-                return stream_binder<T..., std::basic_ostream<char_t, traits_t>*>{id, std::tuple_cat(streams, std::tuple(&os))};
-            }
-            template<class ...U>
-            auto operator>> (const stream_binder<U...>& other) const
-            {
-                return stream_binder<T..., U...>{id, std::tuple_cat(streams, other.streams)};
-            }
-        };
-        
-        template<class ...Binder>
-        struct log_proxy 
-        {
-            log_proxy(const logger& log, const Binder& ...binders) : log(log), binders(binders...) {}
-            ~log_proxy() { std::apply([this](auto&& binder) { log.write(binder, oss.str()); }, binders); }
-            log_proxy& operator<< (auto&& v) { oss << std::forward<decltype(v)>(v); return *this; }
-            log_proxy& operator<< (std::ios_base& (*func)(std::ios_base&)) { func(oss); return *this; }
-            log_proxy& operator<< (std::basic_ios<char, std::char_traits<char>>& (*func)(std::basic_ios<char, std::char_traits<char>>&)) { func(oss); return *this; }
-            log_proxy& operator<< (std::basic_ostream<char, std::char_traits<char>>& (*func)(std::basic_ostream<char, std::char_traits<char>>&)) { func(oss); return *this; }
-
-        private:
-            const logger& log;
-            std::tuple<Binder...> binders;
-            std::ostringstream oss;
-        };
-
-        template<class...T>
-        auto add_stream_binder(const stream_binder<T...>& binder)
-        {
-            std::apply([&](auto&& ... streams) 
+                auto output = beg->second;
+                if (!outputs.contains(output)) // logs may countain the same streams, avoid repeating
                 {
-                    (add_stream(binder.id, streams), ...);
-                }, binder.streams);
+                    outputs.insert(output);
+                    ((*output) << ... << std::forward<decltype(msg)>(msg));
+                }
+            }
+            return *this;
         }
 
-        auto add_stream(int cat, const std::string& file_name)
+        auto& write_cat(int cat, std::ios_base& (*func)(std::ios_base&)) const
+        {
+            std::lock_guard _(_m);
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
+            {
+                auto output = beg->second;
+                if (!outputs.contains(output)) // logs may countain the same streams, avoid repeating
+                {
+                    outputs.insert(output);
+                    std::invoke(func, *output);
+                }
+            }
+            return *this;
+        }
+
+        auto& write_cat(int cat, std::basic_ios<char, std::char_traits<char>>& (*func)(std::basic_ios<char, std::char_traits<char>>&)) const
+        {
+            std::lock_guard _(_m);
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
+            {
+                auto output = beg->second;
+                if (!outputs.contains(output)) // logs may countain the same streams, avoid repeating
+                {
+                    outputs.insert(output);
+                    std::invoke(func, *output);
+                }
+            }
+            return *this;
+        }
+
+        auto& write_cat(int cat, std::basic_ostream<char, std::char_traits<char>>& (*func)(std::basic_ostream<char, std::char_traits<char>>&)) const
+        {
+            std::lock_guard _(_m);
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
+            {
+                auto output = beg->second;
+                if (!outputs.contains(output)) // logs may countain the same streams, avoid repeating
+                {
+                    outputs.insert(output);
+                    std::invoke(func, *output);
+                }
+            }
+            return *this;
+        }
+
+        struct cat_log // category logger
+        {
+            const int id;
+            logger& log;
+
+            template<class char_t>
+            auto& operator>> (const char_t* name) const
+            {
+                log.add_stream(id, name);
+                return *this;
+            }
+            template<class char_t, class traits_t, class alloc_t>
+            auto& operator>> (const std::basic_string< char_t, traits_t, alloc_t>& name) const
+            {
+                log.add_stream(id, name);
+                return *this;
+            }
+            template<class char_t, class traits_t>
+            auto& operator>> (std::basic_ostream<char_t, traits_t>& os) const
+            {
+                log.add_stream(id, os);
+                return *this;
+            }
+
+            auto& operator>> (const cat_log& other) const
+            {
+                log.add_stream(other.id, id);
+                return *this;
+            }
+
+            auto& operator>> (std::nullptr_t) const
+            {
+                log.remove_category(id);
+                return *this;
+            }
+
+            auto& write(auto&& ... msg) const
+            {
+                log.write_cat(id, std::forward<decltype(msg)>(msg)...);
+                return *this;
+            }
+
+            auto& operator<< (auto&& v) const 
+            { 
+                return write(std::forward<decltype(v)>(v)); 
+            }
+            auto& operator<< (std::ios_base& (*func)(std::ios_base&)) const
+            {
+                log.write_cat(id, func);
+                return *this;
+            }
+            auto& operator<< (std::basic_ios<char, std::char_traits<char>>& (*func)(std::basic_ios<char, std::char_traits<char>>&)) const
+            { 
+                log.write_cat(id, func);
+                return *this; 
+            }
+            auto& operator<< (std::basic_ostream<char, std::char_traits<char>>& (*func)(std::basic_ostream<char, std::char_traits<char>>&)) const
+            {
+                log.write_cat(id, func);
+                return *this;
+            }
+        };
+
+        void add_stream(int cat, const std::string& file_name)
         {
             if (auto it = _name_map.find(file_name); it != _name_map.end())
             {
@@ -218,57 +273,58 @@ namespace gb::yadro::util
             }
         }
 
-        auto add_stream(int cat, std::ostream* os)
+        void add_stream(int cat, std::ostream& os)
         {
-            _log_map.insert({ cat, os });
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
+                outputs.insert(beg->second);
+            
+            if(!outputs.contains(&os))
+                _log_map.insert({ cat, &os });
+        }
+
+        void add_stream(int from_cat, int to_cat) // merge category
+        {
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(to_cat); beg != end; ++beg)
+                outputs.insert(beg->second);
+
+            for (auto [beg, end] = _log_map.equal_range(from_cat); beg != end; ++beg)
+            {
+                if (!outputs.contains(beg->second))
+                    _log_map.insert({ to_cat, beg->second });
+            }
         }
     };
 
-    inline auto& logger::write(c_binder auto&& binder, auto&& ... msg) const
+    inline auto& logger::write(auto&& ... args) const
     {
-        std::lock_guard _(_m);
-        std::set<std::ostream*> outputs;
+        return write_cat(0, std::forward<decltype(args)>(args)...);
+    }
 
-        for (auto [beg, end] = _log_map.equal_range(binder.id); beg != end; ++beg)
-        {
-            auto output = beg->second;
-            if (!outputs.contains(output)) // logs may countain the same streams, avoid repeating
-            {
-                outputs.insert(output);
-                if (_verbose || binder.verbose)
-                {
-                    auto time_stamp{ std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) };
-                    (*output) << "[" << std::put_time(std::localtime(&time_stamp), "%F %T") << "] [pid: " << ::getpid()
-                        << ", tid: " << std::this_thread::get_id() << "]\t";
-                }
-                ((*output) << ... << std::forward<decltype(msg)>(msg));
-            }
-        }
+    inline auto& logger::writeln(auto&& ... args) const
+    {
+        return write(std::forward<decltype(args)>(args)..., "\n");
+    }
+
+    inline auto& logger::add_streams(auto&& ... streams)
+    {
+        (add_stream(0, std::forward<decltype(streams)>(streams)), ...);
         return *this;
     }
-
-    inline auto& logger::write(c_not_binder auto&& ... msgs) const
+    
+    inline void logger::remove_category(auto&& category)
     {
-        return write(stream_binder<>{0}, msgs...);
-    }
+        static_assert(std::is_convertible_v<decltype(category), int> || std::is_convertible_v<decltype(category), cat_log>);
 
-    inline auto& logger::writeln(auto&& ... params) const
-    {
-        return write(std::forward<decltype(params)>(params), "\n");
+        if constexpr(std::is_convertible_v<decltype(category), int>)
+            _log_map.erase(category);
+        else
+            _log_map.erase(category.id);
     }
-
-    inline auto& logger::add_streams(c_binder auto&& ... binders)
-    {
-        std::lock_guard _(_m);
-        (add_stream_binder(binders), ...);
-        return *this;
-    }
-
-    inline auto& logger::add_streams(c_not_binder auto&& ... streams)
-    {
-        return add_streams((stream_binder<>{0} >> std::forward<decltype(streams)>(streams)) ...);
-    }
-
+    
     inline void logger::flush()
     {
         for (auto&& stream : _name_map)
@@ -276,8 +332,4 @@ namespace gb::yadro::util
         for (auto&& stream : _log_map)
             stream.second->flush();
     }
-
-    inline consteval auto literals::operator""_log(unsigned long long id) { return logger::stream_binder<>{ (int)id }; }
-
-    inline auto logger::operator() () const { using namespace literals;  return log_proxy(*this, 0_log); }
 }

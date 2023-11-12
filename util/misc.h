@@ -38,6 +38,7 @@
 #include <cmath>
 #include <variant>
 #include <string>
+#include <sstream>
 #include <tuple>
 
 // miscellaneous utilities
@@ -142,6 +143,15 @@ namespace gb::yadro::util
     {
         return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(std::forward<decltype(t)>(t), 
             std::forward<decltype(transform_fn)>(transform_fn)));
+    }
+
+    //-------------------------------------------------------------------------
+    inline auto time_stamp()
+    {
+        auto tstamp{ std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) };
+
+        return (std::ostringstream{} << "[" << std::put_time(std::localtime(&tstamp), "%F %T")
+            << "] [pid: " << ::_getpid() << ", tid: " << std::this_thread::get_id() << "]").str();
     }
 
     //-------------------------------------------------------------------------
