@@ -76,21 +76,19 @@ namespace gb::yadro::util
             for (auto& rec : get()._tests) for (auto& test : rec.second) test->_policy = policy;
         }
         
-        static void disable_suites(const char* name, auto&& ... names)
+        static void disable_suites(auto&& ... names)
         {
-            get()._disable_suite(name);
-            if constexpr (sizeof ...(names) != 0)
-                disable_suites(names...);
+            (get()._disable_suite(names),...);
         }
         
-        static void disable_test(const char* suite, const char* test)
+        static void disable_tests(const char* suite, auto&& ... tests)
         {
-            get()._disable_test(suite, test);
+            (get()._disable_test(suite, tests), ...);
         }
 
         static void set_logger(auto&& ... streams)
         {
-            get()._log.add_streams(std::forward<decltype(streams)>(streams)...);
+            get()._log(std::forward<decltype(streams)>(streams)...);
         }
 
         static auto& get_logger()
@@ -127,20 +125,20 @@ namespace gb::yadro::util
                                 if (_verbose)
                                 {
                                     auto ts = time_stamp() + " ";
-                                    _log() << ts << rec.first << "." << test->_test_name << ":" << tab(ts.size() + 50) << "PASSED (" <<
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count()
-                                        << " ms)" << std::endl;
+                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + 50), "PASSED (",
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
+                                        " ms)");
                                 }
                                 else
-                                    _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "PASSED\n";
+                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "PASSED");
                             }
                             catch (std::exception& ex)
                             {
-                                _log() << rec.first << "." << test->_test_name << ":" << tab(20) << "FAILED\n" << ex.what() << "\n";
+                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED\n", ex.what());
                             }
                             catch (...)
                             {
-                                _log() << rec.first << "." << test->_test_name << ":" << tab(20) << "FAILED, unknown exception\n";
+                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED, unknown exception");
                             }
                         };
 
@@ -151,7 +149,7 @@ namespace gb::yadro::util
                     }
                     else
                     {
-                        _log() << rec.first << "." << test->_test_name << ":" << tab(50) << "DISABLED\n";
+                        _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "DISABLED");
                     }
                 }
             }
@@ -160,9 +158,9 @@ namespace gb::yadro::util
                 f.get();
             if (_verbose)
             {
-                _log() << "run time: " <<
-                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time).count()
-                    << " ms\n";
+                _log.writeln("run time: ",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time).count(),
+                    " ms");
             }
             return _statistics();
         }
@@ -180,7 +178,7 @@ namespace gb::yadro::util
                     else ++failed;
                 }
             }
-            _log() << "tests passed: " << passed << ", failed: " << failed << ", disabled: " << disabled << "\n";
+            _log.writeln("tests passed: ", passed, ", failed: ", failed, ", disabled: ", disabled);
             return failed == 0;
         }
 

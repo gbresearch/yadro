@@ -91,13 +91,13 @@ namespace gb::yadro::util
     {
         logger() = default;
 
-        // logger constructor, adding streams in default category
-        logger(auto&& ...streams) try
-            // can't move outside, because of VC++ bug
-            // error C2600: cannot define a compiler-generated special member function (must be declared in the class first)
-            // https://developercommunity.visualstudio.com/t/C-compiler-bug:-error-C2600:-logger::/10509123
+        // logger constructor, adding streams in default(0) category
+        explicit logger(auto&& ...streams) try
+        // can't move outside, because of VC++ bug
+        // error C2600: cannot define a compiler-generated special member function (must be declared in the class first)
+        // https://developercommunity.visualstudio.com/t/C-compiler-bug:-error-C2600:-logger::/10509123
         {
-            add_streams(std::forward<decltype(streams)>(streams)...);
+            (*this)(std::forward<decltype(streams)>(streams)...);
         }
         catch (std::exception& e)
         {
@@ -108,22 +108,26 @@ namespace gb::yadro::util
             std::cerr << "failed to initialize logger: unknown error" << std::endl;
         }
 
-        auto operator() () { return cat_log{ 0, *this }; } // using default binder
-
         auto& write(auto&& ... args) const;
         auto& writeln(auto&& ... args) const;
 
-        auto& add_streams(auto&& ... streams); // adding streams in default category
         void remove_category(auto&& category);
 
         void flush();
-        auto operator>> (auto&& v) { return cat_log{ ++counter, *this } >> std::forward<decltype(v)>(v); }
+        auto operator>> (auto&& v) { return cat_log{ counter++, *this } >> std::forward<decltype(v)>(v); }
+
+        auto operator() () { return cat_log{ 0, *this }; } // using default binder
+
+        auto operator() (auto&& ...streams) requires (sizeof...(streams) != 0)
+        {
+            return (cat_log{ counter++, *this } >> ... >> std::forward<decltype(streams)>(streams));
+        }
 
     private:
         std::map<std::string, std::unique_ptr<std::ofstream>> _name_map; // {file_name, stream}
         std::multimap<int, std::ostream*> _log_map; // { category, stream }
         int counter{0};
-        mutable std::mutex _m;
+        mutable std::recursive_mutex _m;
 
         auto& write_cat(int cat, auto&& ... msg) const
         {
@@ -193,6 +197,48 @@ namespace gb::yadro::util
             return *this;
         }
 
+        void add_stream(int cat, const std::string& file_name)
+        {
+            if (auto it = _name_map.find(file_name); it != _name_map.end())
+            {
+                _log_map.insert({ cat, it->second.get() });
+            }
+            else
+            {
+                auto ofs = std::make_unique<std::ofstream>(file_name);
+                if (!*ofs)
+                    throw std::runtime_error("failed to open log file: " + file_name);
+
+                _log_map.insert({ cat, ofs.get() });
+                _name_map[file_name] = std::move(ofs);
+            }
+        }
+
+        void add_stream(int cat, std::ostream& os)
+        {
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
+                outputs.insert(beg->second);
+            
+            if(!outputs.contains(&os))
+                _log_map.insert({ cat, &os });
+        }
+
+        void add_stream(int from_cat, int to_cat) // merge category
+        {
+            std::set<std::ostream*> outputs;
+
+            for (auto [beg, end] = _log_map.equal_range(to_cat); beg != end; ++beg)
+                outputs.insert(beg->second);
+
+            for (auto [beg, end] = _log_map.equal_range(from_cat); beg != end; ++beg)
+            {
+                if (!outputs.contains(beg->second))
+                    _log_map.insert({ to_cat, beg->second });
+            }
+        }
+
         struct cat_log // category logger
         {
             const int id;
@@ -235,9 +281,17 @@ namespace gb::yadro::util
                 return *this;
             }
 
-            auto& operator<< (auto&& v) const 
-            { 
-                return write(std::forward<decltype(v)>(v)); 
+            auto& writeln(auto&& ... msg) const
+            {
+                std::lock_guard _(log._m);
+                log.write_cat(id, std::forward<decltype(msg)>(msg)...);
+                log.write_cat(0, std::endl);
+                return *this;
+            }
+
+            auto& operator<< (auto&& v) const
+            {
+                return write(std::forward<decltype(v)>(v));
             }
             auto& operator<< (std::ios_base& (*func)(std::ios_base&)) const
             {
@@ -245,9 +299,9 @@ namespace gb::yadro::util
                 return *this;
             }
             auto& operator<< (std::basic_ios<char, std::char_traits<char>>& (*func)(std::basic_ios<char, std::char_traits<char>>&)) const
-            { 
+            {
                 log.write_cat(id, func);
-                return *this; 
+                return *this;
             }
             auto& operator<< (std::basic_ostream<char, std::char_traits<char>>& (*func)(std::basic_ostream<char, std::char_traits<char>>&)) const
             {
@@ -255,48 +309,6 @@ namespace gb::yadro::util
                 return *this;
             }
         };
-
-        void add_stream(int cat, const std::string& file_name)
-        {
-            if (auto it = _name_map.find(file_name); it != _name_map.end())
-            {
-                _log_map.insert({ cat, it->second.get() });
-            }
-            else
-            {
-                auto ofs = std::make_unique<std::ofstream>(file_name);
-                if (!*ofs)
-                    throw std::runtime_error("failed to open log file: " + file_name);
-
-                _log_map.insert({ cat, ofs.get() });
-                _name_map[file_name] = std::move(ofs);
-            }
-        }
-
-        void add_stream(int cat, std::ostream& os)
-        {
-            std::set<std::ostream*> outputs;
-
-            for (auto [beg, end] = _log_map.equal_range(cat); beg != end; ++beg)
-                outputs.insert(beg->second);
-            
-            if(!outputs.contains(&os))
-                _log_map.insert({ cat, &os });
-        }
-
-        void add_stream(int from_cat, int to_cat) // merge category
-        {
-            std::set<std::ostream*> outputs;
-
-            for (auto [beg, end] = _log_map.equal_range(to_cat); beg != end; ++beg)
-                outputs.insert(beg->second);
-
-            for (auto [beg, end] = _log_map.equal_range(from_cat); beg != end; ++beg)
-            {
-                if (!outputs.contains(beg->second))
-                    _log_map.insert({ to_cat, beg->second });
-            }
-        }
     };
 
     inline auto& logger::write(auto&& ... args) const
@@ -306,17 +318,14 @@ namespace gb::yadro::util
 
     inline auto& logger::writeln(auto&& ... args) const
     {
-        return write(std::forward<decltype(args)>(args)..., "\n");
+        std::lock_guard _(_m);
+        write(std::forward<decltype(args)>(args)...);
+        return write_cat(0, std::endl);
     }
 
-    inline auto& logger::add_streams(auto&& ... streams)
-    {
-        (add_stream(0, std::forward<decltype(streams)>(streams)), ...);
-        return *this;
-    }
-    
     inline void logger::remove_category(auto&& category)
     {
+        std::lock_guard _(_m);
         static_assert(std::is_convertible_v<decltype(category), int> || std::is_convertible_v<decltype(category), cat_log>);
 
         if constexpr(std::is_convertible_v<decltype(category), int>)
@@ -327,6 +336,7 @@ namespace gb::yadro::util
     
     inline void logger::flush()
     {
+        std::lock_guard _(_m);
         for (auto&& stream : _name_map)
             stream.second->flush();
         for (auto&& stream : _log_map)

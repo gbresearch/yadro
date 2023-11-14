@@ -37,8 +37,8 @@ int main()
     tester::set_verbose(true);
     tester::set_logger("yadro-test.log", std::cout);
     //tester::disable_suites("suite2");
-    //tester::disable_test("one", "mytest");
-    //tester::set_policy(std::launch::async);
+    //tester::disable_tests("one", "mytest", "mytest2");
+    tester::set_policy(std::launch::async);
     auto success = tester::run();
     return success ? 0 : -1;
 }
