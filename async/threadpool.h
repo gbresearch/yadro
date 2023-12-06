@@ -46,7 +46,7 @@
 
 #include "taskcontainer.h"
 
-namespace gb::async
+namespace gb::yadro::async
 {
     namespace detail
     {

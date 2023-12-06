@@ -285,7 +285,7 @@ namespace gb::yadro::util
             {
                 std::lock_guard _(log._m);
                 log.write_cat(id, std::forward<decltype(msg)>(msg)...);
-                log.write_cat(0, std::endl);
+                log.write_cat(id, std::endl);
                 return *this;
             }
 

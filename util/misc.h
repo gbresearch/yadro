@@ -40,12 +40,23 @@
 #include <string>
 #include <sstream>
 #include <tuple>
+#include <filesystem>
 
 // miscellaneous utilities
 
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
+    // creating overload set through inheritance
+    // e.g. auto v = overloaded([](int i, double j){ return i+j;}, [](int, float) { return 0; })(123, 1.);
+    template<class...T>
+    struct overloaded : T... { using T::operator()...; };
+
+    template<class...T>
+    overloaded(T&& ...t) -> overloaded<std::remove_cvref_t<T>...>;
+
+    //-------------------------------------------------------------------------
+    // compare two floating point numbers
     inline auto almost_equal = [](auto first, auto second, auto error) { return std::abs(first - second) <= error; };
 
     //-------------------------------------------------------------------------
@@ -236,6 +247,34 @@ namespace gb::yadro::util
         std::scoped_lock lock(mtx ...);
         return std::invoke(fun);
     }
+
+    //-------------------------------------------------------------------------
+    // clean up temporary files at program exit
+    struct tmp_file_cleaner_t final
+    {
+        // no public constructors
+        tmp_file_cleaner_t(const tmp_file_cleaner_t&) = delete;
+
+        // clean up files in destructor
+        ~tmp_file_cleaner_t()
+        {
+            std::lock_guard _(_m);
+            for (auto&& p : _tmpfiles)
+                std::filesystem::remove(p);
+        }
+        
+        // add file paths to be deleted at exit
+        static void add(const std::filesystem::path& p)
+        {
+            static tmp_file_cleaner_t cleaner{ private_tag{} };
+            (void)std::lock_guard(cleaner._m), cleaner._tmpfiles.push_back(p);
+        }
+    private:
+        struct private_tag {};
+        tmp_file_cleaner_t(private_tag) {}
+        std::vector<std::filesystem::path> _tmpfiles;
+        std::mutex _m;
+    };
 
     //-------------------------------------------------------------------------
     template<class OnExit>

@@ -30,8 +30,10 @@
 #include "../util/gblog.h"
 #include "../util/gbtimer.h"
 #include "../util/misc.h"
+#include "../util/gnuplot.h"
 
 #include <sstream>
+#include <string>
 
 namespace
 {
@@ -73,5 +75,78 @@ namespace
             gbassert(v == 321);
         }
         gbassert(v == 123);
+    }
+
+    GB_TEST(util, gnuplot)
+    {
+        auto golden = R"*(set multiplot layout 3,2 columnsfirst
+set pointsize 5
+set grid
+set xrange[0:5]
+plot "C:/Users/Gene/AppData/Local/Temp/AAD71D026F8A4862A0C7EC1608A00A63.gnuplot" using 1  title "first implicit pane" with steps
+set grid
+set xrange[0:7]
+plot "C:/Users/Gene/AppData/Local/Temp/AAD71D026F8A4862A0C7EC1608A00A63.gnuplot" using 1  notitle with lines
+set grid
+set xrange[0:5]
+plot "C:/Users/Gene/AppData/Local/Temp/AAD71D026F8A4862A0C7EC1608A00A63.gnuplot" using 1  notitle with lines, "C:/Users/Gene/AppData/Local/Temp/AAD71D026F8A4862A0C7EC1608A00A63.gnuplot" using 1  title "v" with steps, "C:/Users/Gene/AppData/Local/Temp/AF2EFCFD6F0D4431B529880D9697EEC3.gnuplot" using 1  notitle with lines
+set style fill solid 0.5 border
+set grid
+set xrange[0:6]
+plot  using 1  title "another_dv" with histograms lt rgb "red", sin(x)
+set xrange[0:10]
+set grid
+plot cos(x) title "cos(x)", sin(x)/(x + 1)
+unset multiplot)*";
+        std::vector<int> v{ 1,2,3,4,5 };
+        std::vector<double> d{ 1,20,13,14,25, 18 };
+
+        auto cmd = get_plot_cmd(2, "set pointsize 5"_cmd,
+            plot_t(v, "first implicit pane", plotstyle::s_step),
+            std::vector<double>{2, 5, 6, 9, 11, 10, 3},
+            pane(plot_t(std::vector<int>{10, 20, 30, 40, 50, 60}), plot_t(v, "v", plotstyle::s_step), std::vector<double>{2, 5, 6, 9, 11, 10, 3}),
+            "set style fill solid 0.5 border"_cmd, pane(plot_t(d, "another_dv", plotstyle::s_histogram, "red"), "sin(x)"_cmd),
+            "set xrange[0:10]"_cmd, "plot cos(x) title \"cos(x)\", sin(x)/(x + 1)"_cmd);
+
+        // remove file names
+        auto clean_str = [](const std::string& s)
+            {
+                std::stringstream ss(s);
+                std::ostringstream clean;
+
+                for (std::string str; std::getline(ss, str);)
+                {
+                    if (str.starts_with("plot"))
+                    {
+                        std::string quoted;
+                        // remove all quoted
+                        auto open_quote = false;
+                        for (auto c : str)
+                        {
+                            if (c == '"' && open_quote)
+                            {
+                                if (!quoted.ends_with(".gnuplot"))
+                                    clean << quoted << c;
+                                quoted.clear();
+                                open_quote = false;
+                            }
+                            else if (c == '"' && !open_quote)
+                            {
+                                quoted += c;
+                                open_quote = true;
+                            }
+                            else if (open_quote)
+                                quoted += c;
+                            else
+                                clean << c;
+                        }
+                    }
+                    else
+                        clean << str << "\n";
+                }
+                return clean.str();
+            };
+
+        gbassert(clean_str(cmd) == clean_str(golden));
     }
 }

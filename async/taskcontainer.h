@@ -35,7 +35,7 @@
 #include <future>
 
 
-namespace gb::async
+namespace gb::yadro::async
 {
     //---------------------------------------------------------------------
     template<class T, class Container>

@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2022, Gene Bushuyev
+//  Copyright (C) 2011-2023, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -59,23 +59,42 @@ namespace gb::yadro::util
         }
     };
 
+    //-------------------------------------------------------------------------
+    // predefined error types
+    //-------------------------------------------------------------------------
     using failed_assertion = error_t<0, std::logic_error>;
     using unreachable_error = error_t<1, std::logic_error>;
     using generic_error = error_t<1000>;
 
-    void gbassert(auto v, const std::string& msg = "", std::source_location location = std::source_location::current())
-        requires(std::invocable<decltype(v)> || std::convertible_to<decltype(v), bool>)
+    //-------------------------------------------------------------------------
+    template<class ErrorType>
+    inline void test_condition(const auto& cond, const std::string& msg = "", std::source_location location = std::source_location::current())
+        requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
-        if constexpr (std::invocable<decltype(v)>)
+        if constexpr (std::invocable<decltype(cond)>)
         {
-            if (!std::invoke(v))
-                throw failed_assertion("assertion failed (", location.file_name(), ':', location.line(), ')');
+            if (!std::invoke(cond))
+                throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
         }
         else
         {
-            if (!v)
-                throw failed_assertion("assertion failed (", location.file_name(), ':', location.line(), ')');
+            if (!cond)
+                throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
         }
+    }
+
+    //-------------------------------------------------------------------------
+    template<class ErrorType>
+    [[noreturn]] inline void failed_condition(const std::string& msg = "failed condition", std::source_location location = std::source_location::current())
+    {
+        throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
+    }
+
+    //-------------------------------------------------------------------------
+    inline void gbassert(const auto& cond, std::source_location location = std::source_location::current())
+        requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
+    {
+        test_condition<failed_assertion>(std::forward<decltype(cond)>(cond), "assertion failed", location);
     }
 
     //-------------------------------------------------------------------------

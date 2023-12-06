@@ -59,7 +59,7 @@ namespace gb::yadro::util
     //-----------------------------------------------------------------------------------------------------------------
     struct tester
     {
-        gb::async::threadpool<> _pool;
+        gb::yadro::async::threadpool<> _pool;
         std::unordered_map<std::string, std::vector<test_base*>> _tests;
         mutable logger _log;
 
@@ -117,9 +117,10 @@ namespace gb::yadro::util
                     if (test->_enabled)
                     {
                         auto test_run = [&] {
+                            auto t = std::chrono::system_clock::now();
+
                             try
                             {
-                                auto t = std::chrono::system_clock::now();
                                 test->run();
                                 test->_result = true;
                                 if (_verbose)
@@ -134,11 +135,27 @@ namespace gb::yadro::util
                             }
                             catch (std::exception& ex)
                             {
-                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED\n", ex.what());
+                                if (_verbose)
+                                {
+                                    auto ts = time_stamp() + " ";
+                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + 50), "FAILED (",
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
+                                        " ms)\n", ex.what());
+                                }
+                                else
+                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "FAILED\n", ex.what());
                             }
                             catch (...)
                             {
-                                _log.writeln(rec.first, ".", test->_test_name, ":", tab(20), "FAILED, unknown exception");
+                                if (_verbose)
+                                {
+                                    auto ts = time_stamp() + " ";
+                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + 50), "FAILED (",
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
+                                        " ms), unknown exception");
+                                }
+                                else
+                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "FAILED, unknown exception");
                             }
                         };
 
