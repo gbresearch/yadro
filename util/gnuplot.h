@@ -331,7 +331,7 @@ namespace gb::yadro::util
         // send a command to gnuplot via opened pipe
         const gnuplot& cmd(const std::string& cmdstr) const
         {
-#if defined(_DEBUG) || 1
+#if defined(_DEBUG)
             std::cout << cmdstr << std::endl;
 #endif
             fputs((cmdstr + "\n").c_str(), _exe_pipe.get());

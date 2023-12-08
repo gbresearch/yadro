@@ -41,6 +41,9 @@
 #include <sstream>
 #include <tuple>
 #include <filesystem>
+#include <cmath>
+#include <format>
+#include <vector>
 
 // miscellaneous utilities
 
@@ -106,11 +109,43 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
 
     //-------------------------------------------------------------------------
+    // conver multile tuples to string in format {x,x,x}
+    // std::ignore values are skipped
+    auto tuple_to_string(const auto& ... tuples)
+    {
+        std::ostringstream os;
+        auto print_one = [&](const auto& t)
+            {
+                auto print_value = [&](const auto& v)
+                    {
+                        if constexpr (!std::is_same_v< std::remove_cvref_t<decltype(v)>,
+                            std::remove_cvref_t<decltype(std::ignore)>>)
+                            os << v;
+                    };
+
+                std::apply([&](const auto& v1, const auto& ...v) mutable
+                    {
+                        os << '{';
+                        print_value(v1);
+                        ((os << ',', print_value(v)), ...);
+                        os << '}';
+                    }, t);
+            };
+
+        if (sizeof...(tuples) != 0)
+            (print_one(tuples), ...);
+        
+        return os.str();
+    }
+
+    //-------------------------------------------------------------------------
     // split tuple by index I
+    // returns a tuple of two tuples
     template<std::size_t I, class...T>
     inline auto tuple_split(const std::tuple<T...>& t)
     {
-        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<Index...>)
+        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
+            std::index_sequence<Index...>)
         {
             return std::tuple(std::get<First + Index>(t)...);
         };
@@ -120,32 +155,75 @@ namespace gb::yadro::util
         else if constexpr (I >= sizeof ...(T))
             return std::tuple(t, std::tuple{});
         else
-            return std::tuple(make_tuple_from<0>(t, std::make_index_sequence<I>), 
-                make_tuple_from<I>(t, std::make_index_sequence<sizeof...(T) - I>));
+            return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I>{}),
+                make_tuple_from(t, std::index_sequence<I>{}, std::make_index_sequence<sizeof...(T) - I>{}));
     }
 
     //-------------------------------------------------------------------------
-    // call function fn for each element of the tuple
-    inline auto tuple_foreach(auto&& t, auto&& fn) requires requires { std::get<0>(t); }
+    // call specified functions for each element of the tuple/pair/array/subrange
+    // returning a tuple of return values from each function call
+    // if function returns void then std::ignore will be used in returned tuple
+    // std::ignore can be used instead of a function in order to ignore the value
+    // note: function arguments evaluation order is unspecified and so are side effects
+    //-------------------------------------------------------------------------
+    inline auto tuple_foreach(auto&& tup, auto&&... fn)
+        requires(std::tuple_size<std::remove_cvref_t<decltype(tup)>>::value == sizeof ...(fn))
     {
-        auto call = []<std::size_t ...Index>(auto&& t, auto&& fn, std::index_sequence<Index...>)
-        {
-            (std::invoke(std::forward<decltype(fn)>(fn), std::get<Index>(std::forward<decltype(t)>(t))), ...);
-        };
+        auto call = [](auto&& fn, auto&& val)
+            {
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(fn)>,
+                    std::remove_cvref_t<decltype(std::ignore)>>)
+                    return std::ignore;
+                else if constexpr (std::is_same_v<std::invoke_result_t<decltype(fn), decltype(val)>, void>)
+                {
+                    std::invoke(std::forward<decltype(fn)>(fn), std::forward<decltype(val)>(val));
+                    return std::ignore;
+                }
+                else
+                    return std::invoke(std::forward<decltype(fn)>(fn), std::forward<decltype(val)>(val));
+            };
 
-        call(std::forward<decltype(t), decltype(fn)>(fn), std::index_sequence_for<decltype(t)>{});
+        return std::apply([&](auto&&...args)
+            {
+                return std::tuple(call(std::forward<decltype(fn)>(fn), std::forward<decltype(args)>(args))...);
+            }, std::forward<decltype(tup)>(tup));
+    }
+
+    //-------------------------------------------------------------------------
+    // create a new tuple with the values from tuple corresponding to indexes
+    template<std::size_t... Indexes>
+    inline auto tuple_select(auto&& tup)
+    {
+        return std::tuple(std::get<Indexes>(tup)...);
+    }
+
+    //-------------------------------------------------------------------------
+    // create a new tuple with all std::ignore values removed
+    inline auto tuple_remove_ignored(auto&& tup)
+    {
+        auto make_t = [](auto&& v)
+            {
+                if constexpr (std::is_same_v< std::remove_cvref_t<decltype(v)>,
+                    std::remove_cvref_t<decltype(std::ignore)>>)
+                    return std::tuple<>{};
+                else
+                    return std::tuple{ std::forward<decltype(v)>(v) };
+            };
+        return std::apply([&](auto&& ...v)
+            {
+                return std::tuple_cat(make_t(std::forward<decltype(v)>(v))...);
+            }, std::forward<decltype(tup)>(tup));
     }
 
     //-------------------------------------------------------------------------
     // transform a tuple to another tuple where each element is the result of calling transform_fn
     inline auto tuple_transform(auto&& t, auto&& transform_fn) requires requires { std::get<0>(t); }
     {
-        auto call = []<std::size_t ...Index>(auto && t, auto && fn, std::index_sequence<Index...>)
-        {
-            return std::tuple(std::invoke(std::forward<decltype(fn)>(fn), std::get<Index>(std::forward<decltype(t)>(t)))...);
-        };
-
-        return call(std::forward<decltype(t)>(t), std::forward<decltype(transform_fn)>(transform_fn), std::index_sequence_for<decltype(t)>{});
+        return std::apply([&](auto&& ... args)
+            {
+                return std::tuple(std::invoke(std::forward<decltype(transform_fn)>(transform_fn),
+                std::forward<decltype(args)>(args))...);
+            }, std::forward<decltype(t)>(t));
     }
 
     //-------------------------------------------------------------------------
@@ -184,7 +262,7 @@ namespace gb::yadro::util
     // tokenize string based on specified delimiter
     //-------------------------------------------------------------------------
     template<class T>
-    auto tokenize(const std::basic_string<T>& input, T separator)
+    inline auto tokenize(const std::basic_string<T>& input, T separator)
     {
         std::vector<std::basic_string<T>> tokens;
         std::basic_istringstream<T> token_stream(input);
