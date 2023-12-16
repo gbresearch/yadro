@@ -38,6 +38,7 @@
 #include <format>
 #include <cstdlib>
 #include <memory>
+#include <ranges>
 #include "gbwin.h"
 #include "misc.h"
 #include "gberror.h"
@@ -48,10 +49,6 @@
 
 namespace gb::yadro::util
 {
-    // sequences acceptable for plotting
-    template<class T>
-    concept c_sequence = requires { std::begin(std::declval<T>()); std::end(std::declval<T>()); };
-
     // exception thrown when gnuplot fails
     using gnuplot_error = error_t<10>;
 
@@ -183,7 +180,7 @@ namespace gb::yadro::util
     //---------------------------------------------------------------------------------------------
     // plot_t class is used to create a single plot in a pane
     //---------------------------------------------------------------------------------------------
-    template<c_sequence Data>
+    template<std::ranges::range Data>
     struct plot_t
     {
         plot_t(Data&& data, const std::string& title = "",
@@ -225,7 +222,7 @@ namespace gb::yadro::util
         std::string color;
     };
 
-    template<c_sequence Data>
+    template<std::ranges::range Data>
     plot_t(Data&& data, const std::string & = "", plotstyle = plotstyle::s_line, const std::string & = "") -> plot_t<Data>;
 
     //---------------------------------------------------------------------------------------------
@@ -238,11 +235,11 @@ namespace gb::yadro::util
         auto make_tuple = [](auto&& p)
             {
                 return overloaded(
-                    []<c_sequence Data>(plot_t<Data> && d) // matching plot, always rvalue
+                    []<std::ranges::range Data>(plot_t<Data> && d) // matching plot, always rvalue
                 {
                     return std::tuple(std::move(d));
                 },
-                    []<c_sequence Data>(Data && d) // matching sequence
+                    []<std::ranges::range Data>(Data && d) // matching sequence
                 {
                     return std::tuple(plot_t(std::forward<Data>(d)));
                 },
@@ -382,11 +379,11 @@ namespace gb::yadro::util
                 auto get_cmd = [](auto&& val)
                     {
                         return overloaded(
-                            []<c_sequence Data>(plot_t<Data> && d) // matching plot, create a pane for it
+                            []<std::ranges::range Data>(plot_t<Data> && d) // matching plot, create a pane for it
                         {
                             return pane(std::move(d)).get_cmd();
                         },
-                            []<c_sequence Data>(Data && d) // matching sequence, create a pane for it
+                            []<std::ranges::range Data>(Data && d) // matching sequence, create a pane for it
                         {
                             return pane(plot_t(std::forward<Data>(d))).get_cmd();
                         },
@@ -417,7 +414,7 @@ namespace gb::yadro::util
         }
 
         // plot implementations for one or more data sequences
-        static auto plot_cmd(const std::string& title, plotstyle style, c_sequence auto&& ... data)
+        static auto plot_cmd(const std::string& title, plotstyle style, std::ranges::range auto&& ... data)
         {
             auto posix_path = detail::write_data_file([&](auto&& tmp)
                 {
