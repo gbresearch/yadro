@@ -419,6 +419,7 @@ namespace gb::yadro::util
             auto posix_path = detail::write_data_file([&](auto&& tmp)
                 {
                     auto size = std::min({ std::distance(std::begin(data), std::end(data))... });
+                    test_condition<gnuplot_error>(size != 0, "empty data range");
 
                     for (auto i = 0; i < size; ++i)
                     {
@@ -447,15 +448,17 @@ namespace gb::yadro::util
         }
 
         // plot bitmap image
-        static auto plot_cmd(const std::string& title, const unsigned char* ucPicBuf, unsigned iWidth, unsigned iHeight)
+        static auto plot_cmd(const std::string& title, const unsigned char* bitmap_buffer, unsigned width, unsigned height)
         {
+            test_condition<gnuplot_error>(width != 0 && height != 0, "Bitmap must have non-zero width and height");
+
             auto posix_path = detail::write_data_file([=](auto&& tmp)
                 {
-                    for (auto iRow = 0u, iIndex = 0u; iRow < iHeight; iRow++)
-                        for (auto iColumn = 0u; iColumn < iWidth; iColumn++)
+                    for (auto row = 0u, i = 0u; row < height; ++row)
+                        for (auto column = 0u; column < width; ++column)
                         {
-                            tmp << iColumn << " " << iRow << " "
-                                << static_cast<float>(ucPicBuf[iIndex++]) << std::endl;
+                            tmp << column << " " << row << " "
+                                << static_cast<float>(bitmap_buffer[i++]) << std::endl;
                         }
                 });
 

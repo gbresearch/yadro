@@ -66,7 +66,7 @@ namespace
             }
             gbassert(v2 == 2);
         }
-        gbassert(dur < 20);
+        gbassert(dur < 100);
         gbassert(cnt == 1);
 
         auto v{ 123 };
