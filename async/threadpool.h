@@ -160,7 +160,7 @@ namespace gb::yadro::async
 
         //-----------------------------------------------------------------
         // enque task which waits for futures
-        auto then(auto&& task, auto... futures)
+        auto then(auto&& task, auto&&... futures)
             //requires( std::is_rvalue_reference_v<std::add_rvalue_reference_t<decltype(futures)>> && ... && true)
         {
             using namespace std::chrono_literals;
@@ -168,8 +168,8 @@ namespace gb::yadro::async
                 return (*this)(std::forward<decltype(task)>(task), futures.get()...);
             else
                 return (*this)([this](auto&& task, auto&&... futures)
-                    { then(std::forward<decltype(task)>(task), std::move(futures)...); },
-                    std::forward<decltype(task)>(task), std::move(futures)...);
+                    { return std::forward<decltype(task)>(task)(futures.get()...); },
+                    std::forward<decltype(task)>(task), std::forward<decltype(futures)>(futures)...);
         }
 
     private:
