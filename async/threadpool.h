@@ -44,7 +44,6 @@
 #include <exception>
 #include <chrono>
 
-
 #include "taskcontainer.h"
 
 namespace gb::yadro::async
@@ -159,16 +158,21 @@ namespace gb::yadro::async
         }
 
         //-----------------------------------------------------------------
-        // enque task which waits for futures
+        // enque task which waits for futures to get ready
         auto then(auto&& task, auto&&... futures)
-            //requires( std::is_rvalue_reference_v<std::add_rvalue_reference_t<decltype(futures)>> && ... && true)
+            requires requires { (futures.get(), ...); }
         {
             using namespace std::chrono_literals;
             if (((futures.wait_for(1us) == std::future_status::ready) && ... && true)) // all futures ready
                 return (*this)(std::forward<decltype(task)>(task), futures.get()...);
             else
                 return (*this)([this](auto&& task, auto&&... futures)
-                    { return std::forward<decltype(task)>(task)(futures.get()...); },
+                    { 
+                        if constexpr (std::is_same_v<std::invoke_result_t<decltype(task), decltype(futures.get())...>, void>)
+                            std::invoke(std::forward<decltype(task)>(task), futures.get()...);
+                        else
+                            return std::invoke(std::forward<decltype(task)>(task), futures.get()...); 
+                    },
                     std::forward<decltype(task)>(task), std::forward<decltype(futures)>(futures)...);
         }
 

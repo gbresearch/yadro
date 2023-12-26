@@ -60,10 +60,14 @@ namespace
             {
                 for (auto i = 0u; i < 100'000'000; ++i) --init;
                 return init;
-            }, f1);
+            }, f1).share();
 
+        auto fvoid = tp.then([](auto v) { gbassert(v == 0); }, f3);
+        static_assert(std::is_same_v<decltype(fvoid), std::future<void>>);
 
-        auto f = tp.then([](auto v1, auto v2, auto v3) { return v1 == v2 && v3 == 0; }, f1, std::move(f2), std::move(f3));
+        auto f = tp.then([](auto v1, auto v2, auto v3) { return v1 == v2 && v3 == 0; }, f1, std::move(f2), f3);
+        
+        fvoid.get();
         gbassert(f.get());
     }
 }
