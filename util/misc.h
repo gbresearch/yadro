@@ -429,4 +429,62 @@ namespace gb::yadro::util
                 s1, s2, std::char_traits<char>::length(s1)) == 0;
     }
 
+    //-----------------------------------------------------------------------------------------------
+    // variable parameters
+    template<class T>
+        requires(std::integral<T> || std::floating_point<T>)
+    struct [[nodiscard]] var_t
+    {
+        explicit var_t(std::vector<T> il) : params(std::move(il)) {}
+        var_t(std::initializer_list<T> il) : params(il) {}
+
+        var_t(T first, T last, T increment)
+        {
+            params.reserve(size_t((last - first) / increment) + 1);
+            for (; first <= last; first += increment)
+                params.push_back(first);
+        }
+
+        auto begin() const { return params.begin(); }
+        auto end() const { return params.end(); }
+        auto back() const { return params.back(); }
+        const auto& get_params() const { return params; }
+        auto& append(const var_t& other)&
+        {
+            params.append_range(other);
+            return *this;
+        }
+    private:
+        std::vector<T> params;
+
+        friend auto operator+ (var_t v1, const var_t& v2)
+        {
+            return v1.append(v2);
+        }
+    };
+
+    //-----------------------------------------------------------------------------------------------
+    // create vector of tuples, containing every combination of var_t parameters
+    // example of use:
+    // for(auto&& tup : wrap_in_tuple(var1, var2))
+    //      std::apply([](auto&& v1, auto&& v2) { ... }, tup);
+    template<class T, class ...Ts>
+    inline auto wrap_in_tuple(const var_t<T>& var, const var_t<Ts>&... vars)
+    {
+        std::vector<std::tuple<T, Ts...>> result;
+        for (auto p : var.get_params())
+            if constexpr (sizeof...(Ts))
+                for (auto& ts : wrap_in_tuple(vars...))
+                    result.push_back(std::tuple_cat(std::tuple(p), ts));
+            else
+                result.push_back(std::tuple(p));
+        return result;
+    }
+
+    //-----------------------------------------------------------------------------------------------
+    inline auto wrap_in_tuple()
+    {
+        return std::vector<std::tuple<>>{};
+    }
+
 }

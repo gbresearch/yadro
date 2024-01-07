@@ -244,6 +244,8 @@ namespace gb::yadro::util
             const int id;
             logger& log;
 
+            auto flush() const { log.flush(); }
+
             template<class char_t>
             auto& operator>> (const char_t* name) const
             {
