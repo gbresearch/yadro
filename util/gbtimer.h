@@ -91,7 +91,10 @@ namespace gb::yadro::util
             return *this;
         }
 
-        ~accumulating_timer() {
+        ~accumulating_timer() { report(); }
+
+        void report() const
+        {
             _fn(std::chrono::duration_cast<time_unit>(_duration), _count);
         }
 
@@ -155,18 +158,18 @@ namespace gb::yadro::util
     template<class duration>
     constexpr auto get_duration_suffix()
     {
-        return duration::period::num != 1 ? ""
+        return duration::period::num != 1 ? "some units"
             : duration::period::den == 1'000'000'000 ? "nanosec"
             : duration::period::den == 1'000'000 ? "microsec"
             : duration::period::den == 1'000 ? "millisec"
             : duration::period::den == 1 ? "sec"
-            : "";
+            : "some units";
     }
 
     template<class time_unit,
         class clock = std::chrono::high_resolution_clock,
         class mutex = detail::nonlocking_mutex>
-    auto make_accumulating_timer(std::string name)
+    inline [[nodiscard]] auto make_accumulating_timer(std::string name)
     {
         return accumulating_timer<time_unit, clock, mutex>([=](auto duration, auto count)
             {
@@ -177,7 +180,7 @@ namespace gb::yadro::util
 
     // dependent timers for sub-blocks
     template<class time_unit, class clock, class mutex>
-    auto make_slave_timer(std::string name, const accumulating_timer<time_unit, clock, mutex>& master_timer)
+    inline [[nodiscard]] auto make_slave_timer(std::string name, const accumulating_timer<time_unit, clock, mutex>& master_timer)
     {
         return accumulating_timer<time_unit, clock, mutex>(
             [timer_name = std::move(name), master = &master_timer](auto duration, auto count)
@@ -195,4 +198,40 @@ namespace gb::yadro::util
             }
         });
     }
+
+
+    // global_timer_map is used to create global timers
+    // instantiate it in main(), so the reporting be done at exit from main(),
+    // to prevent undefined behavior if the reporting_fn depends on other global variables
+    template<class time_unit,
+        class clock = std::chrono::high_resolution_clock,
+        class mutex = std::mutex>
+    struct global_timer_map_t
+    {
+        ~global_timer_map_t()
+        {
+            get_map().clear();
+        }
+
+        static auto& get_map()
+        {
+            static std::map<std::string,
+                gb::yadro::util::accumulating_timer<time_unit, std::chrono::high_resolution_clock, std::mutex>>
+                timer_map;
+            return timer_map;
+        }
+        
+        static auto& get(const std::string& name, auto reporting_fn)
+        {
+            return get_map().try_emplace(name, reporting_fn).first->second;
+        }
+    };
+
+    // macro for frequently used named scope timer
+#define GB_TIMER(name) auto name##_timer{gb::yadro::util::global_timer_map_t<std::chrono::milliseconds>::get(#name,\
+    [=](auto duration, auto count)\
+    {\
+        const auto& duration_s = std::to_string(duration.count()) + ' ' + gb::yadro::util::get_duration_suffix<std::chrono::milliseconds>();\
+        printf(":TIMER: %s, time: %s, count: %zu\n", #name, duration_s.c_str(), count);\
+    }).make_scope_timer()}
 }
