@@ -74,6 +74,9 @@
     <ClInclude Include="..\util\gnuplot.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\tuple_functions.h">
+      <Filter>util</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

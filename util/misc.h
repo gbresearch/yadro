@@ -29,13 +29,12 @@
 #pragma once
 #include <functional>
 #include <mutex>
-#include <concepts>
+//#include <concepts>
 #include <span>
 #include <compare>
 #include <utility>
-#include <iostream>
+//#include <iostream>
 #include <chrono>
-#include <cmath>
 #include <variant>
 #include <string>
 #include <sstream>
@@ -104,135 +103,6 @@ namespace gb::yadro::util
 
     using make_hash_t = decltype([](auto&& v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)); });
     
-    //-------------------------------------------------------------------------
-    // tuple functions
-    //-------------------------------------------------------------------------
-
-    //-------------------------------------------------------------------------
-    // conver multile tuples to string in format {x,x,x}
-    // std::ignore values are skipped
-    auto tuple_to_string(const auto& ... tuples)
-    {
-        std::ostringstream os;
-        auto print_one = [&](const auto& t)
-            {
-                auto print_value = [&](const auto& v)
-                    {
-                        if constexpr (!std::is_same_v< std::remove_cvref_t<decltype(v)>,
-                            std::remove_cvref_t<decltype(std::ignore)>>)
-                            os << v;
-                    };
-
-                std::apply([&](const auto& v1, const auto& ...v) mutable
-                    {
-                        os << '{';
-                        print_value(v1);
-                        ((os << ',', print_value(v)), ...);
-                        os << '}';
-                    }, t);
-            };
-
-        if (sizeof...(tuples) != 0)
-            (print_one(tuples), ...);
-        
-        return os.str();
-    }
-
-    //-------------------------------------------------------------------------
-    // split tuple by index I
-    // returns a tuple of two tuples
-    template<std::size_t I, class...T>
-    inline auto tuple_split(const std::tuple<T...>& t)
-    {
-        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
-            std::index_sequence<Index...>)
-        {
-            return std::tuple(std::get<First + Index>(t)...);
-        };
-
-        if constexpr (I == 0)
-            return std::tuple(std::tuple{}, t);
-        else if constexpr (I >= sizeof ...(T))
-            return std::tuple(t, std::tuple{});
-        else
-            return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I>{}),
-                make_tuple_from(t, std::index_sequence<I>{}, std::make_index_sequence<sizeof...(T) - I>{}));
-    }
-
-    //-------------------------------------------------------------------------
-    // call specified functions for each element of the tuple/pair/array/subrange
-    // returning a tuple of return values from each function call
-    // if function returns void then std::ignore will be used in returned tuple
-    // std::ignore can be used instead of a function in order to ignore the value
-    // note: function arguments evaluation order is unspecified and so are side effects
-    //-------------------------------------------------------------------------
-    inline auto tuple_foreach(auto&& tup, auto&&... fn)
-        requires(std::tuple_size<std::remove_cvref_t<decltype(tup)>>::value == sizeof ...(fn))
-    {
-        auto call = [](auto&& fn, auto&& val)
-            {
-                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(fn)>,
-                    std::remove_cvref_t<decltype(std::ignore)>>)
-                    return std::ignore;
-                else if constexpr (std::is_same_v<std::invoke_result_t<decltype(fn), decltype(val)>, void>)
-                {
-                    std::invoke(std::forward<decltype(fn)>(fn), std::forward<decltype(val)>(val));
-                    return std::ignore;
-                }
-                else
-                    return std::invoke(std::forward<decltype(fn)>(fn), std::forward<decltype(val)>(val));
-            };
-
-        return std::apply([&](auto&&...args)
-            {
-                return std::tuple(call(std::forward<decltype(fn)>(fn), std::forward<decltype(args)>(args))...);
-            }, std::forward<decltype(tup)>(tup));
-    }
-
-    //-------------------------------------------------------------------------
-    // create a new tuple with the values from tuple corresponding to indexes
-    template<std::size_t... Indexes>
-    inline auto tuple_select(auto&& tup)
-    {
-        return std::tuple(std::get<Indexes>(tup)...);
-    }
-
-    //-------------------------------------------------------------------------
-    // create a new tuple with all std::ignore values removed
-    inline auto tuple_remove_ignored(auto&& tup)
-    {
-        auto make_t = [](auto&& v)
-            {
-                if constexpr (std::is_same_v< std::remove_cvref_t<decltype(v)>,
-                    std::remove_cvref_t<decltype(std::ignore)>>)
-                    return std::tuple<>{};
-                else
-                    return std::tuple{ std::forward<decltype(v)>(v) };
-            };
-        return std::apply([&](auto&& ...v)
-            {
-                return std::tuple_cat(make_t(std::forward<decltype(v)>(v))...);
-            }, std::forward<decltype(tup)>(tup));
-    }
-
-    //-------------------------------------------------------------------------
-    // transform a tuple to another tuple where each element is the result of calling transform_fn
-    inline auto tuple_transform(auto&& t, auto&& transform_fn) requires requires { std::get<0>(t); }
-    {
-        return std::apply([&](auto&& ... args)
-            {
-                return std::tuple(std::invoke(std::forward<decltype(transform_fn)>(transform_fn),
-                std::forward<decltype(args)>(args))...);
-            }, std::forward<decltype(t)>(t));
-    }
-
-    //-------------------------------------------------------------------------
-    // apply reduce_fn to a tuple which is transformed using transfrom_fn
-    inline auto tuple_transform_reduce(auto&& t, auto&& transform_fn, auto&& reduce_fn) requires requires { std::get<0>(t); }
-    {
-        return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(std::forward<decltype(t)>(t), 
-            std::forward<decltype(transform_fn)>(transform_fn)));
-    }
 
     //-------------------------------------------------------------------------
     inline auto time_stamp()

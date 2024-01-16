@@ -30,6 +30,7 @@
 #include "../util/gblog.h"
 #include "../util/gbtimer.h"
 #include "../util/misc.h"
+#include "../util/tuple_functions.h"
 #include "../util/gnuplot.h"
 
 #include <sstream>

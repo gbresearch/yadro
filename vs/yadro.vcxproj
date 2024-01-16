@@ -133,6 +133,7 @@
     <ClInclude Include="..\util\gnuplot.h" />
     <ClInclude Include="..\util\misc.h" />
     <ClInclude Include="..\util\traits.h" />
+    <ClInclude Include="..\util\tuple_functions.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp" />
