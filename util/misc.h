@@ -29,11 +29,10 @@
 #pragma once
 #include <functional>
 #include <mutex>
-//#include <concepts>
+#include <concepts>
 #include <span>
 #include <compare>
 #include <utility>
-//#include <iostream>
 #include <chrono>
 #include <variant>
 #include <string>
@@ -352,9 +351,19 @@ namespace gb::yadro::util
     }
 
     //-----------------------------------------------------------------------------------------------
+    // specialization for empty parameter list
     inline auto wrap_in_tuple()
     {
         return std::vector<std::tuple<>>{};
     }
 
+    //-----------------------------------------------------------------------------------------------
+    // window function specifies behavior outside of min/max values
+    auto window_function(auto&& value, std::invocable<decltype(value)> auto&& fun,
+        std::convertible_to<decltype(value)> auto&& min_value,
+        std::convertible_to<decltype(value)> auto&& max_value)
+    {
+        return value < min_value || value > max_value ? std::invoke(std::forward<decltype(fun)>(fun), value - min_value)
+            : value > max_value ? std::invoke(std::forward<decltype(fun)>(fun), max_value - value) : value;
+    }
 }
