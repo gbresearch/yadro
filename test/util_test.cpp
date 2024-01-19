@@ -109,6 +109,9 @@ namespace
             [](const std::string& s) { return s.size(); }
         ), [](auto&& ...v) { return (0 + ... + v); }) == 18);
 
+        gbassert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
+        gbassert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
+
         gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15");
         gbassert(tokenize<char>("abc,xyz,foo,bar", ',') == std::vector<std::string>{ "abc","xyz","foo","bar" });
     }

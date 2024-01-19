@@ -164,4 +164,18 @@ namespace gb::yadro::util
         return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(std::forward<decltype(t)>(t),
             std::forward<decltype(transform_fn)>(transform_fn)));
     }
+
+    //-------------------------------------------------------------------------
+    // returns min value of all elements of the specified tuples (must be comparable)
+    inline auto tuple_min(auto&& ...t)
+    {
+        return std::min({ std::apply([](auto&& ...val) { return std::min({ val... }); }, t)... });
+    }
+
+    //-------------------------------------------------------------------------
+    // returns max value of all elements of the specified tuples (must be comparable)
+    inline auto tuple_max(auto&& ...t)
+    {
+        return std::max({ std::apply([](auto&& ...val) { return std::max({ val... }); }, t)... });
+    }
 }
