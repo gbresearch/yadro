@@ -28,22 +28,20 @@
 
 #pragma once
 
-#include "../archive/archive.h"
-#include "../async/taskcontainer.h"
-#include "../async/threadpool.h"
-#include "../container/graph.h"
-#include "../container/static_string.h"
-#include "../container/static_vector.h"
-#include "../container/tree.h"
-#include "../util/file_mutex.h"
-#include "../util/gberror.h"
-#include "../util/gblog.h"
-#include "../util/gbmemory.h"
-#include "../util/gbtest.h"
-#include "../util/gbtimer.h"
-#include "../util/misc.h"
-#include "../util/traits.h"
-#include "../util/gbwin.h"
-#include "../util/gnuplot.h"
-#include "../util/tuple_functions.h"
-#include "../util/gbmacro.h"
+// macros for concatenation
+#define GM_MACRO_CONCAT_NO_EXPAND(A, B) A ## B
+#define GM_MACRO_CONCAT(A, B) GM_MACRO_CONCAT_NO_EXPAND(A, B)
+
+// macros for stringification
+#define GM_MACRO_STRING_NO_EXPAND(A) #A
+#define GM_MACRO_STRING(A) GM_MACRO_STRING_NO_EXPAND(A)
+
+// macro for frequently used named scope timer, e.g. GB_TIMER(name, milliseconds);
+#define GB_TIMER(name, time_unit) auto GM_MACRO_CONCAT(name, __LINE__) {\
+    gb::yadro::util::global_timer_map_t<std::chrono::##time_unit>::get(GM_MACRO_STRING(GM_MACRO_CONCAT(name,__LINE__)),\
+    [=](auto duration, auto count)\
+    {\
+        auto str = std::format("[TIMER] {}:{}, time: {} {}, count: {}\n", #name, __LINE__, duration.count(), \
+            gb::yadro::util::get_duration_suffix<std::chrono::##time_unit>(), count);\
+        printf(str.c_str());\
+    }).make_scope_timer()}

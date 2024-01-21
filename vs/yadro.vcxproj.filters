@@ -77,6 +77,15 @@
     <ClInclude Include="..\util\tuple_functions.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\gbmacro.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\tensor.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\matrix.h">
+      <Filter>container</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

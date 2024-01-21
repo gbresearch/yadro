@@ -119,13 +119,16 @@
     <ClInclude Include="..\async\taskcontainer.h" />
     <ClInclude Include="..\async\threadpool.h" />
     <ClInclude Include="..\container\graph.h" />
+    <ClInclude Include="..\container\matrix.h" />
     <ClInclude Include="..\container\static_string.h" />
     <ClInclude Include="..\container\static_vector.h" />
+    <ClInclude Include="..\container\tensor.h" />
     <ClInclude Include="..\container\tree.h" />
     <ClInclude Include="..\include\yadro.h" />
     <ClInclude Include="..\util\file_mutex.h" />
     <ClInclude Include="..\util\gberror.h" />
     <ClInclude Include="..\util\gblog.h" />
+    <ClInclude Include="..\util\gbmacro.h" />
     <ClInclude Include="..\util\gbmemory.h" />
     <ClInclude Include="..\util\gbtest.h" />
     <ClInclude Include="..\util\gbtimer.h" />

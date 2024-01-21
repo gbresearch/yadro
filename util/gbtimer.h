@@ -226,12 +226,4 @@ namespace gb::yadro::util
             return get_map().try_emplace(name, reporting_fn).first->second;
         }
     };
-
-    // macro for frequently used named scope timer
-#define GB_TIMER(name) auto name##_timer{gb::yadro::util::global_timer_map_t<std::chrono::milliseconds>::get(#name,\
-    [=](auto duration, auto count)\
-    {\
-        const auto& duration_s = std::to_string(duration.count()) + ' ' + gb::yadro::util::get_duration_suffix<std::chrono::milliseconds>();\
-        printf(":TIMER: %s, time: %s, count: %zu\n", #name, duration_s.c_str(), count);\
-    }).make_scope_timer()}
 }
