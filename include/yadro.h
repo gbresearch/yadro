@@ -47,3 +47,5 @@
 #include "../util/gnuplot.h"
 #include "../util/tuple_functions.h"
 #include "../util/gbmacro.h"
+#include "../container/tensor.h"
+#include "../container/matrix.h"

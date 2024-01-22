@@ -31,30 +31,50 @@
 
 namespace gb::yadro::container
 {
+    template<class M>
+    struct matrix_traits
+    {
+        using matrix_type = std::remove_cvref_t<M>;
+        using data_type = typename matrix_type::data_type;
+    };
+
     template<class T, template<class...> class C>
     concept instantiation_of = requires { C{ std::declval<T>() }; };
 
-    template<class T, std::size_t Rows, std::size_t Columns>
+    template<class M>
+    concept matrix_op = requires {
+        std::declval<M>()(std::declval<std::size_t>(), std::declval<std::size_t>());
+        std::declval<M>().rows();
+        std::declval<M>().columns();
+        typename matrix_traits<M>;
+    };
+
+    template<class T>
     struct matrix;
 
     //---------------------------------------------------------------------------------------------
-    template<class Matrix>
+    template<matrix_op Matrix>
     struct minor_view
     {
-        using matrix_type = std::remove_cvref_t<Matrix>;
-        static_assert(matrix_type::Rows > 1);
-        static_assert(matrix_type::Columns > 1);
-        static constexpr auto Rows = matrix_type::Rows - 1;
-        static constexpr auto Columns = matrix_type::Columns - 1;
-        using data_type = typename matrix_type::data_type;
+        using data_type = typename matrix_traits<Matrix>::data_type;
 
+        constexpr auto rows() const { return _matrix.rows() - 1; }
+        constexpr auto columns() const { return _matrix.columns() - 1; }
+
+        constexpr
         minor_view(Matrix&& m, std::size_t row, std::size_t col)
             : _matrix(std::forward<Matrix>(m)), _row(row), _col(col)
         {
+            assert(m.rows() > 1);
+            assert(m.columns() > 1);
+            assert(row < m.rows());
+            assert(col < m.columns());
         }
 
         auto operator()(std::size_t row, std::size_t col) const
         {
+            assert(row < rows());
+            assert(col < columns());
             if (row >= _row)
                 ++row;
             if (col >= _col)
@@ -64,9 +84,9 @@ namespace gb::yadro::container
 
         auto to_matrix() const
         {
-            matrix< data_type, Rows, Columns> result;
-            for (std::size_t row = 0; row < Rows; ++row)
-                for (std::size_t col = 0; col < Columns; ++col)
+            matrix<data_type> result(rows(), columns());
+            for (std::size_t row = 0, rsize = rows(); row < rsize; ++row)
+                for (std::size_t col = 0, csize = columns(); col < csize; ++col)
                     result(row, col) = (*this)(row, col);
             return result;
         }
@@ -75,54 +95,183 @@ namespace gb::yadro::container
         Matrix _matrix;
         std::size_t _row, _col;
     };
-
+    
     //---------------------------------------------------------------------------------------------
-    template<class T, std::size_t R, std::size_t C>
-    struct matrix : static_tensor<T, R, C>
+    template<matrix_op Matrix>
+    struct matrix_view
+    {
+        using data_type = typename matrix_traits<Matrix>::data_type;
+
+        constexpr auto rows() const { return _matrix.rows(); }
+        constexpr auto columns() const { return _matrix.columns(); }
+
+        matrix_view(matrix_op auto&& m) : _matrix(m) {}
+        auto operator()(std::size_t row, std::size_t col) const { return _matrix(row, col); }
+    private:
+        Matrix _matrix;
+    };
+    
+    //---------------------------------------------------------------------------------------------
+    template<class T>
+    struct matrix : dynamic_tensor<T>
     {
         using data_type = T;
-        static constexpr auto Rows = R;
-        static constexpr auto Columns = C;
+        using dynamic_tensor<T>::indexer;
 
-        matrix(instantiation_of<minor_view> auto&& view) 
+        constexpr auto rows() const { return indexer().dimension(0); }
+        constexpr auto columns() const { return indexer().dimension(1); }
+
+        matrix(instantiation_of<minor_view> auto&& view)
         {
             *this = view.to_matrix();
         }
 
-        auto transpose() const
+        matrix(std::size_t rows, std::size_t columns)
+            : dynamic_tensor<T>(rows, columns)
         {
-            matrix<T, Columns, Rows> result;
-            for (std::size_t row = 0; row < Rows; ++row)
-                for (std::size_t col = 0; col < Columns; ++col)
-                    result(col, row) = (*this)(row, col);
-            return result;
         }
     };
 
-    // VC 17.7.7 compiler bug: can't use auto in deduction guide
+    // VC 17.7.7: can't use auto in deduction guide
     // see: https://developercommunity.visualstudio.com/t/C-deduction-guide-fails-in-msvc-v19la/10565664
     template<instantiation_of<minor_view> View>
-    matrix(View&& view) -> matrix<typename std::remove_cvref_t<View>::data_type, std::remove_cvref_t<View>::Rows, std::remove_cvref_t<View>::Columns>;
+    matrix(View&& view) -> matrix<typename std::remove_cvref_t<View>::data_type>;
 
-    inline auto determinant(auto&& m)
+    //---------------------------------------------------------------------------------------------
+    inline auto determinant(matrix_op auto&& m, std::size_t row = 0)
     {
-        using m_type = std::remove_cvref_t<decltype(m)>;
-        static_assert(m_type::Rows == m_type::Columns);
-        static_assert(m_type::Rows != 0);
+        using m_type = matrix_traits<decltype(m)>;
+        assert(m.columns() == m.rows());
+        assert(m.rows() != 0);
 
-        if constexpr (m_type::Rows == 1)
+        if (m.rows() == 1)
             return m(0, 0);
         else
         {
             using data_type = typename m_type::data_type;
             data_type result{};
-            for (std::size_t r = 0; r < m_type::Rows; ++r)
-                for (std::size_t c = 0; c < m_type::Columns; ++c)
-                {
-                    auto sign = ((r ^ c) & 1) == 0 ? 1 : -1;
-                    result += sign * m(r, c) * determinant(minor_view(m, r, c));
-                }
+            for (std::size_t c = 0; c < m.columns(); ++c)
+            {
+                auto sign = ((row ^ c) & 1) == 0 ? 1 : -1;
+                result += sign * m(row, c) * determinant(minor_view(m, row, c), row);
+            }
             return result;
         }
     }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto& swap_rows(matrix_op auto& m, std::size_t row1, std::size_t row2)
+    {
+        using traits = matrix_traits<decltype(m)>;
+        for (std::size_t col = 0; col < m.columns(); ++col)
+            std::swap(m(row1, col), m(row2, col));
+        return m;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto swap_rows_copy(matrix_op auto m, std::size_t row1, std::size_t row2)
+    {
+        swap_rows(m, row1, row2);
+        return m;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto& swap_cols(matrix_op auto& m, std::size_t col1, std::size_t col2)
+    {
+        using traits = matrix_traits<decltype(m)>;
+        for (std::size_t row = 0; row < m.rows(); ++row)
+            std::swap(m(row, col1), m(row, col2));
+        return m;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto swap_cols_copy(matrix_op auto m, std::size_t col1, std::size_t col2)
+    {
+        swap_cols(m, col1, col2);
+        return m;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto transpose(matrix_op auto&& m)
+    {
+        using T = typename matrix_traits<decltype(m)>::data_type;
+        
+        matrix<T> result(m.columns(), m.rows());
+        for (std::size_t row = 0; row < m.rows(); ++row)
+            for (std::size_t col = 0; col < m.columns(); ++col)
+                result(col, row) = m(row, col);
+        return result;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    template<class T>
+    inline auto identity_matrix(std::size_t dim)
+    {
+        matrix<T> m(dim, dim);
+        for (std::size_t i = 0; i < dim; ++i)
+            m(i, i) = 1;
+        return m;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline decltype(auto) transform(matrix_op auto&& m, std::invocable<typename matrix_traits<decltype(m)>::data_type> auto&& fn)
+    {
+        for (std::size_t row = 0; row < m.rows(); ++row)
+            for (std::size_t col = 0; col < m.columns(); ++col)
+            {
+                m(row, col) = std::invoke(std::forward<decltype(fn)>(fn), m(row, col));
+            }
+        return m;
+    }
+    //---------------------------------------------------------------------------------------------
+    inline auto submatrix(matrix_op auto&& m, std::size_t row_begin, std::size_t row_end, std::size_t col_begin, std::size_t col_end)
+    {
+        using traits = matrix_traits<decltype(m)> ;
+        matrix<typename traits::data_type> result(row_end - row_begin, col_end - col_begin);
+        for(std::size_t r = 0, source_r = row_begin; source_r < row_end; ++r, ++source_r)
+            for (std::size_t c = 0, source_c = col_begin; source_c < col_end; ++c, ++source_c)
+            {
+                result(r, c) = m(source_r, source_c);
+            }
+        return result;
+    }
+    
+    //---------------------------------------------------------------------------------------------
+    inline auto get_row(matrix_op auto&& m)
+    {
+
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto operator* (matrix_op auto&& m1, matrix_op auto&& m2)
+    {
+        assert(m1.columns() == m2.rows());
+        using data_type = decltype(std::declval < matrix_traits<decltype(m1)>::data_type>() * 
+            std::declval < matrix_traits<decltype(m2)>::data_type>());
+        constexpr auto rows = m1.rows();
+        constexpr auto columns = m2.columns();
+        matrix<data_type> result(rows, columns);
+        
+        for(std::size_t row = 0; row < rows; ++row)
+            for (std::size_t col = 0; col < columns; ++col)
+            {
+                result(row, col);
+            }
+        return result;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto solve(matrix_op auto&& m, matrix_op auto&& rh)
+    {
+        assert(m.columns() == m.rows());
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto invert(matrix_op auto&& m)
+    {
+        using m_type = matrix_traits<decltype(m)>;
+        assert(m.columns() == m.rows());
+        return solve(m, identity_matrix< typename m_type::data_type>(m.rows(), m.columns()));
+    }
+
 }

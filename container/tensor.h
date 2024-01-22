@@ -47,6 +47,7 @@ namespace gb::yadro::container
     template<std::size_t D, std::size_t ...Ds>
     struct static_indexer_t
     {
+        // mapping indexes to container index
         constexpr auto operator()(auto i, auto ...ds) const
         {
             static_assert(sizeof...(Ds) == sizeof...(ds));
@@ -68,6 +69,7 @@ namespace gb::yadro::container
         {
         }
 
+        // mapping indexes to container index
         constexpr auto operator()(auto i, auto ...ds) const
         {
             assert(i < _indexes[0]);
@@ -84,6 +86,8 @@ namespace gb::yadro::container
         }
 
         constexpr auto cardinality() const { return _indexes.size(); }
+
+        constexpr auto dimension(auto index) const { return _indexes.at(index); }
 
     private:
         std::vector<std::size_t> _indexes;
@@ -105,6 +109,8 @@ namespace gb::yadro::container
             return std::forward<decltype(self)>(self)._data[self._indexer(indexes...)];
         }
 
+        const auto& indexer() const { return _indexer; }
+
     private:
         indexer_t _indexer;
         container_t _data;
@@ -122,6 +128,8 @@ namespace gb::yadro::container
         {
             static_assert(indexer_t::size() == sizeof...(args));
         }
+
+        static constexpr auto indexer() { return static_indexer_t < Ds... >{}; }
     };
 
     //---------------------------------------------------------------------------------------------
@@ -142,5 +150,7 @@ namespace gb::yadro::container
             base_t(indexer_t(dimensions ...))
         {
         }
+
+        using base_t::indexer;
     };
 }
