@@ -17,6 +17,9 @@
     <Filter Include="container">
       <UniqueIdentifier>{83cfb80c-2ff0-4e0d-b1ec-748d5d4dccfd}</UniqueIdentifier>
     </Filter>
+    <Filter Include="algorithm">
+      <UniqueIdentifier>{bac28a69-fbfb-4926-86d4-9b7844daf1e6}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\archive\archive.h">
@@ -85,6 +88,9 @@
     </ClInclude>
     <ClInclude Include="..\container\matrix.h">
       <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\algorithm\neighbor_expansion.h">
+      <Filter>algorithm</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

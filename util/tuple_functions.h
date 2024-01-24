@@ -32,6 +32,7 @@
 #include <sstream>
 #include <type_traits>
 #include <functional>
+#include <utility>
 
 namespace gb::yadro::util
 {
@@ -147,22 +148,35 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    // transform a tuple to another tuple where each element is the result of calling transform_fn
-    inline auto tuple_transform(auto&& t, auto&& transform_fn) requires requires { std::get<0>(t); }
+    // transform multiple tuples to another tuple where transform_fn is called on each element of the tuples in lockstep
+    // requires all tuples to be the same size
+    auto tuple_transform(auto&& transform_fn, auto&& t, auto&& ...ts)
+        requires ((sizeof ...(ts) == 0 ||
+        ((std::tuple_size<std::remove_cvref_t<decltype(t)>>{} == std::tuple_size<std::remove_cvref_t<decltype(ts)>>{})
+        && ...)) && std::invocable<decltype(transform_fn), decltype(std::get<0>(t)), decltype(std::get<0>(ts))...>)
     {
-        return std::apply([&](auto&& ... args)
-            {
-                return std::tuple(std::invoke(std::forward<decltype(transform_fn)>(transform_fn),
-                std::forward<decltype(args)>(args))...);
-            }, std::forward<decltype(t)>(t));
+        auto get_n = [&]<std::size_t N>(std::index_sequence<N>)
+        {
+            return transform_fn(std::get<N>(std::forward<decltype(t)>(t)), std::get<N>(std::forward<decltype(ts)>(ts))...);
+        };
+
+        auto get_tup = [&]<std::size_t ...N>(std::index_sequence<N...>)
+        {
+            return std::tuple(get_n(std::index_sequence<N>{})...);
+        };
+        
+        constexpr auto size = std::tuple_size<std::remove_cvref_t<decltype(t)>>{};
+
+        return get_tup(std::make_index_sequence<size>{});
     }
 
     //-------------------------------------------------------------------------
     // apply reduce_fn to a tuple which is transformed using transfrom_fn
-    inline auto tuple_transform_reduce(auto&& t, auto&& transform_fn, auto&& reduce_fn) requires requires { std::get<0>(t); }
+    inline auto tuple_transform_reduce(auto&& transform_fn, auto&& reduce_fn, auto&& t) 
+        requires requires { std::get<0>(t); }
     {
-        return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(std::forward<decltype(t)>(t),
-            std::forward<decltype(transform_fn)>(transform_fn)));
+        return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(
+            std::forward<decltype(transform_fn)>(transform_fn), std::forward<decltype(t)>(t)));
     }
 
     //-------------------------------------------------------------------------

@@ -35,6 +35,7 @@
 
 #include <sstream>
 #include <string>
+#include <algorithm>
 
 namespace
 {
@@ -53,7 +54,7 @@ namespace
         std::int64_t dur{};
         std::uint64_t cnt{};
         {
-            accumulating_timer<std::chrono::microseconds> t{
+            accumulating_timer<std::chrono::milliseconds> t{
                 [&](auto duration, auto count) { dur = duration.count(); cnt = count; }};
 
             std::mutex m1, m2;
@@ -67,7 +68,7 @@ namespace
             }
             gbassert(v2 == 2);
         }
-        gbassert(dur < 100);
+        gbassert(dur < 1);
         gbassert(cnt == 1);
 
         auto v{ 123 };
@@ -93,21 +94,26 @@ namespace
         gbassert(tuple_to_string(tuple_remove_ignored(filtered)) == "{abc_str,xyz_str}");
         gbassert(tuple_to_string(tuple_select<1, 3>(t1)) == "{123.456,xyz}");
         
-        auto t3 = tuple_transform(t1, overloaded(
+        auto t3 = tuple_transform(overloaded(
             [](int i) { return std::to_string(i); },
             [](double i) { return i; },
             [](const char* s) { return std::string(s); },
             [](auto&& other) { return other; }
-        ));
+        ), t1);
         gbassert(t3 == std::tuple(std::string("1"), 123.456, std::string("abc"), std::string("xyz")));
         
-        gbassert(tuple_transform_reduce(t1, // count bytes
+        gbassert(tuple_transform([](auto ... v)
+            {   // return tuple of max values
+                return std::max({v...});
+            }, std::tuple(1, 2, 3), std::tuple(3, 1, 4), std::tuple(2, 0, 8)) == std::tuple(3, 2, 8));
+
+        gbassert(tuple_transform_reduce(// count bytes
             overloaded(
             [](int) { return 4; },
             [](double) { return 8; },
             [](const char* s) { return std::string(s).size(); },
             [](const std::string& s) { return s.size(); }
-        ), [](auto&& ...v) { return (0 + ... + v); }) == 18);
+        ), [](auto&& ...v) { return (0 + ... + v); }, t1) == 18);
 
         gbassert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
         gbassert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);

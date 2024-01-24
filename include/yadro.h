@@ -49,3 +49,4 @@
 #include "../util/gbmacro.h"
 #include "../container/tensor.h"
 #include "../container/matrix.h"
+#include "../algorithm/neighbor_expansion.h"

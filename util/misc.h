@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2023, Gene Bushuyev
+//  Copyright (C) 2011-2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -42,6 +42,7 @@
 #include <cmath>
 #include <format>
 #include <vector>
+#include <random>
 
 // miscellaneous utilities
 
@@ -100,7 +101,26 @@ namespace gb::yadro::util
     }
 #endif
 
-    using make_hash_t = decltype([](auto&& v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)); });
+    inline auto make_hash(const std::ranges::sized_range auto& r)
+    {
+        auto seed = make_hash(r.size());
+        for (auto&& v : r)
+            seed = make_hash(seed, v);
+        return seed;
+    }
+
+    template<class ...T>
+    inline auto make_hash(const std::tuple<T...>& tup)
+    {
+        auto seed = make_hash(sizeof...(T));
+
+        return std::apply([&](auto&& t)
+            {
+                return seed = make_hash(seed, t);
+            }, tup);
+    }
+
+    using make_hash_t = decltype([](auto&& ...v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)...); });
     
 
     //-------------------------------------------------------------------------
