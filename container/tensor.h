@@ -37,6 +37,8 @@
 #include <algorithm>
 #include <numeric>
 #include <initializer_list>
+#include <type_traits>
+#include "../util/gberror.h"
 
 namespace gb::yadro::container
 {
@@ -51,106 +53,156 @@ namespace gb::yadro::container
         constexpr auto operator()(auto i, auto ...ds) const
         {
             static_assert(sizeof...(Ds) == sizeof...(ds));
-            assert(i < D);
+            gb::yadro::util::gbassert(i < D);
             if constexpr (sizeof...(Ds) == 0)
                 return i;
             else
                 return i + D * static_indexer_t<Ds...>{}(ds...);
         }
-        static constexpr auto size() { return (D*...*Ds); }
-        static constexpr auto cardinality() { return sizeof ...(Ds) + 1; }
+
+        auto operator== (const static_indexer_t& other) const { return true; }
+        static consteval auto size() { return (D*...*Ds); }
+        static consteval auto cardinality() { return sizeof ...(Ds) + 1; }
+        
+        static constexpr auto dimension(auto index)
+        {
+            gb::yadro::util::gbassert(index < cardinality());
+            if constexpr (sizeof ...(Ds) != 0)
+                if (index == 0)
+                    return D;
+                else
+                    return static_indexer_t<Ds...>::dimension(index - 1);
+            else
+                return D;
+        }
+
+        auto serialize(auto&& archive)
+        {
+        }
     };
 
     //---------------------------------------------------------------------------------------------
+    // dynamic indexer with runtime Cardinality
     struct dynamic_indexer_t
     {
         dynamic_indexer_t(std::convertible_to<std::size_t> auto&& ... indexes)
-            : _indexes{ static_cast<std::size_t>(indexes)... }
+            : _indexes{ {static_cast<std::size_t>(indexes), 0}... }
         {
+            if constexpr (sizeof ...(indexes) != 0)
+            {
+                _indexes[0].second = 1;
+                for (std::size_t i = 1; i < _indexes.size(); ++i)
+                    _indexes[i].second = _indexes[i - 1].second * _indexes[i - 1].first;
+            }
         }
 
         // mapping indexes to container index
-        constexpr auto operator()(auto i, auto ...ds) const
+        constexpr auto operator()(std::convertible_to<std::size_t> auto&& ...indexes) const
         {
-            assert(i < _indexes[0]);
-            if constexpr (sizeof...(ds) == 0)
-                return i;
-            else
-                return i + _indexes[0] * dynamic_indexer_t{}(ds...);
+            check_indexes(indexes...);
+
+            std::size_t index = 0;
+
+            for (std::size_t idx = 0; auto i : std::initializer_list{ indexes... })
+                index += i * _indexes[idx++].second;
+
+            return index;
         }
 
-        constexpr auto size() const
-        {
-            return std::accumulate(_indexes.begin(), _indexes.end(), std::size_t(1),
-                [](auto a, auto b) { return a * b; });
-        }
+        constexpr auto operator== (const dynamic_indexer_t& other) const { return _indexes == other._indexes; }
 
+        constexpr auto size() const { return _indexes.back().first * _indexes.back().second; }
         constexpr auto cardinality() const { return _indexes.size(); }
+        auto dimension(std::size_t index) const { gb::yadro::util::gbassert(index < cardinality());  return _indexes[index].first; }
 
-        constexpr auto dimension(auto index) const { return _indexes.at(index); }
+        constexpr auto check_indexes(std::convertible_to<std::size_t> auto&& ... indexes) const
+        {
+            gb::yadro::util::gbassert(sizeof...(indexes) == _indexes.size());
+            for (std::size_t idx = 0; std::size_t i: std::initializer_list{ indexes... })
+            {
+                gb::yadro::util::gbassert(_indexes[idx++].first > i);
+            }
+        }
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive), std::forward<decltype(self)>(self)._indexes);
+        }
 
     private:
-        std::vector<std::size_t> _indexes;
+        std::vector<std::pair<std::size_t, std::size_t>> _indexes; // {dimension, multiple}[N]
     };
 
     //---------------------------------------------------------------------------------------------
+    // basic_tensor derives from indexer to enable empty base class optimization
     template<class T, std::ranges::range container_t, class indexer_t>
-    struct basic_tensor
+    struct basic_tensor : indexer_t
     {
         basic_tensor() = default;
-        basic_tensor(std::convertible_to<indexer_t> auto&& indexer,
-            std::convertible_to<T> auto&& ... args) : _indexer(std::forward<decltype(indexer)>(indexer)),
-            _data{ std::forward<decltype(args)>(args)... }
+        explicit basic_tensor(std::convertible_to<indexer_t> auto&& indexer, auto&& ... args)
+            : indexer_t(std::forward<decltype(indexer)>(indexer)),
+            _data( std::forward<decltype(args)>(args)... )
         {
         }
 
-        constexpr auto& operator()(this auto&& self, auto... indexes)
+        explicit basic_tensor(std::convertible_to<T> auto&& ... data) : _data{ std::forward<decltype(data)>(data)... }
         {
-            return std::forward<decltype(self)>(self)._data[self._indexer(indexes...)];
         }
 
-        const auto& indexer() const { return _indexer; }
+        constexpr decltype(auto) operator()(this auto&& self, std::convertible_to<std::size_t> auto... indexes)
+        {
+            return std::forward<decltype(self)>(self)._data[self.indexer()(indexes...)];
+        }
+
+        auto operator== (const basic_tensor& other) const { return indexer() == other.indexer() && _data == other._data; }
+        const auto& indexer() const { return static_cast<const indexer_t&>(*this); }
+        auto& indexer() { return static_cast<indexer_t&>(*this); }
+        
+        auto index_of(std::convertible_to<std::size_t> auto... indexes) const
+        {
+            return indexer()(indexes...);
+        }
+
+        auto& data(this auto&& self) { return std::forward<decltype(self)>(self)._data; }
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive), std::forward<decltype(self)>(self).indexer(),
+                std::forward<decltype(self)>(self)._data);
+        }
 
     private:
-        indexer_t _indexer;
         container_t _data;
     };
 
     //---------------------------------------------------------------------------------------------
     template<class T, std::size_t ...Ds>
-    struct static_tensor : basic_tensor<T, std::array<T, (1*...*Ds)>, static_indexer_t<Ds... >>
+    struct tensor : basic_tensor<T, std::array<T, (1*...*Ds)>, static_indexer_t<Ds... >>
     {
         using indexer_t = static_indexer_t<Ds... >;
         using base_t = basic_tensor<T, std::array<T, (1*...*Ds)>, indexer_t>;
-        static_tensor() = default;
-        static_tensor(auto&& ... args) :
-            base_t(indexer_t{}, std::forward<decltype(args)>(args)...)
-        {
-            static_assert(indexer_t::size() == sizeof...(args));
-        }
+        using dimensions_t = std::index_sequence<Ds...>;
 
-        static constexpr auto indexer() { return static_indexer_t < Ds... >{}; }
+        tensor() = default;
+
+        tensor(std::convertible_to<T> auto&& ... data) : base_t(std::forward<decltype(data)>(data)...)
+        {
+            static_assert(sizeof...(data) == 0 || indexer_t::size() == sizeof...(data));
+        }
     };
 
     //---------------------------------------------------------------------------------------------
     template<class T>
-    struct dynamic_tensor : basic_tensor<T, std::vector<T>, dynamic_indexer_t>
+    struct tensor<T> : basic_tensor<T, std::vector<T>, dynamic_indexer_t>
     {
         using indexer_t = dynamic_indexer_t;
         using base_t = basic_tensor<T, std::vector<T>, indexer_t>;
 
-        dynamic_tensor() = default;
+        tensor() = default;
 
-        dynamic_tensor(std::convertible_to<indexer_t> auto&& indexer) :
-            base_t{ std::forward<decltype(indexer)>(indexer) }
+        tensor(std::convertible_to<std::size_t> auto ... dimensions) :
+            base_t(indexer_t(dimensions ...), (1 * ... * dimensions))
         {
         }
-
-        dynamic_tensor(std::convertible_to<std::size_t> auto ... dimensions) :
-            base_t(indexer_t(dimensions ...))
-        {
-        }
-
-        using base_t::indexer;
     };
 }

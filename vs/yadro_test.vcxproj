@@ -181,6 +181,7 @@
   <ItemGroup>
     <ClCompile Include="..\test\archive_test.cpp" />
     <ClCompile Include="..\test\async_test.cpp" />
+    <ClCompile Include="..\test\container_test.cpp" />
     <ClCompile Include="..\test\graph_test.cpp" />
     <ClCompile Include="..\test\util_test.cpp" />
     <ClCompile Include="..\test\yadro_test.cpp" />

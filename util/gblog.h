@@ -320,8 +320,10 @@ namespace gb::yadro::util
 
     inline auto& logger::writeln(auto&& ... args) const
     {
+        std::stringstream ss;
+        (ss << ... << args);
         std::lock_guard _(_m);
-        write(std::forward<decltype(args)>(args)...);
+        write(ss.str());
         return write_cat(0, std::endl);
     }
 

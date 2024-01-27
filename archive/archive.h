@@ -53,6 +53,23 @@
 namespace gb::yadro::archive
 {
     //---------------------------------------------------------------------
+    // convenience function to deserialize multiple types
+    template<class T, class... Ts>
+    auto deserialize(auto&& archive) requires requires { T{}; (Ts{}, ...); }
+    {
+        T t;
+        std::invoke(std::forward<decltype(archive)>(archive), t);
+
+        if constexpr (sizeof... (Ts) == 0)
+            return std::tuple(t);
+        else
+        {
+            return std::tuple_cat(std::tuple(t), 
+                deserialize<Ts...>(std::forward<decltype(archive)>(archive)));
+        }
+    }
+    
+    //---------------------------------------------------------------------
     enum class archive_format_t { binary, text, custom };
     //---------------------------------------------------------------------
     // archive defined for in- and out-streams, but not for io-streams
@@ -557,8 +574,8 @@ namespace gb::yadro::archive
     }
     //---------------------------------------------------------------------
     // serialization of variant
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_variant_v<T>)
+    template<class Archive, variant_c T>
+    auto serialize(Archive&& a, T&& t) //requires(is_variant_v<T>)
     {
         static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
 

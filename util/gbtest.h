@@ -108,6 +108,7 @@ namespace gb::yadro::util
         {
             std::vector<std::future<void>> futures;
             auto start_time = std::chrono::system_clock::now();
+            const std::size_t tab_size = 50;
 
             for (auto& rec : _tests)
             {
@@ -126,36 +127,36 @@ namespace gb::yadro::util
                                 if (_verbose)
                                 {
                                     auto ts = time_stamp() + " ";
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + 50), "PASSED (",
+                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "PASSED (",
                                         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
                                         " ms)");
                                 }
                                 else
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "PASSED");
+                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(tab_size), "PASSED");
                             }
                             catch (std::exception& ex)
                             {
                                 if (_verbose)
                                 {
                                     auto ts = time_stamp() + " ";
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + 50), "FAILED (",
+                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "FAILED (",
                                         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
                                         " ms)\n", ex.what());
                                 }
                                 else
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "FAILED\n", ex.what());
+                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(tab_size), "FAILED\n", ex.what());
                             }
                             catch (...)
                             {
                                 if (_verbose)
                                 {
                                     auto ts = time_stamp() + " ";
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + 50), "FAILED (",
+                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "FAILED (",
                                         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
                                         " ms), unknown exception");
                                 }
                                 else
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "FAILED, unknown exception");
+                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(tab_size), "FAILED, unknown exception");
                             }
                         };
 
@@ -166,7 +167,7 @@ namespace gb::yadro::util
                     }
                     else
                     {
-                        _log.writeln(rec.first, ".", test->_test_name, ":", tab(50), "DISABLED");
+                        _log.writeln(rec.first, ".", test->_test_name, ":", tab(tab_size), "DISABLED");
                     }
                 }
             }

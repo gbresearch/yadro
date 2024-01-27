@@ -39,76 +39,6 @@
 
 namespace gb::yadro::archive
 {
-#if 0
-    //---------------------------------------------------------------------
-    // facilities available in c++20
-
-    struct nonesuch {
-        nonesuch() = delete;
-        ~nonesuch() = delete;
-        nonesuch(const nonesuch&) = delete;
-        void operator=(const nonesuch&) = delete;
-    };
-
-    namespace detail
-    {
-        template<class Default, class AlwaysVoid, template<class...> class Op, class... Args>
-        struct detector
-        {
-            using value_t = std::false_type;
-            using type = Default;
-        };
-
-
-        template<class Default, template<class...> class Op, class... Args>
-        struct detector<Default, std::void_t<Op<Args...>>, Op, Args...>
-        {
-            using value_t = std::true_type;
-            using type = Op<Args...>;
-        };
-    }
-
-    //---------------------------------------------------------------------
-    // detector aliases
-    template<template<class...> class Op, class... Args>
-    using is_detected = typename detail::detector<nonesuch, void, Op, Args...>::value_t;
-
-    template<template<class...> class Op, class... Args>
-    using detected_t = typename detail::detector<nonesuch, void, Op, Args...>::type;
-
-    template <class Default, template<class...> class Op, class... Args>
-    using detected_or = detail::detector<Default, void, Op, Args...>;
-
-    //---------------------------------------------------------------------
-    // additional utilities
-    template< template<class...> class Op, class... Args >
-    constexpr bool is_detected_v = is_detected<Op, Args...>::value;
-
-    template< class Default, template<class...> class Op, class... Args >
-    using detected_or_t = typename detected_or<Default, Op, Args...>::type;
-
-    template <class Expected, template<class...> class Op, class... Args>
-    using is_detected_exact = std::is_same<Expected, detected_t<Op, Args...>>;
-
-    template <class Expected, template<class...> class Op, class... Args>
-    constexpr bool is_detected_exact_v = is_detected_exact<Expected, Op, Args...>::value;
-
-    template <class To, template<class...> class Op, class... Args>
-    using is_detected_convertible = std::is_convertible<detected_t<Op, Args...>, To>;
-
-    template <class To, template<class...> class Op, class... Args>
-    constexpr bool is_detected_convertible_v = is_detected_convertible<To, Op, Args...>::value;
-
-    //---------------------------------------------------------------------
-    template< class T >
-    struct remove_cvref
-    {
-        using type = std::remove_cv_t<std::remove_reference_t<T>>;
-    };
-
-    template< class T >
-    using remove_cvref_t = typename remove_cvref<T>::type;
-#endif
     //---------------------------------------------------------------------
     // private details
     //---------------------------------------------------------------------
@@ -286,4 +216,10 @@ namespace gb::yadro::archive
     // variant
     template<class T>
     constexpr bool is_variant_v = is_detected_v < detail::variant_fn, T>;
+
+    template<class T>
+    concept variant_c = requires { 
+        /*std::declval<T>().index();*/  
+        std::visit([](auto&&) {}, std::declval<T>()); 
+        std::variant_size_v<std::remove_cvref_t<T>>; };
 }

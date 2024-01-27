@@ -21,5 +21,8 @@
     <ClCompile Include="..\test\async_test.cpp">
       <Filter>test</Filter>
     </ClCompile>
+    <ClCompile Include="..\test\container_test.cpp">
+      <Filter>test</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

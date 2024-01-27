@@ -49,9 +49,6 @@ namespace gb::yadro::container
         typename matrix_traits<M>;
     };
 
-    template<class T>
-    struct matrix;
-
     //---------------------------------------------------------------------------------------------
     template<matrix_op Matrix>
     struct minor_view
@@ -82,14 +79,14 @@ namespace gb::yadro::container
             return _matrix(row, col);
         }
 
-        auto to_matrix() const
-        {
-            matrix<data_type> result(rows(), columns());
-            for (std::size_t row = 0, rsize = rows(); row < rsize; ++row)
-                for (std::size_t col = 0, csize = columns(); col < csize; ++col)
-                    result(row, col) = (*this)(row, col);
-            return result;
-        }
+        //auto to_matrix() const
+        //{
+        //    matrix<data_type> result(rows(), columns());
+        //    for (std::size_t row = 0, rsize = rows(); row < rsize; ++row)
+        //        for (std::size_t col = 0, csize = columns(); col < csize; ++col)
+        //            result(row, col) = (*this)(row, col);
+        //    return result;
+        //}
 
     private:
         Matrix _matrix;
@@ -112,31 +109,42 @@ namespace gb::yadro::container
     };
     
     //---------------------------------------------------------------------------------------------
-    template<class T>
-    struct matrix : dynamic_tensor<T>
+    template<class T, std::size_t ...RowsColumns>
+    requires (sizeof... (RowColumns) == 0 || sizeof... (RowColumns) == 2)
+    struct matrix : tensor<T, RowsColumns...>
     {
         using data_type = T;
-        using dynamic_tensor<T>::indexer;
+        using tensor_t = tensor<T, RowsColumns...>;
+        using tensor_t::indexer;
 
-        constexpr auto rows() const { return indexer().dimension(0); }
-        constexpr auto columns() const { return indexer().dimension(1); }
+        consteval auto rows() const { return indexer().dimension(0); }
+        consteval auto columns() const { return indexer().dimension(1); }
 
+        matrix() = default;
         matrix(instantiation_of<minor_view> auto&& view)
         {
             *this = view.to_matrix();
         }
 
         matrix(std::size_t rows, std::size_t columns)
-            : dynamic_tensor<T>(rows, columns)
+            : tensor_t(rows, columns)
         {
         }
     };
+
+    auto operator== (matrix_op auto&& m1, matrix_op auto&& m2)
+    {
+        auto [first, second] = std::ranges::mismatch(m1.data(), m2.data());
+        return first == m1.data().end() && second == m2.data().end();
+    }
 
     // VC 17.7.7: can't use auto in deduction guide
     // see: https://developercommunity.visualstudio.com/t/C-deduction-guide-fails-in-msvc-v19la/10565664
     template<instantiation_of<minor_view> View>
     matrix(View&& view) -> matrix<typename std::remove_cvref_t<View>::data_type>;
 
+    //---------------------------------------------------------------------------------------------
+    // matrix functions
     //---------------------------------------------------------------------------------------------
     inline auto determinant(matrix_op auto&& m, std::size_t row = 0)
     {
