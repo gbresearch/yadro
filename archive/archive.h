@@ -54,19 +54,12 @@ namespace gb::yadro::archive
 {
     //---------------------------------------------------------------------
     // convenience function to deserialize multiple types
-    template<class T, class... Ts>
-    auto deserialize(auto&& archive) requires requires { T{}; (Ts{}, ...); }
+    template<class... Ts>
+    auto deserialize(auto&& archive) requires requires { (Ts{}, ...); }
     {
-        T t;
-        std::invoke(std::forward<decltype(archive)>(archive), t);
-
-        if constexpr (sizeof... (Ts) == 0)
-            return std::tuple(t);
-        else
-        {
-            return std::tuple_cat(std::tuple(t), 
-                deserialize<Ts...>(std::forward<decltype(archive)>(archive)));
-        }
+        std::tuple<Ts...> tup;
+        std::invoke(std::forward<decltype(archive)>(archive), tup);
+        return tup;
     }
     
     //---------------------------------------------------------------------
@@ -187,6 +180,31 @@ namespace gb::yadro::archive
 
     template<class Stream, archive_format_t Fmt>
     archive(Stream&&)->archive<Stream, Fmt>;
+    
+    //---------------------------------------------------------------------
+    // archive_size_stream is archive proxy class for size calculation
+    struct archive_size_stream
+    {
+        using char_type = char;
+
+        void write(const char_type* c, std::streamsize size)
+        {
+            _size += size;
+        }
+
+        auto get_size() const { return _size; }
+    private:
+        std::uint64_t _size;
+    };
+
+    // calculate the size (in bytes) of buffer necessary to serialize binary data
+    inline auto serialization_size(auto&&... args)
+    {
+        archive< archive_size_stream, archive_format_t::custom> ar;
+        ar(std::forward<decltype(args)>(args)...);
+        return ar.get_stream().get_size();
+    }
+    
     //---------------------------------------------------------------------
     struct imem_stream;
 
@@ -236,8 +254,9 @@ namespace gb::yadro::archive
     using omem_archive = archive<omem_stream, archive_format_t::custom>;
 
     //---------------------------------------------------------------------
-    // serialize through conversion to type T
+    // serialize through conversion to type As
     template<class As, class T>
+    requires (std::is_default_constructible_v<As>)
     class serialize_as_t
     {
         T t;
@@ -249,9 +268,7 @@ namespace gb::yadro::archive
         template<class Ar>
         auto serialize(Ar& a) requires(is_iarchive_v<Ar>)
         {
-            As tmp;
-            a(tmp);
-            t = static_cast<std::remove_cvref_t<T>>(tmp);
+            t = static_cast<std::remove_cvref_t<T>>(std::get<0>(deserialize<As>(a)));
         }
         template<class Ar>
         auto serialize(Ar& a) const requires(is_oarchive_v<Ar>)
