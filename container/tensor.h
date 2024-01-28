@@ -43,6 +43,18 @@
 namespace gb::yadro::container
 {
     //---------------------------------------------------------------------------------------------
+    // concepts
+    //---------------------------------------------------------------------------------------------
+    template<class T>
+    concept tensor_c = requires
+    {
+        std::declval<T>().data();
+        std::declval<T>().size();
+        std::declval<T>().cardinality();
+        std::declval<T>().dimension(std::declval<std::size_t>());
+    };
+
+    //---------------------------------------------------------------------------------------------
     // indexers
     //---------------------------------------------------------------------------------------------
 
@@ -85,7 +97,7 @@ namespace gb::yadro::container
     // dynamic indexer with runtime Cardinality
     struct dynamic_indexer_t
     {
-        dynamic_indexer_t(std::convertible_to<std::size_t> auto&& ... indexes)
+        explicit dynamic_indexer_t(std::convertible_to<std::size_t> auto&& ... indexes)
             : _indexes{ {static_cast<std::size_t>(indexes), 0}... }
         {
             if constexpr (sizeof ...(indexes) != 0)
@@ -138,6 +150,10 @@ namespace gb::yadro::container
     template<class T, std::ranges::range container_t, class indexer_t>
     struct basic_tensor : indexer_t
     {
+        using indexer_t::size;
+        using indexer_t::cardinality;
+        using indexer_t::dimension;
+
         basic_tensor() = default;
         explicit basic_tensor(std::convertible_to<indexer_t> auto&& indexer, auto&& ... args)
             : indexer_t(std::forward<decltype(indexer)>(indexer)),
@@ -148,6 +164,7 @@ namespace gb::yadro::container
         explicit basic_tensor(std::convertible_to<T> auto&& ... data) : _data{ std::forward<decltype(data)>(data)... }
         {
         }
+
 
         constexpr decltype(auto) operator()(this auto&& self, std::convertible_to<std::size_t> auto... indexes)
         {
@@ -163,7 +180,14 @@ namespace gb::yadro::container
             return indexer()(indexes...);
         }
 
-        auto& data(this auto&& self) { return std::forward<decltype(self)>(self)._data; }
+        auto& data() { return _data; }
+        const auto& data() const { return _data; }
+
+        auto is_compatible(tensor_c auto&& other) const
+        {
+            // the other tensor must have the same size an cardinality, it may have different dimensions
+            return other.size() == size() && other.cardinality() == cardinality();
+        }
 
         auto serialize(this auto&& self, auto&& archive)
         {
@@ -176,33 +200,95 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------------------------------
+    // static tensor with constant compile-time dimensions
     template<class T, std::size_t ...Ds>
     struct tensor : basic_tensor<T, std::array<T, (1*...*Ds)>, static_indexer_t<Ds... >>
     {
         using indexer_t = static_indexer_t<Ds... >;
         using base_t = basic_tensor<T, std::array<T, (1*...*Ds)>, indexer_t>;
         using dimensions_t = std::index_sequence<Ds...>;
+        using base_t::size;
+        using base_t::cardinality;
+        using base_t::dimension;
+        using base_t::data;
+        using base_t::is_compatible;
 
         tensor() = default;
 
-        tensor(std::convertible_to<T> auto&& ... data) : base_t(std::forward<decltype(data)>(data)...)
+        // constructing tensor and assigning values in flat view
+        explicit tensor(std::convertible_to<T> auto&& ... data) : base_t(std::forward<decltype(data)>(data)...)
         {
             static_assert(sizeof...(data) == 0 || indexer_t::size() == sizeof...(data));
         }
+
+        // assigning any compatible tensor (copying data)
+        auto& operator= (tensor_c auto&& other)
+        {
+            gb::yadro::util::gbassert(is_compatible(other));
+            std::ranges::copy(other.data(), std::begin(data()));
+            return *this;
+        }
+
     };
 
     //---------------------------------------------------------------------------------------------
+    // dynamic tensor with dimensions assigned at run time
     template<class T>
     struct tensor<T> : basic_tensor<T, std::vector<T>, dynamic_indexer_t>
     {
         using indexer_t = dynamic_indexer_t;
         using base_t = basic_tensor<T, std::vector<T>, indexer_t>;
+        using base_t::size;
+        using base_t::cardinality;
+        using base_t::dimension;
+        using base_t::data;
+        using base_t::is_compatible;
 
         tensor() = default;
 
-        tensor(std::convertible_to<std::size_t> auto ... dimensions) :
+        // constructing tensor of specified dimensions
+        explicit tensor(std::convertible_to<std::size_t> auto ... dimensions) :
             base_t(indexer_t(dimensions ...), (1 * ... * dimensions))
         {
         }
+
+        // constructing from static tensor
+        template<std::convertible_to<T> V, std::size_t ...Ds>
+        explicit tensor(const tensor<V, Ds...>& other) : tensor(Ds...)
+        {
+            std::ranges::copy(other.data(), std::begin(data()));
+        }
+
+        // assigning any compatible tensor
+        auto& operator= (tensor_c auto&& other)
+        {
+            gb::yadro::util::gbassert(is_compatible(other));
+            std::ranges::copy(other.data(), std::begin(data()));
+            return *this;
+        }
     };
+
+    //---------------------------------------------------------------------------------------------
+    // operators
+    namespace tensor_operators
+    {
+        auto operator== (tensor_c auto&& tensor1, tensor_c auto&& tensor2)
+        {
+            if (tensor1.is_compatible(tensor2))
+            {
+                auto matched_dimensions = true;
+                for (std::size_t index = 0, cardinality = tensor1.cardinality();
+                    index < cardinality && matched_dimensions; ++index)
+                    matched_dimensions = tensor1.dimension(index) == tensor2.dimension(index);
+                
+                if (matched_dimensions)
+                {
+                    auto [first, second] = std::ranges::mismatch(tensor1.data(), tensor1.data());
+                    return first == tensor1.data().end() && second == tensor1.data().end();
+                }
+            }
+            return false;
+        }
+    }
+
 }

@@ -28,21 +28,3 @@
 
 #include "graph.h"
 #include "matrix.h"
-
-namespace {
-    using namespace gb::yadro::container;
-    auto test()
-    {
-        auto archiver = [](this auto&& self, auto...) ->decltype(auto) { return self; };
-        tensor<int, 2, 2> t0{ 1,2,3,4 };
-        t0.serialize(archiver);
-        tensor<int, 2, 3, 5> t;
-        t.indexer();
-        tensor<int> td(3,3,3);
-        td.indexer();
-        t(1, 2, 3) = td(2, 2, 1);
-        auto v = tensor<int>(2, 3)(1, 1);
-        matrix<double> m(2,2);
-        m.serialize(archiver);
-    }
-}
