@@ -51,7 +51,7 @@ namespace gb::yadro::container
 
     //---------------------------------------------------------------------------------------------
     template<class T, std::size_t ...RowsColumns>
-        requires (sizeof... (RowColumns) == 0 || sizeof... (RowColumns) == 2)
+        requires (sizeof... (RowsColumns) == 0 || sizeof... (RowsColumns) == 2)
     struct matrix : tensor<T, RowsColumns...>
     {
         using data_type = T;
@@ -74,6 +74,12 @@ namespace gb::yadro::container
             return *this;
         }
     };
+
+    template<class T, std::size_t columns>
+    using row_t = matrix<T, std::size_t(1), columns>;
+
+    template<class T, std::size_t rows>
+    using column_t = matrix<T, rows, std::size_t(1)>;
 
     // VC 17.7.7: can't use auto in deduction guide
     // see: https://developercommunity.visualstudio.com/t/C-deduction-guide-fails-in-msvc-v19la/10565664

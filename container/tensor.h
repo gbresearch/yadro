@@ -161,7 +161,7 @@ namespace gb::yadro::container
         {
         }
 
-        explicit basic_tensor(std::convertible_to<T> auto&& ... data) : _data{ std::forward<decltype(data)>(data)... }
+        explicit basic_tensor(std::convertible_to<T> auto&& ... data) : _data{ static_cast<T>(data)... }
         {
         }
 

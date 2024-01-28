@@ -121,5 +121,14 @@ namespace
         auto inverted = invert(m3);
         gbassert(inverted == matrix<double, 2, 2>{1., 0., -0.2, 0.2});
         gbassert(m3 * inverted == identity_matrix<double>(2));
+
+        matrix<double, 3, 3> m4{
+            1, 1, 1,
+            1, 2, 5,
+            2, -1, 3
+        };
+        auto solution4 = solve(m4, column_t<double, 3>{3, 8, 4});
+        gbassert(solution4 == column_t<double, 3>{ 1, 1, 1 });
+        gbassert(determinant(m4) == 13);
     }
 }
