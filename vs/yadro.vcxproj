@@ -114,7 +114,7 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\algorithm\neighbor_expansion.h" />
+    <ClInclude Include="..\algorithm\genetic_optimization.h" />
     <ClInclude Include="..\archive\archive.h" />
     <ClInclude Include="..\archive\archive_traits.h" />
     <ClInclude Include="..\async\taskcontainer.h" />

@@ -89,7 +89,7 @@
     <ClInclude Include="..\container\matrix.h">
       <Filter>container</Filter>
     </ClInclude>
-    <ClInclude Include="..\algorithm\neighbor_expansion.h">
+    <ClInclude Include="..\algorithm\genetic_optimization.h">
       <Filter>algorithm</Filter>
     </ClInclude>
   </ItemGroup>

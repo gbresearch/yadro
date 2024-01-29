@@ -179,6 +179,7 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\test\algorithm_test.cpp" />
     <ClCompile Include="..\test\archive_test.cpp" />
     <ClCompile Include="..\test\async_test.cpp" />
     <ClCompile Include="..\test\container_test.cpp" />

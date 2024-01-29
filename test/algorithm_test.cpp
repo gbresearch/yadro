@@ -26,27 +26,42 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-#pragma once
-
-#include "../archive/archive.h"
-#include "../async/taskcontainer.h"
-#include "../async/threadpool.h"
-#include "../container/graph.h"
-#include "../container/static_string.h"
-#include "../container/static_vector.h"
-#include "../container/tree.h"
-#include "../util/file_mutex.h"
-#include "../util/gberror.h"
-#include "../util/gblog.h"
-#include "../util/gbmemory.h"
 #include "../util/gbtest.h"
-#include "../util/gbtimer.h"
 #include "../util/misc.h"
-#include "../util/traits.h"
-#include "../util/gbwin.h"
-#include "../util/gnuplot.h"
-#include "../util/tuple_functions.h"
-#include "../util/gbmacro.h"
-#include "../container/tensor.h"
-#include "../container/matrix.h"
+#include "../archive/archive.h"
 #include "../algorithm/genetic_optimization.h"
+#include <iostream>
+#include <thread>
+
+namespace
+{
+    using namespace gb::yadro::algorithm;
+    using namespace gb::yadro::util;
+    using namespace gb::yadro::archive;
+
+    GB_TEST(algorithm, genetic_optimization_test)
+    {
+        using namespace std::chrono_literals;
+
+        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v) 
+            { return x * x + y * y + std::exp(z)/2 + std::exp(-z)/2 - 1 + ( v + std::sin(v))* (v + std::sin(v)); },
+            std::tuple(-10., 10.), std::tuple(-10., 10.), std::tuple(-10., 10.), std::tuple(-10., 10.));
+
+        auto opt_map = optimizer.optimize(500ms, 5);
+        gbassert(opt_map.size() > 0 && opt_map.size() <= 5);
+        gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
+
+        //auto [genetic_count, mutation_count, improvement_count, repetition_count, loop_count, unique_param_count] = optimizer.get_stats();
+
+        //auto [target, xyzv] = *opt_map.begin();
+        //auto [x, y, z, v] = xyzv;
+
+        //std::cout << "target: " << target << ", (x,y,z,v): " << x << ", " << y << ", " << z << ", " << v << "\n";
+        //std::cout << "loop count: " << loop_count << ", improvement count: " << improvement_count
+        //    << ", genetic_count: " << genetic_count
+        //    << ", mutation_count: " << mutation_count
+        //    << ", unique params: " << unique_param_count
+        //    << ", repetitions: " << 100. * repetition_count / loop_count << "%"
+        //    << "\n";
+    }
+}
