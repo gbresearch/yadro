@@ -34,6 +34,7 @@
 #include <chrono>
 #include <random>
 #include <optional>
+#include <ostream>
 
 #include "../util/gberror.h"
 #include "../util/misc.h"
@@ -52,31 +53,42 @@ namespace gb::yadro::algorithm
         : _target_fn(target_fn), _min_max_params(min_max...)
         { }
 
+        // performs genetic_optimization optimization, limited to time duration and max_tries
+        // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map 
         auto optimize(auto&& duration, std::size_t max_history = -1, std::size_t max_tries = -1) const;
-        
-        struct stats
-        {
-            std::size_t genetic_count;
-            std::size_t mutation_count;
-            std::size_t improvement_count;
-            std::size_t repetition_count;
-            std::size_t loop_count;
-            std::size_t unique_param_count;
-        };
-
-        const auto& get_stats() const { return _s; }
 
     private:
         Fn _target_fn;
         std::tuple<std::tuple<Types, Types>...> _min_max_params;
-        mutable stats _s{};
+    };
+    
+    // statistics for generic_optimization_t
+    struct stats
+    {
+        std::size_t genetic_count;
+        std::size_t mutation_count;
+        std::size_t improvement_count;
+        std::size_t repetition_count;
+        std::size_t loop_count;
+        std::size_t unique_param_count;
+
+        friend auto& operator<< (std::ostream& os, const stats& s)
+        {
+            os << "loop count: " << s.loop_count
+                << ", improvement count: " << s.improvement_count
+                << ", genetic_count: " << s.genetic_count
+                << ", mutation_count: " << s.mutation_count
+                << ", unique params: " << s.unique_param_count
+                << ", repetitions: " << (s.loop_count != 0 ? 100. * s.repetition_count / s.loop_count : 0) << "%"
+                << "\n";
+            return os;
+        }
     };
 
     template<class Fn, class ...Types>
     auto genetic_optimization_t<Fn, Types...>::optimize(auto&& duration, std::size_t max_history, std::size_t max_tries) const
     {
-        //GB_TIMER(optimize, milliseconds);
-        _s = stats{};
+        stats s{};
         using target_t = std::invoke_result_t<Fn, Types...>;
         std::set<std::size_t> visited; // to avoid linear search through _opt_set
         std::multimap<target_t, std::tuple<Types...>> opt_map; // target functions calculated
@@ -99,18 +111,17 @@ namespace gb::yadro::algorithm
         std::uniform_real_distribution<> mutation_dist(0., 1.);
 
         auto next_genetic_mutation = [&](auto&& rand_params1, auto&& rand_params2) {
-            //GB_TIMER(next_genetic_mutation, milliseconds);
             return gb::yadro::util::tuple_transform(
                 [&](auto&& param1, auto&& param2, auto&& min_max)
                 {
                     if (std::abs(genetic_distribution(gen)) > 1)
                     {
-                        ++_s.genetic_count;
+                        ++s.genetic_count;
                         return param2;
                     }
                     if (std::abs(genetic_distribution(gen)) > 1)
                     {
-                        ++_s.mutation_count;
+                        ++s.mutation_count;
                         return std::get<0>(min_max) + (std::get<1>(min_max) - std::get<0>(min_max)) * mutation_dist(gen);
                     }
                     else
@@ -123,36 +134,37 @@ namespace gb::yadro::algorithm
             std::tuple(initial_params(), std::numeric_limits<double>::infinity(), std::chrono::high_resolution_clock::now(), std::chrono::high_resolution_clock::now());
             max_tries != 0 && std::chrono::high_resolution_clock::now() - start_time < duration
             && std::chrono::high_resolution_clock::now() - last_target_update < duration / 4;
-            --max_tries, ++_s.loop_count
+            --max_tries, ++s.loop_count
             )
         {
             if (visited.insert(gb::yadro::util::make_hash(rand_params)).second)
             {
-                //GB_TIMER(new_target, milliseconds);
-                ++_s.unique_param_count;
+                ++s.unique_param_count;
                 auto new_target = std::apply(_target_fn, rand_params);
 
                 opt_map.emplace(new_target, rand_params);
+
+                if (opt_map.size() > max_history)
+                {
+                    opt_map.erase(--opt_map.end());
+                }
 
                 if (new_target < target)
                 {
                     target = new_target;
                     last_target_update = std::chrono::high_resolution_clock::now();
-                    ++_s.improvement_count;
-                }
-                
-                if (opt_map.size() > max_history)
-                {
-                    opt_map.erase(--opt_map.end());
+                    ++s.improvement_count;
                 }
             }
             else
             {
-                ++_s.repetition_count;
+                ++s.repetition_count;
             }
 
+            // make genetic move
             gb::yadro::util::gbassert(!opt_map.empty());
-            if (opt_map.size() > 1)
+                
+            if (opt_map.size() > 1) // two best candidates breed
                 rand_params = next_genetic_mutation(opt_map.begin()->second, (++opt_map.begin())->second);
             else
                 rand_params = next_genetic_mutation(opt_map.begin()->second, opt_map.begin()->second);
@@ -164,6 +176,6 @@ namespace gb::yadro::algorithm
             opt_map.insert(first_rec);
         }
 
-        return opt_map;
+        return std::tuple(s, opt_map);
     }
 }

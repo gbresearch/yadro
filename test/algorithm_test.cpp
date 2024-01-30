@@ -47,21 +47,8 @@ namespace
             { return x * x + y * y + std::exp(z)/2 + std::exp(-z)/2 - 1 + ( v + std::sin(v))* (v + std::sin(v)); },
             std::tuple(-10., 10.), std::tuple(-10., 10.), std::tuple(-10., 10.), std::tuple(-10., 10.));
 
-        auto opt_map = optimizer.optimize(500ms, 5);
-        gbassert(opt_map.size() > 0 && opt_map.size() <= 5);
+        auto [stat, opt_map] = optimizer.optimize(100ms, 5);
+        gbassert(opt_map.size() == 5);
         gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
-
-        //auto [genetic_count, mutation_count, improvement_count, repetition_count, loop_count, unique_param_count] = optimizer.get_stats();
-
-        //auto [target, xyzv] = *opt_map.begin();
-        //auto [x, y, z, v] = xyzv;
-
-        //std::cout << "target: " << target << ", (x,y,z,v): " << x << ", " << y << ", " << z << ", " << v << "\n";
-        //std::cout << "loop count: " << loop_count << ", improvement count: " << improvement_count
-        //    << ", genetic_count: " << genetic_count
-        //    << ", mutation_count: " << mutation_count
-        //    << ", unique params: " << unique_param_count
-        //    << ", repetitions: " << 100. * repetition_count / loop_count << "%"
-        //    << "\n";
     }
 }
