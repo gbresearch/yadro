@@ -101,8 +101,8 @@ namespace gb::yadro::algorithm
                 return gb::yadro::util::tuple_transform([&](auto&& tup)
                     {
                         auto [min_value, max_value] = tup;
-                        std::uniform_real_distribution<> dist(min_value, max_value);
-                        return dist(gen);
+                        std::uniform_real_distribution<> dist((double)min_value, (double)max_value);
+                        return static_cast<decltype(min_value)>(dist(gen));
                     }, _min_max_params);
             };
 
@@ -114,18 +114,19 @@ namespace gb::yadro::algorithm
             return gb::yadro::util::tuple_transform(
                 [&](auto&& param1, auto&& param2, auto&& min_max)
                 {
+                    using type_t = std::common_type_t<std::remove_cvref_t<decltype(param1)>, std::remove_cvref_t<decltype(param2)>>;
                     if (std::abs(genetic_distribution(gen)) > 1)
                     {
                         ++s.genetic_count;
-                        return param2;
+                        return static_cast<type_t>(param2);
                     }
                     if (std::abs(genetic_distribution(gen)) > 1)
                     {
                         ++s.mutation_count;
-                        return std::get<0>(min_max) + (std::get<1>(min_max) - std::get<0>(min_max)) * mutation_dist(gen);
+                        return static_cast<type_t>(std::get<0>(min_max) + (std::get<1>(min_max) - std::get<0>(min_max)) * mutation_dist(gen));
                     }
                     else
-                        return param1;
+                        return static_cast<type_t>(param1);
                 }, rand_params1, rand_params2, _min_max_params);
             };
 

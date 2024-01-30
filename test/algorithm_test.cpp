@@ -45,10 +45,20 @@ namespace
 
         genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v) 
             { return x * x + y * y + std::exp(z)/2 + std::exp(-z)/2 - 1 + ( v + std::sin(v))* (v + std::sin(v)); },
-            std::tuple(-10., 10.), std::tuple(-10., 10.), std::tuple(-10., 10.), std::tuple(-10., 10.));
+            std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
 
         auto [stat, opt_map] = optimizer.optimize(100ms, 5);
         gbassert(opt_map.size() == 5);
         gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
+
+#if defined(GB_DEBUGGING)
+        std::cout << stat << "\n";
+        for (auto&& opt : opt_map)
+        {
+            auto [target, xyzv] = opt;
+            auto [x, y, z, v] = xyzv;
+            std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
+        }
+#endif
     }
 }
