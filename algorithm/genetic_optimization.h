@@ -29,6 +29,7 @@
 #pragma once
 #include <map>
 #include <set>
+#include <unordered_set>
 #include <functional>
 #include <tuple>
 #include <chrono>
@@ -55,14 +56,45 @@ namespace gb::yadro::algorithm
 
         // performs genetic_optimization optimization, limited to time duration and max_tries
         // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map 
-        auto optimize(auto&& duration, std::size_t max_history = -1, std::size_t max_tries = -1) const;
+        auto optimize(auto&& duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+
+        // multithreaded version of the above, using threadpool
+        auto optimize(gb::yadro::async::threadpool<>& tp, auto&& duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
     private:
         Fn _target_fn;
         std::tuple<std::tuple<Types, Types>...> _min_max_params;
+        using target_t = std::invoke_result_t<Fn, Types...>;
+
+        std::mutex _m;
+        std::unordered_set<std::size_t> _visited; // to avoid linear search through _opt_set
+        std::multimap<target_t, std::tuple<Types...>> _opt_map; // target functions calculated
+
+        auto insert_visited(std::size_t v)
+        {
+            std::lock_guard _(_m);
+            return _visited.insert(v).second;
+        }
+
+        // emplace the new target and retur true if it improved
+        auto opt_map_emplace(auto target, auto&& params, std::size_t max_history)
+        {
+            std::lock_guard _(_m);
+            auto improved = _opt_map.empty() || target < _opt_map.begin()->first;
+            _opt_map.emplace(target, params);
+
+            if (_opt_map.size() > max_history)
+            {
+                _opt_map.erase(--_opt_map.end());
+            }
+            return improved;
+        }
+
+        void clear_opt_results() { _visited.clear(); _opt_map.clear(); }
+        auto optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries);
     };
-    
-    // statistics for generic_optimization_t
+
+    // statistics for genetic_optimization_t
     struct stats
     {
         std::size_t genetic_count;
@@ -71,6 +103,16 @@ namespace gb::yadro::algorithm
         std::size_t repetition_count;
         std::size_t loop_count;
         std::size_t unique_param_count;
+
+        void add(const stats& other)
+        {
+            genetic_count += other.genetic_count;
+            mutation_count += other.mutation_count;
+            improvement_count += other.improvement_count;
+            repetition_count += other.repetition_count;
+            loop_count += other.loop_count;
+            unique_param_count += other.unique_param_count;
+        }
 
         friend auto& operator<< (std::ostream& os, const stats& s)
         {
@@ -86,13 +128,9 @@ namespace gb::yadro::algorithm
     };
 
     template<class Fn, class ...Types>
-    auto genetic_optimization_t<Fn, Types...>::optimize(auto&& duration, std::size_t max_history, std::size_t max_tries) const
+    auto genetic_optimization_t<Fn, Types...>::optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
         stats s{};
-        using target_t = std::invoke_result_t<Fn, Types...>;
-        std::set<std::size_t> visited; // to avoid linear search through _opt_set
-        std::multimap<target_t, std::tuple<Types...>> opt_map; // target functions calculated
-
         std::random_device rd;
         std::mt19937 gen(rd());
 
@@ -131,28 +169,20 @@ namespace gb::yadro::algorithm
             };
 
 
-        for (auto [rand_params, target, start_time, last_target_update] =
-            std::tuple(initial_params(), std::numeric_limits<double>::infinity(), std::chrono::high_resolution_clock::now(), std::chrono::high_resolution_clock::now());
+        for (auto [rand_params, start_time, last_target_update] =
+            std::tuple(initial_params(), std::chrono::high_resolution_clock::now(), std::chrono::high_resolution_clock::now());
             max_tries != 0 && std::chrono::high_resolution_clock::now() - start_time < duration
-            && std::chrono::high_resolution_clock::now() - last_target_update < duration / 4;
+            && std::chrono::high_resolution_clock::now() - last_target_update < duration / 2;
             --max_tries, ++s.loop_count
             )
         {
-            if (visited.insert(gb::yadro::util::make_hash(rand_params)).second)
+            if (insert_visited(gb::yadro::util::make_hash(rand_params)))
             {
                 ++s.unique_param_count;
                 auto new_target = std::apply(_target_fn, rand_params);
 
-                opt_map.emplace(new_target, rand_params);
-
-                if (opt_map.size() > max_history)
+                if(opt_map_emplace(new_target, rand_params, max_history))
                 {
-                    opt_map.erase(--opt_map.end());
-                }
-
-                if (new_target < target)
-                {
-                    target = new_target;
                     last_target_update = std::chrono::high_resolution_clock::now();
                     ++s.improvement_count;
                 }
@@ -163,20 +193,47 @@ namespace gb::yadro::algorithm
             }
 
             // make genetic move
-            gb::yadro::util::gbassert(!opt_map.empty());
-                
-            if (opt_map.size() > 1) // two best candidates breed
-                rand_params = next_genetic_mutation(opt_map.begin()->second, (++opt_map.begin())->second);
-            else
-                rand_params = next_genetic_mutation(opt_map.begin()->second, opt_map.begin()->second);
 
-            // move the first record to the end of equal range
-            auto first = opt_map.begin();
-            auto first_rec = *first;
-            opt_map.erase(first);
-            opt_map.insert(first_rec);
+            std::tuple<Types...> first_best{};
+            std::tuple<Types...> second_best{};
+            {
+                std::lock_guard _(_m);
+                first_best = _opt_map.begin()->second;
+                second_best = _opt_map.size() > 1 ? (++_opt_map.begin())->second : first_best;
+            }
+            rand_params = next_genetic_mutation(first_best, second_best);
         }
 
-        return std::tuple(s, opt_map);
+        return s;
+    }
+
+    template<class Fn, class ...Types>
+    auto genetic_optimization_t<Fn, Types...>::optimize(auto&& duration, std::size_t max_history, std::size_t max_tries)
+    {
+        clear_opt_results();
+        return std::tuple(optimize_one(duration, max_history, max_tries), _opt_map);
+    }
+
+    template<class Fn, class ...Types>
+    auto genetic_optimization_t<Fn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, auto&& duration, std::size_t max_history, std::size_t max_tries)
+    {
+        clear_opt_results();
+        std::vector<std::future<stats>> futures;
+
+        for (std::size_t i = 0; i < std::thread::hardware_concurrency(); ++i)
+        {
+            futures.push_back(tp([&]
+                {
+                    return optimize_one(duration, max_history, max_tries);
+                }));
+        }
+
+        stats s{};
+        for (auto&& f : futures)
+        {
+            s.add(f.get());
+        }
+
+        return std::tuple(s, _opt_map);
     }
 }
