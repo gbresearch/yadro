@@ -85,7 +85,7 @@ namespace
 
 #if defined(NDEBUG)
             gbassert(opt_map.size() == 5);
-            gbassert(opt_map.begin()->first < 1); // may fail on very slow machines
+            gbassert(opt_map.begin()->first < 0.1); // may fail on very slow machines
 #endif
 
 #if defined(GB_DEBUGGING)
@@ -104,7 +104,7 @@ namespace
             auto [stat, opt_map] = optimizer.optimize(tp, 100ms, 5);
 #if defined(NDEBUG)
             gbassert(opt_map.size() == 5);
-            gbassert(opt_map.begin()->first < 1); // may fail on very slow machines
+            gbassert(opt_map.begin()->first < 0.1); // may fail on very slow machines
 #endif
 
 #if defined(GB_DEBUGGING)

@@ -115,12 +115,17 @@ namespace gb::yadro::algorithm
         {
             std::lock_guard _(_m);
             auto improved = _opt_map.empty() || target < _opt_map.begin()->first;
-            _opt_map.emplace(target, params);
+            
+            if (improved || _opt_map.size() < max_history || target < _opt_map.rend()->first)
+            {
+                _opt_map.emplace(target, params);
+            }
 
             while (_opt_map.size() > max_history)
             {
                 _opt_map.erase(--_opt_map.end());
             }
+
             return improved;
         }
 
@@ -149,11 +154,11 @@ namespace gb::yadro::algorithm
 
         friend auto& operator<< (std::ostream& os, const stats& s)
         {
-            os << "loop count: " << s.loop_count
-                << ", improvement count: " << s.improvement_count
-                << ", genetic_count: " << s.genetic_count
-                << ", mutation_count: " << s.mutation_count
-                << ", unique params: " << s.unique_param_count
+            os << "loops: " << s.loop_count
+                << ", improvements: " << s.improvement_count
+                << ", genetics: " << s.genetic_count
+                << ", mutations: " << s.mutation_count
+                << ", unique: " << s.unique_param_count
                 << ", repetitions: " << (s.loop_count != 0 ? 100. * s.repetition_count / s.loop_count : 0) << "%"
                 << "\n";
             return os;
@@ -181,7 +186,7 @@ namespace gb::yadro::algorithm
         std::normal_distribution<> genetic_distribution(0., 1.);
         std::uniform_real_distribution<> mutation_dist(0., 1.);
 
-        auto next_genetic_mutation = [&](auto&& rand_params1, auto&& rand_params2) {
+        auto next_genetic = [&](auto&& rand_params1, auto&& rand_params2) {
             return gb::yadro::util::tuple_transform(
                 [&](auto&& param1, auto&& param2, auto&& min_max)
                 {
@@ -191,16 +196,25 @@ namespace gb::yadro::algorithm
                         ++s.genetic_count;
                         return static_cast<type_t>(param2);
                     }
+                    else
+                        return static_cast<type_t>(param1);
+                }, rand_params1, rand_params2, _min_max_params);
+            };
+
+        auto next_mutation = [&](auto&& rand_params) {
+            return gb::yadro::util::tuple_transform(
+                [&](auto&& param, auto&& min_max)
+                {
+                    using type_t = std::remove_cvref_t<decltype(param)>;
                     if (std::abs(genetic_distribution(gen)) > 1)
                     {
                         ++s.mutation_count;
                         return static_cast<type_t>(std::get<0>(min_max) + (std::get<1>(min_max) - std::get<0>(min_max)) * mutation_dist(gen));
                     }
                     else
-                        return static_cast<type_t>(param1);
-                }, rand_params1, rand_params2, _min_max_params);
+                        return static_cast<type_t>(param);
+                }, rand_params, _min_max_params);
             };
-
 
         for (auto [rand_params, start_time, last_target_update] =
             std::tuple(initial_params(), std::chrono::high_resolution_clock::now(), std::chrono::high_resolution_clock::now());
@@ -234,7 +248,12 @@ namespace gb::yadro::algorithm
                 first_best = _opt_map.begin()->second;
                 second_best = _opt_map.size() > 1 ? (++_opt_map.begin())->second : first_best;
             }
-            rand_params = next_genetic_mutation(first_best, second_best);
+            do
+            {
+                if(first_best != second_best)
+                    rand_params = next_genetic(first_best, second_best);
+                rand_params = next_mutation(rand_params);
+            } while (rand_params == first_best);
         }
 
         return s;
