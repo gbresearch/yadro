@@ -54,12 +54,38 @@ namespace gb::yadro::algorithm
         : _target_fn(target_fn), _min_max_params(min_max...)
         { }
 
+        // load data from archive
+        genetic_optimization_t(const std::string& archive_file, Fn target_fn, std::tuple<Types, Types> ... min_max)
+            requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
+        : _target_fn(target_fn), _min_max_params(min_max...)
+        { 
+            serialize(gb::yadro::archive::bin_archive<std::ifstream>(archive_file));
+        }
+
+        // save data in file
+        void save(const std::string& archive_file) const
+        {
+            serialize(gb::yadro::archive::bin_archive<std::ofstream>(archive_file));
+        }
+
         // performs genetic_optimization optimization, limited to time duration and max_tries
-        // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map 
+        // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map
+        // optimize can be called multiple times, it will continue from the previous state, unless cleared
         auto optimize(auto&& duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
-        // multithreaded version of the above, using threadpool
+        // multithreaded version of the above, using threadpool (intended for slow target functions)
+        // if target function is fast, then context switching overhead will make this function slower than single threaded function
         auto optimize(gb::yadro::async::threadpool<>& tp, auto&& duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+
+        // clear the state
+        void clear() { _visited.clear(); _opt_map.clear(); }
+
+        // serialize the state in the archive
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive), std::forward<decltype(self)>(self)._visited,
+                std::forward<decltype(self)>(self)._opt_map);
+        }
 
     private:
         Fn _target_fn;
@@ -76,21 +102,20 @@ namespace gb::yadro::algorithm
             return _visited.insert(v).second;
         }
 
-        // emplace the new target and retur true if it improved
+        // emplace the new target and return true if it improved
         auto opt_map_emplace(auto target, auto&& params, std::size_t max_history)
         {
             std::lock_guard _(_m);
             auto improved = _opt_map.empty() || target < _opt_map.begin()->first;
             _opt_map.emplace(target, params);
 
-            if (_opt_map.size() > max_history)
+            while (_opt_map.size() > max_history)
             {
                 _opt_map.erase(--_opt_map.end());
             }
             return improved;
         }
 
-        void clear_opt_results() { _visited.clear(); _opt_map.clear(); }
         auto optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries);
     };
 
@@ -210,14 +235,12 @@ namespace gb::yadro::algorithm
     template<class Fn, class ...Types>
     auto genetic_optimization_t<Fn, Types...>::optimize(auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
-        clear_opt_results();
         return std::tuple(optimize_one(duration, max_history, max_tries), _opt_map);
     }
 
     template<class Fn, class ...Types>
     auto genetic_optimization_t<Fn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
-        clear_opt_results();
         std::vector<std::future<stats>> futures;
 
         for (std::size_t i = 0; i < std::thread::hardware_concurrency(); ++i)
