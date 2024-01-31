@@ -59,13 +59,21 @@ namespace gb::yadro::algorithm
             requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
         : _target_fn(target_fn), _min_max_params(min_max...)
         { 
-            serialize(gb::yadro::archive::bin_archive<std::ifstream>(archive_file));
+            load(archive_file);
         }
 
-        // save data in file
+        // save data to file
         void save(const std::string& archive_file) const
         {
-            serialize(gb::yadro::archive::bin_archive<std::ofstream>(archive_file));
+            std::ofstream ofs(archive_file, std::ios::binary);
+            serialize(gb::yadro::archive::bin_archive(ofs));
+        }
+
+        // load data from file
+        void load(const std::string& archive_file)
+        {
+            std::ifstream ifs(archive_file, std::ios::binary);
+            serialize(gb::yadro::archive::bin_archive(ifs));
         }
 
         // performs genetic_optimization optimization, limited to time duration and max_tries

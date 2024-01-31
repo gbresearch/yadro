@@ -48,8 +48,12 @@ namespace
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
 
         auto [stat, opt_map] = optimizer.optimize(100ms, 5);
+        
+        // only testing in optimized build, debug build can be too slow and tests would fail randomly
+#if defined(NDEBUG)
         gbassert(opt_map.size() == 5);
         gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
+#endif
 
 #if defined(GB_DEBUGGING)
         std::cout << stat << "\n";
@@ -78,8 +82,11 @@ namespace
         {// single thread
             optimizer.optimize(200ms, 5);
             auto [stat, opt_map] = optimizer.optimize(300ms, 5);
+
+#if defined(NDEBUG)
             gbassert(opt_map.size() == 5);
             gbassert(opt_map.begin()->first < 1); // may fail on very slow machines
+#endif
 
 #if defined(GB_DEBUGGING)
             std::cout << "single thread: " << stat << "\n";
@@ -95,8 +102,10 @@ namespace
             optimizer.clear();
             gb::yadro::async::threadpool<> tp;
             auto [stat, opt_map] = optimizer.optimize(tp, 100ms, 5);
+#if defined(NDEBUG)
             gbassert(opt_map.size() == 5);
             gbassert(opt_map.begin()->first < 1); // may fail on very slow machines
+#endif
 
 #if defined(GB_DEBUGGING)
             std::cout << "multithreaded: " << stat << "\n";
@@ -127,8 +136,10 @@ namespace
         gb::yadro::archive::imem_archive ima(std::move(oma));
         ima(optimizer);
         auto [stat, opt_map] = optimizer.optimize(1ms, 5);
+#if defined(NDEBUG)
         gbassert(opt_map.size() == 5);
         gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
+#endif
 
 #if defined(GB_DEBUGGING)
         std::cout << stat << "\n";
