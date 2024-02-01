@@ -122,7 +122,6 @@ namespace gb::yadro::util
 
     using make_hash_t = decltype([](auto&& ...v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)...); });
     
-
     //-------------------------------------------------------------------------
     inline auto time_stamp()
     {
