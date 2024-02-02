@@ -46,21 +46,38 @@
 namespace gb::yadro::algorithm
 {
     // neighbor expansion optimization algorithm, minimizing target function
-    template<class Fn, class ...Types>
+    template<class Fn, class CompareFn, class ...Types>
     struct genetic_optimization_t
     {
+        genetic_optimization_t(Fn target_fn, CompareFn compare, std::tuple<Types, Types> ... min_max)
+            requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
+        : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(compare)
+        {
+            _weights.fill(1.0);
+        }
+
         genetic_optimization_t(Fn target_fn, std::tuple<Types, Types> ... min_max)
             requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
-        : _target_fn(target_fn), _min_max_params(min_max...)
+        : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(std::less<>{})
         {
             _weights.fill(1.0);
         }
 
         // load data from archive
-        genetic_optimization_t(const std::string& archive_file, Fn target_fn, std::tuple<Types, Types> ... min_max)
+        genetic_optimization_t(const std::string& archive_file, Fn target_fn, CompareFn compare, 
+            std::tuple<Types, Types> ... min_max)
             requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
-        : _target_fn(target_fn), _min_max_params(min_max...)
+        : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(compare)
         { 
+            load(archive_file);
+        }
+
+        // load data from archive
+        genetic_optimization_t(const std::string& archive_file, Fn target_fn,
+            std::tuple<Types, Types> ... min_max)
+            requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
+        : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(std::less<>{})
+        {
             load(archive_file);
         }
 
@@ -117,7 +134,7 @@ namespace gb::yadro::algorithm
 
         std::mutex _m;
         std::unordered_set<std::size_t> _visited; // to avoid linear search through _opt_set
-        std::multimap<target_t, std::tuple<Types...>> _opt_map; // target functions calculated
+        std::multimap<target_t, std::tuple<Types...>, CompareFn> _opt_map; // target functions calculated
 
         auto insert_visited(std::size_t v)
         {
@@ -129,9 +146,9 @@ namespace gb::yadro::algorithm
         auto opt_map_emplace(auto target, auto&& params, std::size_t max_history)
         {
             std::lock_guard _(_m);
-            auto improved = _opt_map.empty() || target < _opt_map.begin()->first;
+            auto improved = _opt_map.empty() || _opt_map.key_comp()(target, _opt_map.begin()->first);
             
-            if (improved || _opt_map.size() < max_history || target < _opt_map.rend()->first)
+            if (improved || _opt_map.size() < max_history || _opt_map.key_comp()(target, _opt_map.rend()->first))
             {
                 _opt_map.emplace(target, params);
             }
@@ -146,6 +163,13 @@ namespace gb::yadro::algorithm
 
         auto optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries);
     };
+
+    template<class Fn, class ...Types>
+    genetic_optimization_t(Fn, std::tuple<Types, Types> ...) -> genetic_optimization_t<Fn, std::less<>, Types...>;
+
+    template<class Fn, class ...Types>
+    genetic_optimization_t(const std::string&, Fn, std::tuple<Types, Types> ...) -> genetic_optimization_t<Fn, std::less<>, Types...>;
+
 
     // statistics for genetic_optimization_t
     struct stats
@@ -180,8 +204,8 @@ namespace gb::yadro::algorithm
         }
     };
 
-    template<class Fn, class ...Types>
-    auto genetic_optimization_t<Fn, Types...>::optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries)
+    template<class Fn, class CompareFn, class ...Types>
+    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
         stats s{};
         std::random_device rd;
@@ -274,14 +298,14 @@ namespace gb::yadro::algorithm
         return s;
     }
 
-    template<class Fn, class ...Types>
-    auto genetic_optimization_t<Fn, Types...>::optimize(auto&& duration, std::size_t max_history, std::size_t max_tries)
+    template<class Fn, class CompareFn, class ...Types>
+    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
         return std::tuple(optimize_one(duration, max_history, max_tries), _opt_map);
     }
 
-    template<class Fn, class ...Types>
-    auto genetic_optimization_t<Fn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, auto&& duration, std::size_t max_history, std::size_t max_tries)
+    template<class Fn, class CompareFn, class ...Types>
+    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
         std::vector<std::future<stats>> futures;
 
