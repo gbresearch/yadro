@@ -55,6 +55,7 @@ namespace gb::yadro::container
     struct matrix : tensor<T, RowsColumns...>
     {
         using data_type = T;
+        using const_data_type = std::add_const_t<data_type>;
         using tensor_t = tensor<T, RowsColumns...>;
         using tensor_t::indexer;
         using tensor_t::tensor;
@@ -72,6 +73,130 @@ namespace gb::yadro::container
                 for (std::size_t col = 0, cols = columns(); col != cols; ++col)
                     (*this)(row, col) = other(row, col);
             return *this;
+        }
+
+        // transform every element of matrix invoking transform_fn(row, col, value)
+        void transform(std::invocable<std::size_t, std::size_t, const_data_type> auto&& transform_fn)
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+                for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+                {
+                    auto& value = (*this)(row, col);
+                    value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), row, col, value);
+                }
+        }
+
+        // transform every element of matrix invoking transform_fn(value)
+        void transform(std::invocable< const_data_type> auto&& transform_fn)
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+                for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+                {
+                    auto& value = (*this)(row, col);
+                    value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), value);
+                }
+        }
+
+        // transform a single row invoking transform_fn(col, value)
+        void transform_row(std::invocable<std::size_t, const_data_type> auto&& transform_fn, std::size_t row)
+        {
+            for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+            {
+                auto& value = (*this)(row, col);
+                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), col, value);
+            }
+        }
+
+        // transform a single row invoking transform_fn(value)
+        void transform_row(std::invocable<const_data_type> auto&& transform_fn, std::size_t row)
+        {
+            for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+            {
+                auto& value = (*this)(row, col);
+                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), value);
+            }
+        }
+
+        // transform a single column invoking transform_fn(row, value)
+        void transform_col(std::invocable<std::size_t, const_data_type> auto&& transform_fn, std::size_t col)
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+            {
+                auto& value = (*this)(row, col);
+                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), row, value);
+            }
+        }
+
+        // transform a single column invoking transform_fn(value)
+        void transform_col(std::invocable<const_data_type> auto&& transform_fn, std::size_t col)
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+            {
+                auto& value = (*this)(row, col);
+                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), value);
+            }
+        }
+
+        // reduce matrix using reduce_fn(row, col, value, initial)
+        template<class Initial>
+        auto reduce(std::invocable<std::size_t, std::size_t, const_data_type, Initial> auto&& reduce_fn, Initial initial) const
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+                for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+                    initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), row, col, (*this)(row, col), initial);
+            
+            return initial;
+        }
+
+        // reduce matrix using reduce_fn(value, initial)
+        template<class Initial>
+        auto reduce(std::invocable<const_data_type, Initial> auto&& reduce_fn, Initial initial) const
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+                for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+                    initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), (*this)(row, col), initial);
+
+            return initial;
+        }
+
+        // reduce a single row invoking reduce_fn(col, value, initial)
+        template<class Initial>
+        void reduce_row(std::invocable<std::size_t, const_data_type, Initial> auto&& reduce_fn, std::size_t row, Initial initial) const
+        {
+            for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), col, (*this)(row, col), initial);
+
+            return initial;
+        }
+
+        // reduce a single row invoking reduce_fn(value, initial)
+        template<class Initial>
+        void reduce_row(std::invocable<const_data_type, Initial> auto&& reduce_fn, std::size_t row, Initial initial) const
+        {
+            for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
+                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), (*this)(row, col), initial);
+
+            return initial;
+        }
+
+        // reduce a single column invoking reduce_fn(row, value, initial)
+        template<class Initial>
+        void reduce_col(std::invocable<std::size_t, const_data_type, Initial> auto&& reduce_fn, std::size_t col, Initial initial) const
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), row, (*this)(row, col), initial);
+
+            return initial;
+        }
+
+        // reduce a single column invoking reduce_fn(value, initial)
+        template<class Initial>
+        void reduce_col(std::invocable<const_data_type, Initial> auto&& reduce_fn, std::size_t col, Initial initial) const
+        {
+            for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
+                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), (*this)(row, col), initial);
+
+            return initial;
         }
     };
 
