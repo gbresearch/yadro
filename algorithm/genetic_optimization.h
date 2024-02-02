@@ -28,14 +28,14 @@
 
 #pragma once
 #include <map>
-#include <set>
 #include <unordered_set>
 #include <functional>
 #include <tuple>
 #include <chrono>
 #include <random>
-#include <optional>
 #include <ostream>
+#include <fstream>
+#include <array>
 
 #include "../util/gberror.h"
 #include "../util/misc.h"
@@ -52,7 +52,9 @@ namespace gb::yadro::algorithm
         genetic_optimization_t(Fn target_fn, std::tuple<Types, Types> ... min_max)
             requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
         : _target_fn(target_fn), _min_max_params(min_max...)
-        { }
+        {
+            _weights.fill(1.0);
+        }
 
         // load data from archive
         genetic_optimization_t(const std::string& archive_file, Fn target_fn, std::tuple<Types, Types> ... min_max)
@@ -76,6 +78,17 @@ namespace gb::yadro::algorithm
             serialize(gb::yadro::archive::bin_archive(ifs));
         }
 
+        // function that allows assigning parameter weights
+        // diffent parameters can have different cost of calculation and different effect on target function
+        // assigning weights allows changing the probability of mutation, which is determined by normal distribution,
+        // bigger weight corresponds to lower probability of mutation
+        // default weight of every parameter is 1, which corresponds to one standard deviation
+        auto assign_weights(std::convertible_to<double> auto&& ... weights)
+        {
+            static_assert(sizeof...(weights) == sizeof...(Types));
+            _weights = std::array<double, sizeof...(Types)>{static_cast<double>(weights)...};
+        }
+        
         // performs genetic_optimization optimization, limited to time duration and max_tries
         // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map
         // optimize can be called multiple times, it will continue from the previous state, unless cleared
@@ -92,12 +105,14 @@ namespace gb::yadro::algorithm
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive), std::forward<decltype(self)>(self)._visited,
-                std::forward<decltype(self)>(self)._opt_map);
+                std::forward<decltype(self)>(self)._opt_map, std::forward<decltype(self)>(self)._weights);
         }
 
     private:
         Fn _target_fn;
         std::tuple<std::tuple<Types, Types>...> _min_max_params;
+        std::array<double, sizeof...(Types)> _weights;
+
         using target_t = std::invoke_result_t<Fn, Types...>;
 
         std::mutex _m;
@@ -188,32 +203,32 @@ namespace gb::yadro::algorithm
 
         auto next_genetic = [&](auto&& rand_params1, auto&& rand_params2) {
             return gb::yadro::util::tuple_transform(
-                [&](auto&& param1, auto&& param2, auto&& min_max)
+                [&](auto&& param1, auto&& param2, auto&& min_max, auto weight)
                 {
                     using type_t = std::common_type_t<std::remove_cvref_t<decltype(param1)>, std::remove_cvref_t<decltype(param2)>>;
-                    if (std::abs(genetic_distribution(gen)) > 1)
+                    if (std::abs(genetic_distribution(gen)) > weight)
                     {
                         ++s.genetic_count;
                         return static_cast<type_t>(param2);
                     }
                     else
                         return static_cast<type_t>(param1);
-                }, rand_params1, rand_params2, _min_max_params);
+                }, rand_params1, rand_params2, _min_max_params, _weights);
             };
 
         auto next_mutation = [&](auto&& rand_params) {
             return gb::yadro::util::tuple_transform(
-                [&](auto&& param, auto&& min_max)
+                [&](auto&& param, auto&& min_max, auto weight)
                 {
                     using type_t = std::remove_cvref_t<decltype(param)>;
-                    if (std::abs(genetic_distribution(gen)) > 1)
+                    if (std::abs(genetic_distribution(gen)) > weight)
                     {
                         ++s.mutation_count;
                         return static_cast<type_t>(std::get<0>(min_max) + (std::get<1>(min_max) - std::get<0>(min_max)) * mutation_dist(gen));
                     }
                     else
                         return static_cast<type_t>(param);
-                }, rand_params, _min_max_params);
+                }, rand_params, _min_max_params, _weights);
             };
 
         for (auto [rand_params, start_time, last_target_update] =
