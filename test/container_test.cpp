@@ -130,5 +130,25 @@ namespace
         auto solution4 = solve(m4, column_t<double, 3>{3, 8, 4});
         gbassert(solution4 == column_t<double, 3>{ 1, 1, 1 });
         gbassert(determinant(m4) == 13);
+
+        m4.transform([](auto&& value)
+            {
+                return value == 1 ? 10 : value;
+            });
+        gbassert(m4 == matrix<double, 3, 3>{
+            10, 10, 10,
+            10, 2, 5,
+            2, -1, 3});
+
+        gbassert(transform([](auto&& v) { return -v; }, get_row(m4, 1)) == row_t<double, 3>{ -10, -2, -5});
+
+        gbassert(transform([](auto&& value1, auto&& value2) { return value1 + value2; }, m4, matrix<double, 3, 3>{
+                1, 3, 5,
+                2, 4, 6,
+                7, 8, 9}) == matrix<double, 3, 3>{
+                11, 13, 15,
+                12, 6, 11,
+                9, 7, 12}
+        );
     }
 }

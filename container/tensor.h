@@ -115,7 +115,7 @@ namespace gb::yadro::container
 
             std::size_t index = 0;
 
-            for (std::size_t idx = 0; auto i : std::initializer_list{ indexes... })
+            for (std::size_t idx = 0; auto i : std::initializer_list{ static_cast<std::size_t>(indexes)... })
                 index += i * _indexes[idx++].second;
 
             return index;
@@ -130,7 +130,7 @@ namespace gb::yadro::container
         constexpr auto check_indexes(std::convertible_to<std::size_t> auto&& ... indexes) const
         {
             gb::yadro::util::gbassert(sizeof...(indexes) == _indexes.size());
-            for (std::size_t idx = 0; std::size_t i: std::initializer_list{ indexes... })
+            for (std::size_t idx = 0; std::size_t i: std::initializer_list{ static_cast<std::size_t>(indexes)... })
             {
                 gb::yadro::util::gbassert(_indexes[idx++].first > i);
             }
@@ -168,7 +168,7 @@ namespace gb::yadro::container
 
         constexpr decltype(auto) operator()(this auto&& self, std::convertible_to<std::size_t> auto... indexes)
         {
-            return std::forward<decltype(self)>(self)._data[self.indexer()(indexes...)];
+            return std::forward<decltype(self)>(self)._data[self.indexer()(static_cast<std::size_t>(indexes)...)];
         }
 
         auto operator== (const basic_tensor& other) const { return indexer() == other.indexer() && _data == other._data; }
@@ -177,7 +177,7 @@ namespace gb::yadro::container
         
         auto index_of(std::convertible_to<std::size_t> auto... indexes) const
         {
-            return indexer()(indexes...);
+            return indexer()(static_cast<std::size_t>(indexes)...);
         }
 
         auto& data() { return _data; }
@@ -248,7 +248,7 @@ namespace gb::yadro::container
 
         // constructing tensor of specified dimensions
         explicit tensor(std::convertible_to<std::size_t> auto ... dimensions) :
-            base_t(indexer_t(dimensions ...), (1 * ... * dimensions))
+            base_t(indexer_t(static_cast<std::size_t>(dimensions) ...), (1 * ... * dimensions))
         {
         }
 

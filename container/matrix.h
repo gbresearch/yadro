@@ -82,7 +82,7 @@ namespace gb::yadro::container
                 for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
                 {
                     auto& value = (*this)(row, col);
-                    value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), row, col, value);
+                    value = std::invoke(transform_fn, row, col, value);
                 }
         }
 
@@ -93,7 +93,7 @@ namespace gb::yadro::container
                 for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
                 {
                     auto& value = (*this)(row, col);
-                    value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), value);
+                    value = std::invoke(transform_fn, value);
                 }
         }
 
@@ -103,7 +103,7 @@ namespace gb::yadro::container
             for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
             {
                 auto& value = (*this)(row, col);
-                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), col, value);
+                value = std::invoke(transform_fn, col, value);
             }
         }
 
@@ -113,7 +113,7 @@ namespace gb::yadro::container
             for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
             {
                 auto& value = (*this)(row, col);
-                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), value);
+                value = std::invoke(transform_fn, value);
             }
         }
 
@@ -123,7 +123,7 @@ namespace gb::yadro::container
             for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
             {
                 auto& value = (*this)(row, col);
-                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), row, value);
+                value = std::invoke(transform_fn, row, value);
             }
         }
 
@@ -133,7 +133,7 @@ namespace gb::yadro::container
             for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
             {
                 auto& value = (*this)(row, col);
-                value = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), value);
+                value = std::invoke(transform_fn, value);
             }
         }
 
@@ -143,7 +143,7 @@ namespace gb::yadro::container
         {
             for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
                 for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
-                    initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), row, col, (*this)(row, col), initial);
+                    initial = std::invoke(reduce_fn, row, col, (*this)(row, col), initial);
             
             return initial;
         }
@@ -154,7 +154,7 @@ namespace gb::yadro::container
         {
             for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
                 for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
-                    initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), (*this)(row, col), initial);
+                    initial = std::invoke(reduce_fn, (*this)(row, col), initial);
 
             return initial;
         }
@@ -164,7 +164,7 @@ namespace gb::yadro::container
         void reduce_row(std::invocable<std::size_t, const_data_type, Initial> auto&& reduce_fn, std::size_t row, Initial initial) const
         {
             for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
-                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), col, (*this)(row, col), initial);
+                initial = std::invoke(reduce_fn, col, (*this)(row, col), initial);
 
             return initial;
         }
@@ -174,7 +174,7 @@ namespace gb::yadro::container
         void reduce_row(std::invocable<const_data_type, Initial> auto&& reduce_fn, std::size_t row, Initial initial) const
         {
             for (std::size_t col = 0, max_col = columns(); col < max_col; ++col)
-                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), (*this)(row, col), initial);
+                initial = std::invoke(reduce_fn, (*this)(row, col), initial);
 
             return initial;
         }
@@ -184,7 +184,7 @@ namespace gb::yadro::container
         void reduce_col(std::invocable<std::size_t, const_data_type, Initial> auto&& reduce_fn, std::size_t col, Initial initial) const
         {
             for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
-                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), row, (*this)(row, col), initial);
+                initial = std::invoke(reduce_fn, row, (*this)(row, col), initial);
 
             return initial;
         }
@@ -194,7 +194,7 @@ namespace gb::yadro::container
         void reduce_col(std::invocable<const_data_type, Initial> auto&& reduce_fn, std::size_t col, Initial initial) const
         {
             for (std::size_t row = 0, max_row = rows(); row < max_row; ++row)
-                initial = std::invoke(std::forward<decltype(reduce_fn)>(reduce_fn), (*this)(row, col), initial);
+                initial = std::invoke(reduce_fn, (*this)(row, col), initial);
 
             return initial;
         }
@@ -356,10 +356,26 @@ namespace gb::yadro::container
     //---------------------------------------------------------------------------------------------
     inline auto get_row(matrix_c auto&& m, std::size_t row)
     {
-        using traits = matrix_traits<decltype(m)>;
-        matrix<typename traits::data_type> result(1, m.columns());
+        using data_type = typename matrix_traits<decltype(m)>::data_type;
+
+        matrix< data_type> result(1, m.columns());
+
         for (std::size_t c = 0, cols = m.columns(); c < cols; ++c)
-            result(1, c) = m(row, c);
+            result(std::size_t(0), c) = m(row, c);
+        
+        return result;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    inline auto get_column(matrix_c auto&& m, std::size_t column)
+    {
+        using data_type = typename matrix_traits<decltype(m)>::data_type;
+
+        matrix< data_type> result(m.rows(), 1);
+
+        for (std::size_t r = 0, rows = m.rows(); r < rows; ++r)
+            result(r, std::size_t(0)) = m(r, column);
+
         return result;
     }
 
@@ -473,4 +489,51 @@ namespace gb::yadro::container
         return solve(m, identity_matrix< typename m_type::data_type>(m.rows()));
     }
 
+    //---------------------------------------------------------------------------------------------
+    // returns a new sime dimensions matrix with every element being a transformation of every element 
+    // of other matrixes by invoking transform_fn(row, col, values...)
+    inline auto transform(auto&& transform_fn, matrix_c auto&& m, matrix_c auto&& ... matrixes)
+        requires (std::invocable < decltype(transform_fn), std::size_t, std::size_t, 
+        typename matrix_traits<decltype(m)>::data_type, typename matrix_traits<decltype(matrixes)>::data_type... >)
+    {
+        gb::yadro::util::gbassert((m.rows() == ... == matrixes.rows()));
+        gb::yadro::util::gbassert((m.columns() == ... == matrixes.columns()));
+
+        using data_type = typename std::common_type_t<typename matrix_traits<decltype(m)>::data_type, 
+            typename matrix_traits<decltype(matrixes)>::data_type...>;
+        
+        matrix<data_type> result(m.rows(), m.columns());
+
+        for (std::size_t row = 0, max_row = m.rows(); row < max_row; ++row)
+            for (std::size_t col = 0, max_col = m.columns(); col < max_col; ++col)
+            {
+                result(row, col) = std::invoke(std::forward<decltype(transform_fn)>(transform_fn), row, col,
+                    m(row, col), matrixes(row, col) ...);
+            }
+        
+        return result;
+    }
+
+    //---------------------------------------------------------------------------------------------
+    // same as above, but transform_fn takes only values: transform_fn(values...)
+    inline auto transform(auto&& transform_fn, matrix_c auto&& m, matrix_c auto&& ... matrixes)
+        requires (std::invocable < decltype(transform_fn), typename matrix_traits<decltype(m)>::data_type,
+        typename matrix_traits<decltype(matrixes)>::data_type...>)
+    {
+        gb::yadro::util::gbassert((m.rows() == ... == matrixes.rows()));
+        gb::yadro::util::gbassert((m.columns() == ... == matrixes.columns()));
+
+        using data_type = typename std::common_type_t<typename matrix_traits<decltype(m)>::data_type,
+            typename matrix_traits<decltype(matrixes)>::data_type...>;
+
+        matrix<data_type> result(m.rows(), m.columns());
+
+        for (std::size_t row = 0, max_row = m.rows(); row < max_row; ++row)
+            for (std::size_t col = 0, max_col = m.columns(); col < max_col; ++col)
+            {
+                result(row, col) = std::invoke(transform_fn, m(row, col), matrixes(row, col) ...);
+            }
+
+        return result;
+    }
 }
