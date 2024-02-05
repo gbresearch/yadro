@@ -208,8 +208,7 @@ namespace gb::yadro::algorithm
     auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_one(auto&& duration, std::size_t max_history, std::size_t max_tries)
     {
         stats s{};
-        std::random_device rd;
-        std::mt19937 gen(rd());
+        thread_local std::mt19937 gen(std::random_device{}());
 
         auto initial_params = [&]
             {

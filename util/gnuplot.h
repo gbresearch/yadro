@@ -527,7 +527,7 @@ namespace gb::yadro::util
                     break;
                 }
 
-            test_condition<gnuplot_error>(exe_pipe, "Path doesn't contain gnuplot.exe");
+            test_condition<gnuplot_error>(exe_pipe, "Path doesn't contain gnuplot.exe. path = " + std::string(path));
         }
         else
         {
