@@ -36,6 +36,7 @@
 #include <sstream>
 #include <string>
 #include <algorithm>
+#include <unordered_set>
 
 namespace
 {
@@ -47,6 +48,16 @@ namespace
         logger log(oss);
         log() << "abc" << 1 << 2 << tab{ 10, '.' } << "pi=" << tab{ 15 } << 3.14;
         gbassert(oss.str() == "abc12.....pi=  3.14");
+    }
+
+    GB_TEST(util, tuples)
+    {
+        std::unordered_set<std::tuple<unsigned, unsigned>, make_hash_t> s;
+        s.insert({ 1,2 });
+        s.emplace(std::tuple{ 2,2 });
+        gbassert(s.contains(std::tuple{ 1,2 }));
+        gbassert(s.contains(std::tuple{ 2,2 }));
+        gbassert(!s.contains(std::tuple{ 1,3 }));
     }
 
     GB_TEST(util, misc)

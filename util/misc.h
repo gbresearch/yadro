@@ -66,11 +66,11 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     inline auto make_hash(const char* str) { return std::hash<std::string>{}(str); }
     inline auto make_hash(const wchar_t* str) { return std::hash<std::wstring>{}(str); }
-    inline auto make_hash(auto&& v) { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
+    inline auto make_hash(const auto& v) { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
     // TODO: remove after experiment
     inline auto make_hash(unsigned v) { return v; };
 
-    inline auto make_hash(auto&& v, auto&&... ts)
+    inline auto make_hash(const auto& v, const auto&... ts)
     {
         auto seed = make_hash(v);
         if constexpr (sizeof ...(ts) != 0)
@@ -114,9 +114,9 @@ namespace gb::yadro::util
     {
         auto seed = make_hash(sizeof...(T));
 
-        return std::apply([&](auto&& t)
+        return std::apply([&](const auto& ...t)
             {
-                return seed = make_hash(seed, t);
+                return seed = make_hash(seed, t...);
             }, tup);
     }
 

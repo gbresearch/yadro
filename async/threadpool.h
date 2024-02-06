@@ -94,18 +94,18 @@ namespace gb::yadro::async
     struct threadpool final
     {
         //-----------------------------------------------------------------
-        threadpool(unsigned max_threads, std::function<void()> on_empty)
+        threadpool(std::size_t max_threads, std::function<void()> on_empty)
             : _max_threads(max_threads), _on_empty(on_empty)
         {}
 
         //-----------------------------------------------------------------
         using sleep_duration_t = decltype(std::chrono::milliseconds(0));
-        threadpool(unsigned max_threads, sleep_duration_t sleep_duration)
+        threadpool(std::size_t max_threads, sleep_duration_t sleep_duration)
             : threadpool(max_threads, [=] { std::this_thread::sleep_for(sleep_duration); })
         {}
 
         //-----------------------------------------------------------------
-        explicit threadpool(unsigned max_threads = std::thread::hardware_concurrency())
+        explicit threadpool(std::size_t max_threads = std::thread::hardware_concurrency())
             : threadpool(max_threads, [] { std::this_thread::yield(); })
         {}
 
@@ -175,6 +175,9 @@ namespace gb::yadro::async
                     },
                     std::forward<decltype(task)>(task), std::forward<decltype(futures)>(futures)...);
         }
+        
+        //-----------------------------------------------------------------
+        auto max_thread_count() const { return _max_threads; }
 
     private:
         using task_t = std::unique_ptr<detail::callable>;
@@ -183,7 +186,7 @@ namespace gb::yadro::async
         std::mutex _m_thread;
         std::mutex _m_task;
         std::atomic_bool _finish{ false };
-        unsigned _max_threads;
+        std::size_t _max_threads;
         std::function<void()> _on_empty;
 
         //-----------------------------------------------------------------

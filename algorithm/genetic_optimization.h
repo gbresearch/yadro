@@ -308,7 +308,7 @@ namespace gb::yadro::algorithm
     {
         std::vector<std::future<stats>> futures;
 
-        for (std::size_t i = 0; i < std::thread::hardware_concurrency(); ++i)
+        for (std::size_t i = 0, thread_count = tp.max_thread_count(); i < thread_count; ++i)
         {
             futures.push_back(tp([&]
                 {
