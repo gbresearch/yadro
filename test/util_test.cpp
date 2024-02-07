@@ -58,6 +58,9 @@ namespace
         gbassert(s.contains(std::tuple{ 1,2 }));
         gbassert(s.contains(std::tuple{ 2,2 }));
         gbassert(!s.contains(std::tuple{ 1,3 }));
+        auto [ts1, ts2] = tuple_split<3>(std::tuple(1, 2, 3, 4, 5));
+        gbassert(ts1 == std::tuple(1, 2, 3));
+        gbassert(ts2 == std::tuple(4, 5));
     }
 
     GB_TEST(util, misc)

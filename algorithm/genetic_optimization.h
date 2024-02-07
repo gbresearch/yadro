@@ -50,7 +50,9 @@ namespace gb::yadro::algorithm
     struct genetic_optimization_t
     {
         genetic_optimization_t(Fn target_fn, CompareFn compare, std::tuple<Types, Types> ... min_max)
-            requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
+            requires ((std::invocable<Fn, Types...> 
+        && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>)
+        && ... && std::convertible_to<double, Types>)
         : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(compare)
         {
             _weights.fill(1.0);
@@ -66,7 +68,9 @@ namespace gb::yadro::algorithm
         // load data from archive
         genetic_optimization_t(const std::string& archive_file, Fn target_fn, CompareFn compare, 
             std::tuple<Types, Types> ... min_max)
-            requires (std::invocable<Fn, Types...> && ... && std::convertible_to<double, Types>)
+            requires ((std::invocable<Fn, Types...>
+        && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>)
+        && ... && std::convertible_to<double, Types>)
         : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(compare)
         { 
             load(archive_file);

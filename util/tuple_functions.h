@@ -72,7 +72,9 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // split tuple by index I
-    // returns a tuple of two tuples
+    // returns a tuple of two tuples, 
+    // the first tuple contains [0, I - 1] values from the original tuple
+    // the second tuple contains [I, N - I] values from the original tuple
     template<std::size_t I, class...T>
     inline auto tuple_split(const std::tuple<T...>& t)
     {

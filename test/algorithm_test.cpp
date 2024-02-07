@@ -45,6 +45,7 @@ namespace
 
         genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v) 
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
+            std::less<>{},
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
 
         optimizer.assign_weights(1, 1, 0.8, 0.9);
