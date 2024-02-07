@@ -92,6 +92,9 @@
     <ClInclude Include="..\algorithm\genetic_optimization.h">
       <Filter>algorithm</Filter>
     </ClInclude>
+    <ClInclude Include="..\container\matrix_functions.h">
+      <Filter>container</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

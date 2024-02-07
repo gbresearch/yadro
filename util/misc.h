@@ -43,6 +43,7 @@
 #include <format>
 #include <vector>
 #include <random>
+#include "gberror.h"
 
 // miscellaneous utilities
 
@@ -161,6 +162,29 @@ namespace gb::yadro::util
         return tokens;
     }
 
+    //-------------------------------------------------------------------------
+    // transform vector function for multiple equally sized ranges,
+    // output range contains the result of transform_fn called on each element
+    // of each of other ranges: output[i] = transform_fn(other[i]...)
+    inline auto transform(auto&& transform_fn, std::ranges::sized_range auto& output,
+        const std::ranges::sized_range auto& ... other)
+    {
+        static_assert(sizeof ...(other) != 0);
+        gbassert(((output.size() == other.size()) && ...));
+
+        for (auto [it, its] = std::tuple(std::begin(output), std::tuple(std::cbegin(other)...));
+            it != std::end(output);
+            ++it, std::apply([](auto& ... its)
+                {
+                    ((++its), ...);
+                }, its))
+        {
+            *it = std::apply([&](auto&& ... its)
+                {
+                    return std::invoke(transform_fn, (*its)...);
+                }, its);
+        }
+    }
     //-------------------------------------------------------------------------
     // resource locked with mutex from construction to destruction
     //-------------------------------------------------------------------------

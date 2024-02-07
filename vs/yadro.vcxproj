@@ -121,6 +121,7 @@
     <ClInclude Include="..\async\threadpool.h" />
     <ClInclude Include="..\container\graph.h" />
     <ClInclude Include="..\container\matrix.h" />
+    <ClInclude Include="..\container\matrix_functions.h" />
     <ClInclude Include="..\container\static_string.h" />
     <ClInclude Include="..\container\static_vector.h" />
     <ClInclude Include="..\container\tensor.h" />

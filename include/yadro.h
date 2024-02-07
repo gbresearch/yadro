@@ -49,4 +49,5 @@
 #include "../util/gbmacro.h"
 #include "../container/tensor.h"
 #include "../container/matrix.h"
+#include "../container/matrix_functions.h"
 #include "../algorithm/genetic_optimization.h"

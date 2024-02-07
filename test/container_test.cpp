@@ -30,6 +30,7 @@
 #include "../util/misc.h"
 #include "../container/tensor.h"
 #include "../container/matrix.h"
+#include "../container/matrix_functions.h"
 #include "../container/static_string.h"
 #include "../container/static_vector.h"
 #include "../container/tree.h"
@@ -41,6 +42,7 @@ namespace
     using namespace gb::yadro::container;
     using namespace gb::yadro::util;
     using namespace gb::yadro::archive;
+    using namespace gb::yadro::matrix_operators;
 
     GB_TEST(yadro, tensor_test)
     {
@@ -110,7 +112,7 @@ namespace
         m3(0, 1) = 1;
         m3(1, 0) = 2;
         m3(1, 1) = 5;
-        gbassert(minor_view(m3, 0, 0)(0,0) == 5);
+        gbassert(minor_view(m3, 0, 0)(0, 0) == 5);
         auto mv = minor_view(m3, 0, 0);
         static_assert(matrix_c<decltype(mv)>);
         gbassert(determinant(m3) == 3);
@@ -137,18 +139,30 @@ namespace
             });
         gbassert(m4 == matrix<double, 3, 3>{
             10, 10, 10,
-            10, 2, 5,
-            2, -1, 3});
+                10, 2, 5,
+                2, -1, 3});
 
         gbassert(transform([](auto&& v) { return -v; }, get_row(m4, 1)) == row_t<double, 3>{ -10, -2, -5});
 
         gbassert(transform([](auto&& value1, auto&& value2) { return value1 + value2; }, m4, matrix<double, 3, 3>{
-                1, 3, 5,
+            1, 3, 5,
                 2, 4, 6,
                 7, 8, 9}) == matrix<double, 3, 3>{
-                11, 13, 15,
+            11, 13, 15,
                 12, 6, 11,
                 9, 7, 12}
         );
+
+        gbassert(matrix<int, 2, 2>{
+            1, 2,
+                3, 4}
+        + matrix<int, 2, 2> {
+            0, -2,
+                -3, -3}
+        == identity_matrix<int>(2));
+
+        gbassert(matrix<int, 2, 2>{2, 0, 0, 2} == identity_matrix<int>(2) * 2);
+        gbassert(matrix<int, 2, 2>{2, 0, 0, 2} == 2 * identity_matrix<int>(2));
+        gbassert(matrix<int, 2, 2>{2, 0, 0, 2} / 2 == identity_matrix<int>(2));
     }
 }
