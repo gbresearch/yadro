@@ -295,7 +295,7 @@ namespace gb::yadro::algorithm
                 if(first_best != second_best)
                     rand_params = next_genetic(first_best, second_best);
                 rand_params = next_mutation(rand_params);
-            } while (rand_params == first_best);
+            } while (rand_params == first_best && std::chrono::high_resolution_clock::now() - start_time < duration);
         }
 
         return s;
