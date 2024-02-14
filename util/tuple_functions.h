@@ -75,9 +75,10 @@ namespace gb::yadro::util
     // returns a tuple of two tuples, 
     // the first tuple contains [0, I - 1] values from the original tuple
     // the second tuple contains [I, N - I] values from the original tuple
-    template<std::size_t I, class...T>
-    inline auto tuple_split(const std::tuple<T...>& t)
+    template<std::size_t I>
+    inline auto tuple_split(const auto& t)
     {
+        constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
         auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
             std::index_sequence<Index...>)
         {
@@ -86,11 +87,44 @@ namespace gb::yadro::util
 
         if constexpr (I == 0)
             return std::tuple(std::tuple{}, t);
-        else if constexpr (I >= sizeof ...(T))
+        else if constexpr (I >= size)
             return std::tuple(t, std::tuple{});
         else
             return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I>{}),
-                make_tuple_from(t, std::index_sequence<I>{}, std::make_index_sequence<sizeof...(T) - I>{}));
+                make_tuple_from(t, std::index_sequence<I>{}, std::make_index_sequence<size - I>{}));
+    }
+
+    template<std::size_t I0, std::size_t I1>
+    inline auto tuple_split(const auto& t)
+    {
+        constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+        static_assert(I0 > 0 && I0 < I1 && I1 < size);
+        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
+            std::index_sequence<Index...>)
+        {
+            return std::tuple(std::get<First + Index>(t)...);
+        };
+
+        return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I0>{}),
+            make_tuple_from(t, std::index_sequence<I0>{}, std::make_index_sequence<I1 - I0>{}),
+            make_tuple_from(t, std::index_sequence<I1>{}, std::make_index_sequence<size - I1>{}));
+    }
+
+    template<std::size_t I0, std::size_t I1, std::size_t I2>
+    inline auto tuple_split(const auto& t)
+    {
+        constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+        static_assert(I0 > 0 && I0 < I1 && I1 < I2 && I2 < size);
+        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
+            std::index_sequence<Index...>)
+        {
+            return std::tuple(std::get<First + Index>(t)...);
+        };
+
+        return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I0>{}),
+            make_tuple_from(t, std::index_sequence<I0>{}, std::make_index_sequence<I1 - I0>{}),
+            make_tuple_from(t, std::index_sequence<I1>{}, std::make_index_sequence<I2 - I1>{}),
+            make_tuple_from(t, std::index_sequence<I2>{}, std::make_index_sequence<size - I2>{}));
     }
 
     //-------------------------------------------------------------------------

@@ -61,6 +61,15 @@ namespace
         auto [ts1, ts2] = tuple_split<3>(std::tuple(1, 2, 3, 4, 5));
         gbassert(ts1 == std::tuple(1, 2, 3));
         gbassert(ts2 == std::tuple(4, 5));
+        auto [sp1, sp2, sp3] = tuple_split<1,2>(std::tuple(1, 2, 3, 4, 5));
+        gbassert(sp1 == std::tuple(1));
+        gbassert(sp2 == std::tuple(2));
+        gbassert(sp3 == std::tuple(3,4,5));
+        auto [p1, p2, p3, p4] = tuple_split<1, 2, 3>(std::tuple(1, 2, 3, 4, 5));
+        gbassert(p1 == std::tuple(1));
+        gbassert(p2 == std::tuple(2));
+        gbassert(p3 == std::tuple(3));
+        gbassert(p4 == std::tuple(4, 5));
     }
 
     GB_TEST(util, misc)
