@@ -104,12 +104,28 @@ namespace gb::yadro::algorithm
         // assigning weights allows changing the probability of mutation, which is determined by normal distribution,
         // bigger weight corresponds to lower probability of mutation
         // default weight of every parameter is 1, which corresponds to one standard deviation
-        auto assign_weights(std::convertible_to<double> auto&& ... weights)
+        auto assign_weights(std::convertible_to<double> auto&& ... weights) requires (sizeof...(weights) == sizeof...(Types))
         {
             static_assert(sizeof...(weights) == sizeof...(Types));
             _weights = std::array<double, sizeof...(Types)>{static_cast<double>(weights)...};
         }
         
+        // adding a known good solution can speed up optimzation
+        // adding a solution with a known target
+        auto add_solution(std::convertible_to<target_t> auto&& target, auto&& ... params)
+            requires (sizeof...(params) == sizeof...(Types))
+        {
+            _opt_map.emplace(std::forward<decltype(target)>(target), std::tuple{std::forward<decltype(params)>(params)...});
+        }
+
+        // adding a solution with an unknown target (can be expensive)
+        auto add_solution(auto&& ... params) requires (sizeof...(params) == sizeof...(Types))
+        {
+            // order of evalution of function parameters is unspecified, must calculate target first
+            auto target = std::invoke(_target_fn, params ...);
+            _opt_map.emplace(std::move(target), std::tuple{std::forward<decltype(params)>(params)...});
+        }
+
         // performs genetic_optimization optimization, limited to time duration and max_tries
         // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map
         // optimize can be called multiple times, it will continue from the previous state, unless cleared

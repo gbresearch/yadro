@@ -49,7 +49,6 @@ namespace
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
 
         optimizer.assign_weights(1, 1, 0.8, 0.9);
-
         auto [stat, opt_map] = optimizer.optimize(100ms, 5);
         
         // only testing in optimized build, debug build can be too slow and tests would fail randomly
@@ -81,6 +80,8 @@ namespace
                 return sum;
             },
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
+
+        optimizer.add_solution(1, 0, 1e-2f, 1e-3);
 
         {// single thread
             optimizer.optimize(200ms, 5);
