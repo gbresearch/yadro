@@ -89,6 +89,8 @@ namespace
         matrix<double, 2, 3> m{};
         m(0, 0) = 0;
         m(1, 0) = 1;
+        m(0, 1) = 0;
+        m(1, 1) = 0;
         matrix<double> m23(2, 3);
         m23(0, 0) = 0;
         m23(1, 0) = 1;
@@ -121,13 +123,13 @@ namespace
         gbassert(solution == matrix<double, 2, 1>{1., 1.});
 
         auto inverted = invert(m3);
-        gbassert(inverted == matrix<double, 2, 2>{1., 0., -0.2, 0.2});
-        gbassert(m3 * inverted == identity_matrix<double>(2));
+        gbassert(almost_equal(inverted, matrix<double, 2, 2>{1.6667, -0.6667, -0.3333, 0.3333}, 0.001));
+        gbassert(almost_equal(m3 * inverted, identity_matrix<double>(2), 0.001));
 
         matrix<double, 3, 3> m4{
-            1, 1, 1,
-            1, 2, 5,
-            2, -1, 3
+            1, 1, 2,
+            1, 2, -1,
+            1, 5, 3
         };
         auto solution4 = solve(m4, column_t<double, 3>{3, 8, 4});
         gbassert(solution4 == column_t<double, 3>{ 1, 1, 1 });
@@ -138,9 +140,9 @@ namespace
                 return value == 1 ? 10 : value;
             });
         gbassert(m4 == matrix<double, 3, 3>{
-            10, 10, 10,
-                10, 2, 5,
-                2, -1, 3});
+            10, 10, 2,
+                10, 2, -1,
+                10, 5, 3});
 
         gbassert(transform([](auto&& v) { return -v; }, get_row(m4, 1)) == row_t<double, 3>{ -10, -2, -5});
 
@@ -148,9 +150,9 @@ namespace
             1, 3, 5,
                 2, 4, 6,
                 7, 8, 9}) == matrix<double, 3, 3>{
-            11, 13, 15,
-                12, 6, 11,
-                9, 7, 12}
+            11, 13, 7,
+                12, 6, 5,
+                17, 13, 12}
         );
 
         gbassert(matrix<int, 2, 2>{

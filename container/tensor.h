@@ -39,6 +39,7 @@
 #include <initializer_list>
 #include <type_traits>
 #include "../util/gberror.h"
+#include "../util/misc.h"
 
 namespace gb::yadro::container
 {
@@ -154,7 +155,7 @@ namespace gb::yadro::container
         using indexer_t::cardinality;
         using indexer_t::dimension;
 
-        basic_tensor() = default;
+        basic_tensor() : _data{} {}
         explicit basic_tensor(std::convertible_to<indexer_t> auto&& indexer, auto&& ... args)
             : indexer_t(std::forward<decltype(indexer)>(indexer)),
             _data( std::forward<decltype(args)>(args)... )
@@ -269,6 +270,22 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------------------------------
+    // tensor functions
+    inline auto almost_equal(tensor_c auto&& tensor1, tensor_c auto&& tensor2, std::floating_point auto error)
+    {
+        if (tensor1.is_compatible(tensor2))
+        {
+            auto matched_dimensions = true;
+            for (std::size_t index = 0, cardinality = tensor1.cardinality();
+                index < cardinality && matched_dimensions; ++index)
+                matched_dimensions = tensor1.dimension(index) == tensor2.dimension(index);
+
+            return matched_dimensions && yadro::util::almost_equal(tensor1.data(), tensor2.data(), error);
+        }
+        return false;
+    }
+
+    //---------------------------------------------------------------------------------------------
     // operators
     namespace tensor_operators
     {
@@ -283,8 +300,8 @@ namespace gb::yadro::container
                 
                 if (matched_dimensions)
                 {
-                    auto [first, second] = std::ranges::mismatch(tensor1.data(), tensor1.data());
-                    return first == tensor1.data().end() && second == tensor1.data().end();
+                    auto [first, second] = std::ranges::mismatch(tensor1.data(), tensor2.data());
+                    return first == tensor1.data().end() && second == tensor2.data().end();
                 }
             }
             return false;

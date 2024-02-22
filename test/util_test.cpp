@@ -37,6 +37,8 @@
 #include <string>
 #include <algorithm>
 #include <unordered_set>
+#include <vector>
+#include <deque>
 
 namespace
 {
@@ -52,6 +54,7 @@ namespace
 
     GB_TEST(util, tuples)
     {
+        // test tuples
         std::unordered_set<std::tuple<unsigned, unsigned>, make_hash_t> s;
         s.insert({ 1,2 });
         s.emplace(std::tuple{ 2,2 });
@@ -70,10 +73,49 @@ namespace
         gbassert(p2 == std::tuple(2));
         gbassert(p3 == std::tuple(3));
         gbassert(p4 == std::tuple(4, 5));
+        auto t1 = std::tuple{ 1, 123.456, std::string("abc"), "xyz" };
+        auto t2 = std::tuple{ "...", std::ignore, nullptr };
+        gbassert(tuple_to_string(t1, t2) == "{1,123.456,abc,xyz}{...,,nullptr}");
+
+        auto [numbers, strings] = tuple_split<2>(t1);
+        gbassert(tuple_to_string(numbers, strings) == "{1,123.456}{abc,xyz}");
+
+        auto filtered = tuple_foreach(t1, std::ignore, std::ignore,
+            [](auto&& v) { return v + "_str"; },
+            [](auto&& v) { return v + std::string("_str"); }
+        );
+        gbassert(tuple_to_string(filtered) == "{,,abc_str,xyz_str}");
+        gbassert(tuple_to_string(tuple_remove_ignored(filtered)) == "{abc_str,xyz_str}");
+        gbassert(tuple_to_string(tuple_select<1, 3>(t1)) == "{123.456,xyz}");
+
+        auto t3 = tuple_transform(overloaded(
+            [](int i) { return std::to_string(i); },
+            [](double i) { return i; },
+            [](const char* s) { return std::string(s); },
+            [](auto&& other) { return other; }
+        ), t1);
+        gbassert(t3 == std::tuple(std::string("1"), 123.456, std::string("abc"), std::string("xyz")));
+
+        gbassert(tuple_transform([](auto ... v)
+            {   // return tuple of max values
+                return std::max({ v... });
+            }, std::tuple(1, 2, 3), std::tuple(3, 1, 4), std::tuple(2, 0, 8)) == std::tuple(3, 2, 8));
+
+        gbassert(tuple_transform_reduce(// count bytes
+            overloaded(
+                [](int) { return 4; },
+                [](double) { return 8; },
+                [](const char* s) { return std::string(s).size(); },
+                [](const std::string& s) { return s.size(); }
+        ), [](auto&& ...v) { return (0 + ... + v); }, t1) == 18);
+
+        gbassert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
+        gbassert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
     }
 
     GB_TEST(util, misc)
     {
+        // misc utilities
         std::int64_t dur{};
         std::uint64_t cnt{};
         {
@@ -101,48 +143,12 @@ namespace
         }
         gbassert(v == 123);
 
-        // test tuples
-        auto t1 = std::tuple{ 1, 123.456, std::string("abc"), "xyz" };
-        auto t2 = std::tuple{ "...", std::ignore, nullptr};
-        gbassert(tuple_to_string(t1, t2) == "{1,123.456,abc,xyz}{...,,nullptr}");
-        
-        auto [numbers, strings] = tuple_split<2>(t1);
-        gbassert(tuple_to_string(numbers, strings) == "{1,123.456}{abc,xyz}");
-        
-        auto filtered = tuple_foreach(t1, std::ignore, std::ignore,
-            [](auto&& v) { return v + "_str"; },
-            [](auto&& v) { return v + std::string("_str"); }
-        );
-        gbassert(tuple_to_string(filtered) == "{,,abc_str,xyz_str}");
-        gbassert(tuple_to_string(tuple_remove_ignored(filtered)) == "{abc_str,xyz_str}");
-        gbassert(tuple_to_string(tuple_select<1, 3>(t1)) == "{123.456,xyz}");
-        
-        auto t3 = tuple_transform(overloaded(
-            [](int i) { return std::to_string(i); },
-            [](double i) { return i; },
-            [](const char* s) { return std::string(s); },
-            [](auto&& other) { return other; }
-        ), t1);
-        gbassert(t3 == std::tuple(std::string("1"), 123.456, std::string("abc"), std::string("xyz")));
-        
-        gbassert(tuple_transform([](auto ... v)
-            {   // return tuple of max values
-                return std::max({v...});
-            }, std::tuple(1, 2, 3), std::tuple(3, 1, 4), std::tuple(2, 0, 8)) == std::tuple(3, 2, 8));
-
-        gbassert(tuple_transform_reduce(// count bytes
-            overloaded(
-            [](int) { return 4; },
-            [](double) { return 8; },
-            [](const char* s) { return std::string(s).size(); },
-            [](const std::string& s) { return s.size(); }
-        ), [](auto&& ...v) { return (0 + ... + v); }, t1) == 18);
-
-        gbassert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
-        gbassert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
-
         gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15");
         gbassert(tokenize<char>("abc,xyz,foo,bar", ',') == std::vector<std::string>{ "abc","xyz","foo","bar" });
+        gbassert(!almost_equal(1.55, 1.54, 0.001));
+        gbassert(almost_equal(1.55, 1.54, 0.011));
+        gbassert(!almost_equal(std::vector{ 1.1, 1.2, 2.2 }, std::deque{ 1.11, 1.19, 2.3 }, 0.001));
+        gbassert(almost_equal(std::vector{ 1.1, 1.2, 2.2 }, std::deque{ 1.11, 1.19, 2.3 }, 0.11));
     }
 
     GB_TEST(util, gnuplot)

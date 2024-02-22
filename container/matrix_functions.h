@@ -180,7 +180,7 @@ namespace gb::yadro::container
 
         auto select_best_row = [&](matrix_c auto& m, matrix_c auto& rh, std::size_t index)
             {
-                std::size_t greatest_row = 0;
+                std::size_t greatest_row = index;
                 data_type greatest_value = m(index, index); // diagonal
 
                 for (std::size_t row = index + 1, rows = m.rows(); row < rows; ++row)
