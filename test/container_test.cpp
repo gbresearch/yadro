@@ -72,7 +72,7 @@ namespace
         gbassert(t123 == t3);
 
         // test serialization
-        omem_archive ma;
+        omem_archive<> ma;
         ma(t0, t);
         imem_archive im(std::move(ma));
         auto [t01, t1] = deserialize< tensor<int, 2, 2>, tensor<int>>(im);

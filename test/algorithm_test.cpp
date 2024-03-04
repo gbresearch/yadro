@@ -133,7 +133,7 @@ namespace
         
         optimizer.optimize(10ms, 5);
         // serialize to memory archive
-        gb::yadro::archive::omem_archive oma;
+        gb::yadro::archive::omem_archive<> oma;
         oma(optimizer);
         optimizer.clear();
         // deserialize from memory archive

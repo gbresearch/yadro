@@ -47,6 +47,7 @@
 #include <map>
 #include <unordered_map>
 #include <span>
+#include <ranges>
 
 #include "archive_traits.h"
 
@@ -84,6 +85,10 @@ namespace gb::yadro::archive
 
         //-----------------------------------
         auto& get_stream() { return s; }
+        const auto& get_stream() const { return s; }
+        
+        //-----------------------------------
+        void reset(auto&&...args) { s.reset(std::forward<decltype(args)>(args)...); }
 
         //-----------------------------------
         // read an array T
@@ -206,12 +211,16 @@ namespace gb::yadro::archive
     }
     
     //---------------------------------------------------------------------
+    template<std::ranges::sized_range>
     struct imem_stream;
 
+    template<std::ranges::sized_range container_t>
     struct omem_stream
     {
-        using char_type = char;
+        using char_type = typename container_t::value_type;
         explicit omem_stream(auto&& ... args) : _buf(std::forward<decltype(args)>(args)...) {}
+
+        void reset() { _buf.resize(0); } // reset position to start writing from the beginning
 
         void write(const char_type* c, std::streamsize size)
         {
@@ -220,17 +229,27 @@ namespace gb::yadro::archive
             std::copy_n(c, size, _buf.begin() + prev_size);
         }
     private:
-        std::vector<char_type> _buf;
+        container_t _buf;
+        template<std::ranges::sized_range>
         friend struct imem_stream;
     };
 
+    template<std::ranges::sized_range container_t>
     struct imem_stream
     {
-        using char_type = char;
-        explicit imem_stream(omem_stream&& om) : _buf(std::move(om._buf)) {}
-        explicit imem_stream(const omem_stream&) = delete;
-        explicit imem_stream(archive<omem_stream, archive_format_t::custom>&& oma) : imem_stream(std::move(oma.get_stream())) {}
-        explicit imem_stream(const archive<omem_stream, archive_format_t::custom>&) = delete;
+        using char_type = typename container_t::value_type;
+        using omem_t = omem_stream< container_t>;
+        //using char_type = char;
+        explicit imem_stream(omem_t&& om) : _buf(std::move(om._buf)) {}
+        explicit imem_stream(const omem_t& om) : _buf(om._buf) {}
+        explicit imem_stream(archive<omem_t, archive_format_t::custom>&& oma) : imem_stream(std::move(oma.get_stream())) {}
+        explicit imem_stream(const archive<omem_t, archive_format_t::custom>& oma) : imem_stream(oma.get_stream()) {}
+
+        void reset() { _read_pos = 0; } // reset position to start reading from the beginning
+        void reset(omem_t&& om) { _buf = std::move(om._buf); reset(); }
+        void reset(const omem_t& om) { _buf = om._buf; reset(); }
+        void reset(archive<omem_t, archive_format_t::custom>&& oma) { reset(std::move(oma.get_stream())); }
+        void reset(const archive<omem_t, archive_format_t::custom>& oma) { reset(oma.get_stream()); }
 
         void read(char_type* c, std::streamsize size)
         {
@@ -239,7 +258,7 @@ namespace gb::yadro::archive
             _read_pos += static_cast<std::size_t>(size);
         }
     private:
-        std::vector<char_type> _buf;
+        container_t _buf;
         std::size_t _read_pos{};
     };
 
@@ -250,8 +269,11 @@ namespace gb::yadro::archive
     template<class Stream>
     using text_archive = archive<Stream, archive_format_t::text>;
 
-    using imem_archive = archive<imem_stream, archive_format_t::custom>;
-    using omem_archive = archive<omem_stream, archive_format_t::custom>;
+    template<std::ranges::sized_range container_t = std::vector<char>>
+    using imem_archive = archive<imem_stream<container_t>, archive_format_t::custom>;
+    
+    template<std::ranges::sized_range container_t = std::vector<char>>
+    using omem_archive = archive<omem_stream<container_t>, archive_format_t::custom>;
 
     //---------------------------------------------------------------------
     // serialize through conversion to type As

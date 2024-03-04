@@ -79,7 +79,7 @@ namespace
         oss << s2;
         gbassert(oss.str() == "aaaaa");
 
-        omem_archive ma;
+        omem_archive<> ma;
         ma(s2, static_string<11>("123"));
         imem_archive im(std::move(ma));
         static_string<12> s4;
@@ -139,14 +139,14 @@ namespace
         gbassert(v4 == std::vector{ 1,111,11,11,11 });
 
         // serialization
-        omem_archive ma;
+        omem_archive<static_vector<char, 1000>> ma;
         ma(v, v1, v2, v3, v4);
         v.clear();
         v1.clear();
         v2.clear();
         v3.clear();
         v4.clear();
-        imem_archive ima(std::move(ma));
+        imem_archive<static_vector<char, 1000>> ima(std::move(ma));
         ima(v, v1, v2, v3, v4);
         gbassert(v == std::vector{ 1,2,3,4,5 });
         gbassert(v1.empty());
@@ -190,7 +190,7 @@ namespace
                 }
             });
 
-        omem_archive ma;
+        omem_archive<> ma;
         ma(tree2);
         imem_archive ima(std::move(ma));
         ima(tree1);
@@ -242,7 +242,7 @@ edges 7:
         gbassert(os.str() == dump);
 
         // testing serialization
-        omem_archive ma;
+        omem_archive<> ma;
         ma(g);
         imem_archive ima(std::move(ma));
         graph<int> g1(ima);

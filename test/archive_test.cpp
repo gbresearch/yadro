@@ -108,10 +108,10 @@ namespace
         gbassert(compare_arrays(iarr, std::array<int, 5>{ 5, 4, 3, 2, 1 }));
 
         // memory archives tests
-        omem_archive ma;
+        omem_archive<> ma;
         ma(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::two), std::tuple{ 20, 40.4, std::string("tuple2") }, v, q, m, um, 
             opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
-        imem_archive ia(std::move(ma));
+        imem_archive<> ia(ma);
         std::queue<int> qq;
         ia(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
         gbassert(i == 123);
@@ -126,6 +126,33 @@ namespace
         gbassert(qq.front() == 200); qq.pop();
         gbassert(qq.front() == 300); qq.pop();
         gbassert(m == std::map<int, std::string>{ {1, "one"}, {2, "two"}, {3, "three"} });
+        gbassert(um == std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
+        gbassert(opt1 == std::optional<int>{});
+        gbassert(opt2 == std::optional<int>{111});
+        gbassert(v1 == std::variant<int, char, std::string>{});
+        gbassert(v2 == std::variant<int, char, std::string>{888});
+        gbassert(v3 == std::variant<int, char, std::string>{'A'});
+        gbassert(v4 == std::variant<int, char, std::string>{"variant"});
+        gbassert(compare_arrays(iarr, std::array<int, 5>{ 5, 4, 3, 2, 1 }));
+
+        // test archive reset
+        ma.reset();
+        ma(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::two), std::tuple{ 20, 40.4, std::string("tuple2") }, v, q, m, um,
+            opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
+        ia.reset(ma);
+        ia(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
+        gbassert(i == 123);
+        gbassert(std::tie(aa.i, aa.d) == std::tie(a.i, a.d));
+        gbassert(std::tie(bb.i, bb.d) == std::tie(b.i, b.d));
+        gbassert(s == "Hello World");
+        gbassert(d == 3.14);
+        gbassert(e == enum_type::two);
+        gbassert(t == std::tuple{ 20, 40.4, std::string("tuple2") });
+        gbassert(v == std::vector{ 10, 11, 12, 13, 14, 15 });
+        gbassert(qq.front() == 100); qq.pop();
+        gbassert(qq.front() == 200); qq.pop();
+        gbassert(qq.front() == 300); qq.pop();
+        gbassert(m == std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(um == std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(opt1 == std::optional<int>{});
         gbassert(opt2 == std::optional<int>{111});
