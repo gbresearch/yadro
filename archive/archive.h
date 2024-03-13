@@ -670,4 +670,13 @@ namespace gb::yadro::archive
         for (auto it = s.begin(); it != s.end(); ++it)
             a(*it);
     }
+
+    //---------------------------------------------------------------------
+    // most common serialization in binary stream
+    template<class Stream, class... Ts>
+    void bin_serialize(Stream&& s, Ts&& ... ts) requires(sizeof...(Ts) > 0)
+    {
+        serialize(bin_archive(std::forward<Stream>(s)), std::forward<Ts>(ts)...);
+    }
+
 }

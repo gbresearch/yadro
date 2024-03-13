@@ -67,7 +67,7 @@ namespace gb::yadro::util
     using generic_error = error_t<1000>;
 
     //-------------------------------------------------------------------------
-    template<class ErrorType>
+    template<class ErrorType = generic_error>
     inline void test_condition(const auto& cond, const std::string& msg = "", std::source_location location = std::source_location::current())
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
@@ -84,7 +84,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    template<class ErrorType>
+    template<class ErrorType = generic_error>
     [[noreturn]] inline void failed_condition(const std::string& msg = "failed condition", std::source_location location = std::source_location::current())
     {
         throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
