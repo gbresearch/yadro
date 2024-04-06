@@ -50,6 +50,16 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
+    // move_forward function
+    // if supplied parameter is (qualified) lvalue, returns (qualified) lvalue reference
+    // if supplied parameter is (qualified) rvalue, returns (qualified) value using move constructor
+    template<class T>
+    decltype(auto) move_forward(T&& t)
+    {
+        return static_cast<T>(std::forward<T>(t));
+    }
+
+    //-------------------------------------------------------------------------
     // creating overload set through inheritance
     // e.g. auto v = overloaded([](int i, double j){ return i+j;}, [](int, float) { return 0; })(123, 1.);
     template<class...T>
