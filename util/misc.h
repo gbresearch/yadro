@@ -69,6 +69,17 @@ namespace gb::yadro::util
     overloaded(T&& ...t) -> overloaded<std::remove_cvref_t<T>...>;
 
     //-------------------------------------------------------------------------
+    template<class...T>
+    struct mixin : T...
+    {
+        template<std::size_t I>
+        using type = std::tuple_element<I, std::tuple<T...>>;
+
+        using T::T...;
+        using T::operator=...;
+    };
+
+    //-------------------------------------------------------------------------
     // compare two floating point numbers
     inline auto almost_equal(std::floating_point auto first, std::floating_point auto second, std::floating_point auto error)
     {
@@ -214,9 +225,10 @@ namespace gb::yadro::util
     }
     //-------------------------------------------------------------------------
     // resource locked with mutex from construction to destruction
+    // serialized access to locked resource is through visit() function
     //-------------------------------------------------------------------------
     template<class T, class Mutex = std::mutex>
-    struct locked_resource
+    struct locked_resource final
     {
         // construct with owning mutex
         template<class...Args>
@@ -295,7 +307,7 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     template<class OnExit>
-    struct raii
+    struct raii final
     {
         raii(auto on_entry, OnExit on_exit) requires (std::invocable<decltype(on_entry)>)
             : on_exit(on_exit) {
@@ -314,7 +326,7 @@ namespace gb::yadro::util
     // retainer class exchanges value of the variable with the new_value
     // restores original value on destruction
     template<class T>
-    struct retainer
+    struct retainer final
     {
         template<class U>
         retainer(T& var, U&& new_value) : _var(var), _old_value(std::move(var)) 
