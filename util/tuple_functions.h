@@ -70,61 +70,102 @@ namespace gb::yadro::util
         return os.str();
     }
 
-    //-------------------------------------------------------------------------
-    // split tuple by index I
-    // returns a tuple of two tuples, 
-    // the first tuple contains [0, I - 1] values from the original tuple
-    // the second tuple contains [I, N - I] values from the original tuple
-    template<std::size_t I>
-    inline auto tuple_split(const auto& t)
+    inline namespace V2
     {
-        constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
-        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
-            std::index_sequence<Index...>)
-        {
-            return std::tuple(std::get<First + Index>(t)...);
-        };
+        template<std::size_t N, std::size_t...I>
+        consteval auto offset_sequence(std::index_sequence<I...>) { return std::index_sequence<(N + I)...>{}; }
 
-        if constexpr (I == 0)
-            return std::tuple(std::tuple{}, t);
-        else if constexpr (I >= size)
-            return std::tuple(t, std::tuple{});
-        else
-            return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I>{}),
-                make_tuple_from(t, std::index_sequence<I>{}, std::make_index_sequence<size - I>{}));
+        template<std::size_t ...I, std::size_t ...J>
+        consteval auto make_sequence(std::index_sequence<I...>, std::index_sequence<J...>)
+        {
+            return std::tuple{ offset_sequence<I>(std::make_index_sequence<(J - I)>{})... };
+        }
+
+        template<std::size_t Last, std::size_t First, std::size_t ...I>
+        consteval auto make_sequence(std::index_sequence<First, I...>)
+        {
+            return make_sequence(std::index_sequence<First, I...>{}, std::index_sequence<I..., Last>{});
+        }
+
+        // MSVC 19.latest compiler fails with consteval
+        template<size_t...I>
+        constexpr auto get_from_sequence(auto&& t, std::index_sequence<I...>)
+        {
+            return std::tuple{ std::get<I>(t)... };
+        }
+
+        // MSVC 19.latest compiler fails with consteval
+        template<size_t...I>
+        constexpr auto tuple_split(auto&& t)
+        {
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+            static_assert(((I >= 0) && ...));
+            static_assert(((I < size) && ...));
+            return std::apply([&](auto&&...seq)
+                {
+                    return std::tuple{ get_from_sequence(t, seq)... };
+                }, make_sequence<size>(std::index_sequence<0, I...>{}));
+        }
     }
-
-    template<std::size_t I0, std::size_t I1>
-    inline auto tuple_split(const auto& t)
+    
+    namespace V1
     {
-        constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
-        static_assert(I0 > 0 && I0 < I1 && I1 < size);
-        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
-            std::index_sequence<Index...>)
+        //-------------------------------------------------------------------------
+        // split tuple by index I
+        // returns a tuple of two tuples, 
+        // the first tuple contains [0, I - 1] values from the original tuple
+        // the second tuple contains [I, N - I] values from the original tuple
+        template<std::size_t I>
+        inline auto tuple_split(const auto& t)
         {
-            return std::tuple(std::get<First + Index>(t)...);
-        };
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+            auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
+                std::index_sequence<Index...>)
+            {
+                return std::tuple(std::get<First + Index>(t)...);
+            };
 
-        return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I0>{}),
-            make_tuple_from(t, std::index_sequence<I0>{}, std::make_index_sequence<I1 - I0>{}),
-            make_tuple_from(t, std::index_sequence<I1>{}, std::make_index_sequence<size - I1>{}));
-    }
+            if constexpr (I == 0)
+                return std::tuple(std::tuple{}, t);
+            else if constexpr (I >= size)
+                return std::tuple(t, std::tuple{});
+            else
+                return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I>{}),
+                    make_tuple_from(t, std::index_sequence<I>{}, std::make_index_sequence<size - I>{}));
+        }
 
-    template<std::size_t I0, std::size_t I1, std::size_t I2>
-    inline auto tuple_split(const auto& t)
-    {
-        constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
-        static_assert(I0 > 0 && I0 < I1 && I1 < I2 && I2 < size);
-        auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
-            std::index_sequence<Index...>)
+        template<std::size_t I0, std::size_t I1>
+        inline auto tuple_split(const auto& t)
         {
-            return std::tuple(std::get<First + Index>(t)...);
-        };
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+            static_assert(I0 > 0 && I0 < I1 && I1 < size);
+            auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
+                std::index_sequence<Index...>)
+            {
+                return std::tuple(std::get<First + Index>(t)...);
+            };
 
-        return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I0>{}),
-            make_tuple_from(t, std::index_sequence<I0>{}, std::make_index_sequence<I1 - I0>{}),
-            make_tuple_from(t, std::index_sequence<I1>{}, std::make_index_sequence<I2 - I1>{}),
-            make_tuple_from(t, std::index_sequence<I2>{}, std::make_index_sequence<size - I2>{}));
+            return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I0>{}),
+                make_tuple_from(t, std::index_sequence<I0>{}, std::make_index_sequence<I1 - I0>{}),
+                make_tuple_from(t, std::index_sequence<I1>{}, std::make_index_sequence<size - I1>{}));
+        }
+
+        template<std::size_t I0, std::size_t I1, std::size_t I2>
+        inline auto tuple_split(const auto& t)
+        {
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+            static_assert(I0 > 0 && I0 < I1 && I1 < I2 && I2 < size);
+            auto make_tuple_from = []<std::size_t First, std::size_t ...Index>(auto && t, std::index_sequence<First>,
+                std::index_sequence<Index...>)
+            {
+                return std::tuple(std::get<First + Index>(t)...);
+            };
+
+            return std::tuple(make_tuple_from(t, std::index_sequence<0>{}, std::make_index_sequence<I0>{}),
+                make_tuple_from(t, std::index_sequence<I0>{}, std::make_index_sequence<I1 - I0>{}),
+                make_tuple_from(t, std::index_sequence<I1>{}, std::make_index_sequence<I2 - I1>{}),
+                make_tuple_from(t, std::index_sequence<I2>{}, std::make_index_sequence<size - I2>{}));
+        }
     }
 
     //-------------------------------------------------------------------------

@@ -670,6 +670,19 @@ namespace gb::yadro::archive
         for (auto it = s.begin(); it != s.end(); ++it)
             a(*it);
     }
+#if defined(clang_p1061)
+    //---------------------------------------------------------------------
+    // serialize aggregate-like types using variadic structured bindings
+    // note: std::tuple is not an aggregate, std::aray is an aggregate
+    // note: is_aggregate is stronger constraint than necessary
+
+    template<class Archive, class T> requires(std::is_aggregate_v<T>)
+    auto serialize(Archive&& a, T&& t)
+    {
+        auto&& [...fields] = std::forward<T>(t);
+        serialize(a, std::forward<std::remove_cvref_t<decltype(fields)>>(fields)...);
+    }
+#endif
 
     //---------------------------------------------------------------------
     // most common serialization in binary stream
