@@ -77,9 +77,14 @@ namespace
         auto t2 = std::tuple{ "...", std::ignore, nullptr };
         gbassert(tuple_to_string(t1, t2) == "{1,123.456,abc,xyz}{...,,nullptr}");
 
+        // test tuple_split
         auto [numbers, strings] = tuple_split<2>(t1);
         gbassert(tuple_to_string(numbers, strings) == "{1,123.456}{abc,xyz}");
 
+        // test subtuple
+        gbassert(tuple_to_string(subtuple<1, 3>(t1), subtuple<2>(t1)) == "{123.456,abc}{abc,xyz}");
+
+        // test tuple_foreach
         auto filtered = tuple_foreach(t1, std::ignore, std::ignore,
             [](auto&& v) { return v + "_str"; },
             [](auto&& v) { return v + std::string("_str"); }
@@ -88,12 +93,14 @@ namespace
         gbassert(tuple_to_string(tuple_remove_ignored(filtered)) == "{abc_str,xyz_str}");
         gbassert(tuple_to_string(tuple_select<1, 3>(t1)) == "{123.456,xyz}");
 
+        // test tuple_transform
         auto t3 = tuple_transform(overloaded(
             [](int i) { return std::to_string(i); },
             [](double i) { return i; },
             [](const char* s) { return std::string(s); },
             [](auto&& other) { return other; }
         ), t1);
+
         gbassert(t3 == std::tuple(std::string("1"), 123.456, std::string("abc"), std::string("xyz")));
 
         gbassert(tuple_transform([](auto ... v)

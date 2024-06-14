@@ -70,10 +70,6 @@ namespace gb::yadro::util
         return os.str();
     }
 
-    //-------------------------------------------------------------------------
-    // split tuple by indexes (must be sorted)
-    // returns a tuple of multiple tuples cut by supplied indexes, counting from 0
-    // for example: tuple_split<2,3,5>(tuple{1,2,3,4,5,6,7}) --> {{1,2},{3},{4,5},{6,7}}
 
     template<std::size_t ...I>
     concept is_sorted_idx = std::ranges::is_sorted(std::array<std::size_t, sizeof...(I)>{I...});
@@ -101,7 +97,12 @@ namespace gb::yadro::util
         return std::tuple{ std::get<I>(t)... };
     }
 
+    //-------------------------------------------------------------------------
+    // split tuple by indexes (must be sorted)
+    // returns a tuple of multiple tuples cut by supplied indexes, counting from 0
+    // for example: tuple_split<2,3,5>(tuple{1,2,3,4,5,6,7}) --> {{1,2},{3},{4,5},{6,7}}
     // MSVC 19.latest compiler fails with consteval
+
     template<size_t...I>
     requires(is_sorted_idx<I...>)
     constexpr auto tuple_split(auto&& t)
@@ -115,6 +116,27 @@ namespace gb::yadro::util
             }, make_sequence<size>(std::index_sequence<0, I...>{}));
     }
     
+    //-------------------------------------------------------------------------
+    // making a sub-tuple from tuple-like type in index range [From, To)
+
+    template<std::size_t From, std::size_t To>
+    constexpr auto subtuple(auto&& t)
+    {
+        using tuple_type = std::remove_cvref_t<decltype(t)>;
+        static_assert(From >= 0 && From < To && To <= std::tuple_size_v<tuple_type>);
+        return get_from_sequence(std::forward<tuple_type>(t),
+            offset_sequence<From>(std::make_index_sequence<(To - From)>{}));
+    }
+
+    //-------------------------------------------------------------------------
+    // making a sub-tuple from tuple-like type in index range [From, Tuple-Size)
+    template<std::size_t From>
+    constexpr auto subtuple(auto&& t)
+    {
+        using tuple_type = std::remove_cvref_t<decltype(t)>;
+        return subtuple<From, std::tuple_size_v<tuple_type>>(std::forward<tuple_type>(t));
+    }
+
     //-------------------------------------------------------------------------
     // call specified functions for each element of the tuple/pair/array/subrange
     // returning a tuple of return values from each function call
