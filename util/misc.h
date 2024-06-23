@@ -105,16 +105,32 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     inline auto make_hash(const char* str) { return std::hash<std::string>{}(str); }
     inline auto make_hash(const wchar_t* str) { return std::hash<std::wstring>{}(str); }
-    inline auto make_hash(const auto& v) { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
+    inline auto make_hash(const auto& v) requires requires{ std::hash<std::remove_cvref_t<decltype(v)>>{}(v); }
+    { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
     // TODO: remove after experiment
     inline auto make_hash(unsigned v) { return v; };
 
-    inline auto make_hash(const auto& v, const auto&... ts)
+    // combine hashes
+    inline auto make_hash(const auto& v, const auto&... ts) requires(sizeof ...(ts) != 0);
+    // pair, tuple, array
+    inline constexpr auto make_hash(auto&& v) requires requires { std::get<0>(v); };
+    // ranges
+    inline auto make_hash(const std::ranges::common_range auto& r);
+
+    // combine hashes
+    inline auto make_hash(const auto& v, const auto&... ts) requires(sizeof ...(ts) != 0)
     {
         auto seed = make_hash(v);
-        if constexpr (sizeof ...(ts) != 0)
-            ((seed ^= make_hash(ts) + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
-        
+        ((seed ^= make_hash(ts) + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
+        return seed;
+    }
+    
+    // ranges
+    inline auto make_hash(const std::ranges::common_range auto& r)
+    {
+        auto seed = make_hash(0);
+        for (auto&& v : r)
+            seed = make_hash(seed, v);
         return seed;
     }
 
@@ -122,12 +138,6 @@ namespace gb::yadro::util
     inline constexpr auto make_hash(auto&& v) requires requires { std::get<0>(v); }
     {
         return std::apply([](auto&&... t) { return make_hash(t...); }, v);
-    }
-
-    template<class ...T>
-    inline constexpr auto make_hash(std::variant<T...>&& var)
-    {
-        return std::visit([](auto&& v) { return make_hash(v); }, var);
     }
 
 #if defined(clang_p1061)
@@ -139,25 +149,6 @@ namespace gb::yadro::util
         return make_hash(a...);
     }
 #endif
-
-    inline auto make_hash(const std::ranges::sized_range auto& r)
-    {
-        auto seed = make_hash(r.size());
-        for (auto&& v : r)
-            seed = make_hash(seed, v);
-        return seed;
-    }
-
-    template<class ...T>
-    inline auto make_hash(const std::tuple<T...>& tup)
-    {
-        auto seed = make_hash(sizeof...(T));
-
-        return std::apply([&](const auto& ...t)
-            {
-                return seed = make_hash(seed, t...);
-            }, tup);
-    }
 
     using make_hash_t = decltype([](auto&& ...v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)...); });
     
