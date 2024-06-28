@@ -118,6 +118,13 @@ namespace
 
         gbassert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
         gbassert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
+
+        // test conversion aggregates to tuples
+        struct A { int a{ -1 }; unsigned b{ 2 }; double c{ 3.3 }; };
+        gbassert(aggregate_to_tuple(A{}) == std::tuple{ -1, 2, 3.3 });
+        struct B : A { std::size_t s{ 4 }; };
+        gbassert(aggregate_member_count<B>() == 4);
+        // aggregate_to_tuple(B{}) doesn't work, gcc/clang - compilation failure, MSVC - incorrect result
     }
 
     GB_TEST(util, misc)

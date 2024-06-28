@@ -112,7 +112,7 @@ namespace gb::yadro::util
         static_assert(((I < size) && ...));
         return std::apply([&](auto&&...seq)
             {
-                return std::tuple{ get_from_sequence(t, seq)... };
+                return std::tuple{ get_from_sequence(std::forward<decltype(t)>(t), seq)... };
             }, make_sequence<size>(std::index_sequence<0, I...>{}));
     }
     
@@ -237,5 +237,115 @@ namespace gb::yadro::util
     inline auto tuple_max(auto&& ...t)
     {
         return std::max({ std::apply([](auto&& ...val) { return std::max({ val... }); }, t)... });
+    }
+
+#if defined(clang_p1061)
+    //-------------------------------------------------------------------------
+    // return member count of a class
+    constexpr auto class_member_count(auto&& t)
+    {
+        auto&& [...x] = std::forward<decltype(t)>(t);
+        return sizeof...(x);
+    }
+    
+    //-------------------------------------------------------------------------
+    // create a tuple from the members of class
+    constexpr auto class_to_tuple(auto&& t)
+    {
+        auto&& [...x] = std::forward<decltype(t)>(t);
+        return std::tuple{ std::forward<decltype(x)>(x)...};
+    }
+#endif
+
+    //-------------------------------------------------------------------------
+    namespace detail
+    {
+        template<class T> concept aggregate_type = std::is_aggregate_v<T>;
+        struct filler_t
+        {
+            template<class T> requires(!aggregate_type<T>) constexpr operator T& ();
+            template<class T> requires(!aggregate_type<T>) constexpr operator T && ();
+        };
+    }
+
+    //-------------------------------------------------------------------------
+    // return member count of an aggregate
+    template<detail::aggregate_type T>
+    constexpr auto aggregate_member_count(auto&& ...filler)
+    {
+        if constexpr (requires{ T{ filler... }; })
+            return aggregate_member_count<T>(detail::filler_t{}, filler...);
+        else
+        {
+            static_assert(sizeof...(filler), "unsupported type");
+            return sizeof...(filler) - 1;
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // create a tuple from aggregate
+    template<detail::aggregate_type T, auto N = aggregate_member_count<T>()>
+    constexpr auto aggregate_to_tuple(T&& t)
+    {
+        static_assert(N > 0 && N < 11);
+
+        if constexpr(N == 1)
+        {
+            auto&& [x] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x)>(x));
+        }
+        else if constexpr (N == 2)
+        {
+            auto&& [x1, x2] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2));
+        }
+        else if constexpr (N == 3)
+        {
+            auto&& [x1, x2, x3] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3));
+        }
+        else if constexpr (N == 4)
+        {
+            auto&& [x1, x2, x3, x4] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4));
+        }
+        else if constexpr (N == 5)
+        {
+            auto&& [x1, x2, x3, x4, x5] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4), 
+                std::forward<decltype(x5)>(x5));
+        }
+        else if constexpr (N == 6)
+        {
+            auto&& [x1, x2, x3, x4, x5, x6] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4),
+                std::forward<decltype(x5)>(x5), std::forward<decltype(x6)>(x6));
+        }
+        else if constexpr (N == 7)
+        {
+            auto&& [x1, x2, x3, x4, x5, x6, x7] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4),
+                std::forward<decltype(x5)>(x5), std::forward<decltype(x6)>(x6), std::forward<decltype(x7)>(x7));
+        }
+        else if constexpr (N == 8)
+        {
+            auto&& [x1, x2, x3, x4, x5, x6, x7, x8] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4),
+                std::forward<decltype(x5)>(x5), std::forward<decltype(x6)>(x6), std::forward<decltype(x7)>(x7), std::forward<decltype(x8)>(x8));
+        }
+        else if constexpr (N == 9)
+        {
+            auto&& [x1, x2, x3, x4, x5, x6, x7, x8, x9] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4),
+                std::forward<decltype(x5)>(x5), std::forward<decltype(x6)>(x6), std::forward<decltype(x7)>(x7), std::forward<decltype(x8)>(x8),
+                std::forward<decltype(x9)>(x9));
+        }
+        else if constexpr (N == 10)
+        {
+            auto&& [x1, x2, x3, x4, x5, x6, x7, x8, x9, x10] = std::forward<T>(t);
+            return std::tuple(std::forward<decltype(x1)>(x1), std::forward<decltype(x2)>(x2), std::forward<decltype(x3)>(x3), std::forward<decltype(x4)>(x4),
+                std::forward<decltype(x5)>(x5), std::forward<decltype(x6)>(x6), std::forward<decltype(x7)>(x7), std::forward<decltype(x8)>(x8),
+                std::forward<decltype(x9)>(x9), std::forward<decltype(x10)>(x10));
+        }
     }
 }
