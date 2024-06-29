@@ -116,15 +116,18 @@ namespace
                 [](const std::string& s) { return s.size(); }
         ), [](auto&& ...v) { return (0 + ... + v); }, t1) == 18);
 
-        gbassert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
-        gbassert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
+        static_assert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
+        static_assert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
 
         // test conversion aggregates to tuples
         struct A { int a{ -1 }; unsigned b{ 2 }; double c{ 3.3 }; };
-        gbassert(aggregate_to_tuple(A{}) == std::tuple{ -1, 2, 3.3 });
+        static_assert(aggregate_to_tuple(A{}) == std::tuple{ -1, 2, 3.3 });
         struct B : A { std::size_t s{ 4 }; };
-        gbassert(aggregate_member_count<B>() == 4);
+        static_assert(aggregate_member_count<B>() == 4);
         // aggregate_to_tuple(B{}) doesn't work, gcc/clang - compilation failure, MSVC - incorrect result
+
+        // test tuple flattening
+        static_assert(make_flat_tuple(std::tuple{ 'a', std::tuple{'b', std::tuple{std::array{1,2,3},4}} }) == std::tuple{ 'a','b',1,2,3,4 });
     }
 
     GB_TEST(util, misc)

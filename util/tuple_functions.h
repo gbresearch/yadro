@@ -39,11 +39,35 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // tuple functions
     //-------------------------------------------------------------------------
+    
+    // concept for tuple-like types
+    template<class T>
+    concept tuple_like = requires
+    {
+        std::get<0>(std::declval<T>());
+        std::tuple_size_v<std::remove_cvref_t<T>>;
+        typename std::tuple_element<0, std::remove_cvref_t<T>>;
+    };
 
+    //-------------------------------------------------------------------------
+    // make a flat tuple, unwrapping tuple-like types
+    constexpr auto make_flat_tuple(auto&& arg, auto&& ...args)
+    {
+        if constexpr (sizeof...(args) == 0)
+        {   // single argument
+            if constexpr (!tuple_like<decltype(arg)>)
+                return std::tuple{ arg };
+            else
+                return std::apply([](auto&&...t) { return std::tuple_cat(make_flat_tuple(t)...); }, arg);
+        }
+        else
+            return std::tuple_cat(make_flat_tuple(arg), make_flat_tuple(args...));
+    }
+    
     //-------------------------------------------------------------------------
     // conver multile tuples to string in format {x,x,x}
     // std::ignore values are skipped
-    auto tuple_to_string(const auto& ... tuples)
+    inline auto tuple_to_string(const tuple_like auto& ... tuples)
     {
         std::ostringstream os;
         auto write_one = [&](const auto& t)
@@ -105,7 +129,7 @@ namespace gb::yadro::util
 
     template<size_t...I>
     requires(is_sorted_idx<I...>)
-    constexpr auto tuple_split(auto&& t)
+    constexpr auto tuple_split(tuple_like auto&& t)
     {
         constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
         static_assert(((I > 0) && ...));
@@ -120,7 +144,7 @@ namespace gb::yadro::util
     // making a sub-tuple from tuple-like type in index range [From, To)
 
     template<std::size_t From, std::size_t To>
-    constexpr auto subtuple(auto&& t)
+    constexpr auto subtuple(tuple_like auto&& t)
     {
         using tuple_type = std::remove_cvref_t<decltype(t)>;
         static_assert(From >= 0 && From < To && To <= std::tuple_size_v<tuple_type>);
@@ -131,7 +155,7 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // making a sub-tuple from tuple-like type in index range [From, Tuple-Size)
     template<std::size_t From>
-    constexpr auto subtuple(auto&& t)
+    constexpr auto subtuple(tuple_like auto&& t)
     {
         using tuple_type = std::remove_cvref_t<decltype(t)>;
         return subtuple<From, std::tuple_size_v<tuple_type>>(std::forward<tuple_type>(t));
@@ -144,7 +168,7 @@ namespace gb::yadro::util
     // std::ignore can be used instead of a function in order to ignore the value
     // note: function arguments evaluation order is unspecified and so are side effects
     //-------------------------------------------------------------------------
-    inline auto tuple_foreach(auto&& tup, auto&&... fn)
+    constexpr auto tuple_foreach(tuple_like auto&& tup, auto&&... fn)
         requires(std::tuple_size<std::remove_cvref_t<decltype(tup)>>::value == sizeof ...(fn))
     {
         auto call = [](auto&& fn, auto&& val)
@@ -170,14 +194,14 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // create a new tuple with the values from tuple corresponding to indexes
     template<std::size_t... Indexes>
-    inline auto tuple_select(auto&& tup)
+    constexpr auto tuple_select(tuple_like auto&& tup)
     {
         return std::tuple(std::get<Indexes>(tup)...);
     }
 
     //-------------------------------------------------------------------------
     // create a new tuple with all std::ignore values removed
-    inline auto tuple_remove_ignored(auto&& tup)
+    constexpr auto tuple_remove_ignored(tuple_like auto&& tup)
     {
         auto make_t = [](auto&& v)
             {
@@ -196,7 +220,7 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // transform multiple tuples to another tuple where transform_fn is called on each element of the tuples in lockstep
     // requires all tuples to be the same size
-    auto tuple_transform(auto&& transform_fn, auto&& t, auto&& ...ts)
+    constexpr auto tuple_transform(auto&& transform_fn, tuple_like auto&& t, tuple_like auto&& ...ts)
         requires ((sizeof ...(ts) == 0 ||
         ((std::tuple_size<std::remove_cvref_t<decltype(t)>>{} == std::tuple_size<std::remove_cvref_t<decltype(ts)>>{})
         && ...)) && std::invocable<decltype(transform_fn), decltype(std::get<0>(t)), decltype(std::get<0>(ts))...>)
@@ -218,8 +242,7 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // apply reduce_fn to a tuple which is transformed using transfrom_fn
-    inline auto tuple_transform_reduce(auto&& transform_fn, auto&& reduce_fn, auto&& t) 
-        requires requires { std::get<0>(t); }
+    constexpr auto tuple_transform_reduce(auto&& transform_fn, auto&& reduce_fn, tuple_like auto&& t)
     {
         return std::apply(std::forward<decltype(reduce_fn)>(reduce_fn), tuple_transform(
             std::forward<decltype(transform_fn)>(transform_fn), std::forward<decltype(t)>(t)));
@@ -227,14 +250,14 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // returns min value of all elements of the specified tuples (must be comparable)
-    inline auto tuple_min(auto&& ...t)
+    constexpr auto tuple_min(tuple_like auto&& ...t)
     {
         return std::min({ std::apply([](auto&& ...val) { return std::min({ val... }); }, t)... });
     }
 
     //-------------------------------------------------------------------------
     // returns max value of all elements of the specified tuples (must be comparable)
-    inline auto tuple_max(auto&& ...t)
+    constexpr auto tuple_max(tuple_like auto&& ...t)
     {
         return std::max({ std::apply([](auto&& ...val) { return std::max({ val... }); }, t)... });
     }
@@ -263,8 +286,8 @@ namespace gb::yadro::util
         template<class T> concept aggregate_type = std::is_aggregate_v<T>;
         struct filler_t
         {
-            template<class T> requires(!aggregate_type<T>) constexpr operator T& ();
-            template<class T> requires(!aggregate_type<T>) constexpr operator T && ();
+            template<class T> requires(not aggregate_type<T>) constexpr operator T& ();
+            template<class T> requires(not aggregate_type<T>) constexpr operator T && ();
         };
     }
 
