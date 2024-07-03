@@ -30,6 +30,7 @@
 #include "../util/misc.h"
 #include "../archive/archive.h"
 #include "../algorithm/genetic_optimization.h"
+#include "../algorithm/regression_analysis.h"
 #include <iostream>
 #include <thread>
 
@@ -100,6 +101,7 @@ namespace
 #endif
     }
 
+    //--------------------------------------------------------------------------------------------
     GB_TEST(algorithm, genetic_optimization_mt_test)
     {
         using namespace std::chrono_literals;
@@ -155,6 +157,7 @@ namespace
         }
     }
 
+    //--------------------------------------------------------------------------------------------
     GB_TEST(algorithm, genetic_opt_serialization_test)
     {
         using namespace std::chrono_literals;
@@ -186,5 +189,62 @@ namespace
             std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
         }
 #endif
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, regression_test)
+    {
+        using namespace std::chrono_literals;
+
+        // test residuals
+        auto data = std::vector<std::tuple<double, double>>{ {1., 0.}, { 2.,1. } };
+        gbassert(residuals([](auto x) { return x; }, data) == std::vector{1., 1.});
+        gbassert(residuals([](auto x) { return 1 + x; }, data, std::minus<>{}) == std::vector{ 0., 0. });
+
+        {
+            // least-squares optimization
+            auto opt = least_squares_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
+                data, std::tuple{ -2., 2. }, std::tuple{ -3., 3. });
+
+            auto [stat, opt_map] = opt.optimize(10ms, 4);
+
+#if defined(GB_DEBUGGING)
+            std::cout << stat << "\n";
+
+            for (auto&& opt : opt_map)
+            {
+                auto [target, ab] = opt;
+                std::cout << "target: " << target << ", " << tuple_to_string(ab) << "\n";
+            }
+#endif
+            gbassert(opt_map.size() == 4);
+            auto [target, a, b] = make_flat_tuple(*opt_map.begin());
+            gbassert(almost_equal(target, 0., 0.01));
+            gbassert(almost_equal(a, 1., 0.1));
+            gbassert(almost_equal(b, 1., 0.1));
+        }
+
+        // least absolute value optimization
+        {
+            auto opt = least_abs_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
+                data, std::tuple{ -2., 2. }, std::tuple{ -3., 3. });
+
+            auto [stat, opt_map] = opt.optimize(10ms, 4);
+
+#if defined(GB_DEBUGGING)
+            std::cout << stat << "\n";
+
+            for (auto&& opt : opt_map)
+            {
+                auto [target, ab] = opt;
+                std::cout << "target: " << target << ", " << tuple_to_string(ab) << "\n";
+            }
+#endif
+            gbassert(opt_map.size() == 4);
+            auto [target, a, b] = make_flat_tuple(*opt_map.begin());
+            gbassert(almost_equal(target, 0., 0.1));
+            gbassert(almost_equal(a, 1., 0.1));
+            gbassert(almost_equal(b, 1., 0.1));
+        }
     }
 }

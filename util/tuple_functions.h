@@ -65,7 +65,7 @@ namespace gb::yadro::util
     }
     
     //-------------------------------------------------------------------------
-    // conver multile tuples to string in format {x,x,x}
+    // convert multile tuples to string in format {x,x,x}
     // std::ignore values are skipped
     inline auto tuple_to_string(const tuple_like auto& ... tuples)
     {
@@ -148,7 +148,7 @@ namespace gb::yadro::util
     {
         using tuple_type = std::remove_cvref_t<decltype(t)>;
         static_assert(From >= 0 && From < To && To <= std::tuple_size_v<tuple_type>);
-        return get_from_sequence(std::forward<tuple_type>(t),
+        return get_from_sequence(std::forward<decltype(t)>(t),
             offset_sequence<From>(std::make_index_sequence<(To - From)>{}));
     }
 
@@ -158,7 +158,7 @@ namespace gb::yadro::util
     constexpr auto subtuple(tuple_like auto&& t)
     {
         using tuple_type = std::remove_cvref_t<decltype(t)>;
-        return subtuple<From, std::tuple_size_v<tuple_type>>(std::forward<tuple_type>(t));
+        return subtuple<From, std::tuple_size_v<tuple_type>>(std::forward<decltype(t)>(t));
     }
 
     //-------------------------------------------------------------------------

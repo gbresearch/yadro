@@ -95,6 +95,9 @@
     <ClInclude Include="..\container\matrix_functions.h">
       <Filter>container</Filter>
     </ClInclude>
+    <ClInclude Include="..\algorithm\regression_analysis.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

@@ -64,10 +64,10 @@ namespace
         auto [ts1, ts2] = tuple_split<3>(std::tuple(1, 2, 3, 4, 5));
         gbassert(ts1 == std::tuple(1, 2, 3));
         gbassert(ts2 == std::tuple(4, 5));
-        auto [sp1, sp2, sp3] = tuple_split<1,2>(std::tuple(1, 2, 3, 4, 5));
+        auto [sp1, sp2, sp3] = tuple_split<1, 2>(std::tuple(1, 2, 3, 4, 5));
         gbassert(sp1 == std::tuple(1));
         gbassert(sp2 == std::tuple(2));
-        gbassert(sp3 == std::tuple(3,4,5));
+        gbassert(sp3 == std::tuple(3, 4, 5));
         auto [p1, p2, p3, p4] = tuple_split<1, 2, 3>(std::tuple(1, 2, 3, 4, 5));
         gbassert(p1 == std::tuple(1));
         gbassert(p2 == std::tuple(2));
@@ -114,7 +114,7 @@ namespace
                 [](double) { return 8; },
                 [](const char* s) { return std::string(s).size(); },
                 [](const std::string& s) { return s.size(); }
-        ), [](auto&& ...v) { return (0 + ... + v); }, t1) == 18);
+            ), [](auto&& ...v) { return (0 + ... + v); }, t1) == 18);
 
         static_assert(tuple_min(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == -3);
         static_assert(tuple_max(std::tuple(1, 2, 3), std::tuple(-1, -2, -3)) == 3);
@@ -137,7 +137,7 @@ namespace
         std::uint64_t cnt{};
         {
             accumulating_timer<std::chrono::milliseconds> t{
-                [&](auto duration, auto count) { dur = duration.count(); cnt = count; }};
+                [&](auto duration, auto count) { dur = duration.count(); cnt = count; } };
 
             std::mutex m1, m2;
             gbassert(locked_call([] { return 1; }, m1, m2) == 1);
@@ -161,7 +161,7 @@ namespace
         gbassert(v == 123);
 
         gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15");
-        gbassert(tokenize<char>("abc,xyz,foo,bar", ',') == std::vector<std::string>{ "abc","xyz","foo","bar" });
+        gbassert(tokenize<char>("abc,xyz,foo,bar", ',') == std::vector<std::string>{ "abc", "xyz", "foo", "bar" });
         gbassert(!almost_equal(1.55, 1.54, 0.001));
         gbassert(almost_equal(1.55, 1.54, 0.011));
         gbassert(!almost_equal(std::vector{ 1.1, 1.2, 2.2 }, std::deque{ 1.11, 1.19, 2.3 }, 0.001));
@@ -239,5 +239,14 @@ unset multiplot)*";
             };
 
         gbassert(clean_str(cmd) == clean_str(golden));
+    }
+
+    GB_TEST(util, misc_locked)
+    {
+        locked_resource<int> lint{ 123 };
+        locked_resource<std::string> lstr{3, 'x'};
+        lstr.visit([](auto&& s) { gbassert(s == "xxx"); });
+        lstr.visit([](auto&& s, auto&& arg) { s = std::string("hello") + arg; }, " world");
+        lstr.visit([](auto&& s) { gbassert(s == "hello world"); });
     }
 }

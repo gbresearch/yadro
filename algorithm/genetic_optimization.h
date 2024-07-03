@@ -180,7 +180,7 @@ namespace gb::yadro::algorithm
 
         using target_t = std::invoke_result_t<Fn, Types...>;
 
-        std::mutex _m;
+        util::mutexer<std::mutex> _m;
         std::unordered_set<std::size_t> _visited; // hashes of already tried parameters
         std::multimap<target_t, std::tuple<Types...>, CompareFn> _opt_map; // target functions calculated
 

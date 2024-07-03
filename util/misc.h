@@ -214,25 +214,33 @@ namespace gb::yadro::util
                 }, its);
         }
     }
+    
+    //-------------------------------------------------------------------------
+    // mutexer<mutex> inherits from mutex and provides empty copy ctor/assignment
+    // each object of the class has its own mutex
+    template<class Mutex>
+    struct mutexer : Mutex
+    {
+        mutexer() = default;
+        mutexer(const mutexer&) {}
+        auto& operator= (const mutexer&) { return *this; }
+    };
+
     //-------------------------------------------------------------------------
     // resource locked with mutex from construction to destruction
     // serialized access to locked resource is through visit() function
     //-------------------------------------------------------------------------
-    template<class T, class Mutex = std::mutex>
+    template<class T, class Mutex = mutexer<std::mutex>>
     struct locked_resource final
     {
+        static_assert(not std::is_reference_v<T>);
+        
         // construct with owning mutex
         template<class...Args>
+        requires(not std::convertible_to<Args, std::add_lvalue_reference_t<Mutex>> || ...)
         constexpr explicit locked_resource(Args&&... args)
         {
-            new(&t) T(std::forward<Args>(args)...);
-        }
-
-        // construct with mutex reference
-        template<class...Args, class MM = Mutex, std::enable_if_t<std::is_reference_v<MM>, int> = 0>
-        constexpr explicit locked_resource(MM& m, Args&&... args) : mtx(m)
-        {
-            std::scoped_lock _(mtx);
+            std::unique_lock _(mtx);
             new(&t) T(std::forward<Args>(args)...);
         }
 
@@ -242,30 +250,22 @@ namespace gb::yadro::util
         }
 
         template<class Function, class...Args>
-        constexpr auto visit(Function&& f, Args&&...args)
+        constexpr auto visit(this auto&& self, Function&& f, Args&&...args)
         {
-            return std::scoped_lock(mtx),
-                std::invoke(std::forward<Function>(f), t, std::forward<Args>(args)...);
+            return (void)std::unique_lock(self.mtx),
+                std::invoke(std::forward<Function>(f), std::forward<decltype(self)>(self).t, std::forward<Args>(args)...);
         }
 
-        template<class Function, class...Args>
-        constexpr auto visit(Function&& f, Args&&...args) const
-        {
-            return std::scoped_lock(mtx),
-                std::invoke(std::forward<Function>(f), t, std::forward<Args>(args)...);
-        }
-
-        constexpr explicit operator bool() const { return std::scoped_lock(mtx), (t ? true : false); }
+        constexpr explicit operator bool() const { return (void)std::unique_lock(mtx), (t ? true : false); }
 
     private:
-        Mutex mtx;
+        mutable Mutex mtx;
         union { T t; };
     };
-
+    
     inline auto locked_call(auto fun, auto& ... mtx) requires (std::invocable<decltype(fun)>)
     {
-        std::scoped_lock lock(mtx ...);
-        return std::invoke(fun);
+        return (void)std::scoped_lock(mtx ...), std::invoke(fun);
     }
 
     //-------------------------------------------------------------------------

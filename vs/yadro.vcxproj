@@ -117,6 +117,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\algorithm\genetic_optimization.h" />
+    <ClInclude Include="..\algorithm\regression_analysis.h" />
     <ClInclude Include="..\archive\archive.h" />
     <ClInclude Include="..\archive\archive_traits.h" />
     <ClInclude Include="..\async\taskcontainer.h" />
