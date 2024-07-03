@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -26,19 +26,14 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-#include "../include/yadro.h"
-#include <thread>
-#include <chrono>
+#pragma once
+#include "gbwin.h"
 
-int main()
+#ifdef GBWINDOWS
+
+namespace gb::yadro::util
 {
-    using namespace gb::yadro::util;
-    tester::set_verbose(true);
-    tester::set_logger("yadro-test.log", std::cout);
-#ifndef GBWINDOWS
-    tester::disable_tests("util", "win_pipe");
-#endif
-    tester::set_policy(std::launch::deferred);
-    auto success = tester::run();
-    return success ? 0 : -1;
+
 }
+
+#endif

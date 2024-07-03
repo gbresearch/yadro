@@ -98,6 +98,18 @@
     <ClInclude Include="..\algorithm\regression_analysis.h">
       <Filter>algorithm</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\win_pipe.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\algorithm\gbalgorithm.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\gbcontainer.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\gbutil.h">
+      <Filter>util</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

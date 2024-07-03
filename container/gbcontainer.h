@@ -26,19 +26,12 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-#include "../include/yadro.h"
-#include <thread>
-#include <chrono>
+#pragma once
 
-int main()
-{
-    using namespace gb::yadro::util;
-    tester::set_verbose(true);
-    tester::set_logger("yadro-test.log", std::cout);
-#ifndef GBWINDOWS
-    tester::disable_tests("util", "win_pipe");
-#endif
-    tester::set_policy(std::launch::deferred);
-    auto success = tester::run();
-    return success ? 0 : -1;
-}
+#include "graph.h"
+#include "math.h"
+#include "matrix_functions.h"
+#include "static_string.h"
+#include "static_vector.h"
+#include "tensor.h"
+#include "tree.h"

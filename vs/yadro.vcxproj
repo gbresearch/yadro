@@ -116,12 +116,14 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\algorithm\gbalgorithm.h" />
     <ClInclude Include="..\algorithm\genetic_optimization.h" />
     <ClInclude Include="..\algorithm\regression_analysis.h" />
     <ClInclude Include="..\archive\archive.h" />
     <ClInclude Include="..\archive\archive_traits.h" />
     <ClInclude Include="..\async\taskcontainer.h" />
     <ClInclude Include="..\async\threadpool.h" />
+    <ClInclude Include="..\container\gbcontainer.h" />
     <ClInclude Include="..\container\graph.h" />
     <ClInclude Include="..\container\matrix.h" />
     <ClInclude Include="..\container\matrix_functions.h" />
@@ -137,11 +139,13 @@
     <ClInclude Include="..\util\gbmemory.h" />
     <ClInclude Include="..\util\gbtest.h" />
     <ClInclude Include="..\util\gbtimer.h" />
+    <ClInclude Include="..\util\gbutil.h" />
     <ClInclude Include="..\util\gbwin.h" />
     <ClInclude Include="..\util\gnuplot.h" />
     <ClInclude Include="..\util\misc.h" />
     <ClInclude Include="..\util\traits.h" />
     <ClInclude Include="..\util\tuple_functions.h" />
+    <ClInclude Include="..\util\win_pipe.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp" />

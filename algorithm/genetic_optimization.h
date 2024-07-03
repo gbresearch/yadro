@@ -45,6 +45,7 @@
 #include "../util/tuple_functions.h"
 #include "../util/gbmacro.h"
 #include "../async/threadpool.h"
+#include "../archive/archive.h"
 
 namespace gb::yadro::algorithm
 {

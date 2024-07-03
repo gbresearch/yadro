@@ -3,6 +3,7 @@
 // windows utilities
 
 #if defined(_Windows) || defined(__WIN32__) || defined(_WIN32) || defined(_WIN64) || defined(_MSC_VER)
+#define GBWINDOWS
 
 #include <functional>
 #include <filesystem>

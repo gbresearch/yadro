@@ -26,19 +26,18 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-#include "../include/yadro.h"
-#include <thread>
-#include <chrono>
+#pragma once
 
-int main()
-{
-    using namespace gb::yadro::util;
-    tester::set_verbose(true);
-    tester::set_logger("yadro-test.log", std::cout);
-#ifndef GBWINDOWS
-    tester::disable_tests("util", "win_pipe");
-#endif
-    tester::set_policy(std::launch::deferred);
-    auto success = tester::run();
-    return success ? 0 : -1;
-}
+#include "file_mutex.h"
+#include "gberror.h"
+#include "gblog.h"
+#include "gbmacro.h"
+#include "gbmemory.h"
+#include "gbtest.h"
+#include "gbtimer.h"
+#include "gbwin.h"
+#include "gnuplot.h"
+#include "misc.h"
+#include "traits.h"
+#include "tuple_functions.h"
+#include "win_pipe.h"

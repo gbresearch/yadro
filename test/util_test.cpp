@@ -32,6 +32,8 @@
 #include "../util/misc.h"
 #include "../util/tuple_functions.h"
 #include "../util/gnuplot.h"
+#include "../util/gbwin.h"
+#include "../util/win_pipe.h"
 
 #include <sstream>
 #include <string>
@@ -248,5 +250,10 @@ unset multiplot)*";
         lstr.visit([](auto&& s) { gbassert(s == "xxx"); });
         lstr.visit([](auto&& s, auto&& arg) { s = std::string("hello") + arg; }, " world");
         lstr.visit([](auto&& s) { gbassert(s == "hello world"); });
+    }
+
+    GB_TEST(util, win_pipe)
+    {
+
     }
 }
