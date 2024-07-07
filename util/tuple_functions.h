@@ -161,14 +161,13 @@ namespace gb::yadro::util
         }
     }
 
-
     //-------------------------------------------------------------------------
     // transformation of variant
+    struct void_type {};
+    struct wrong_arg_type {};
+
     namespace detail
     {
-        struct void_type {};
-        struct wrong_arg_type {};
-
         template<class Fn, class... Args>
         constexpr auto invoke_fn(Fn fn, Args&&...args)
         {

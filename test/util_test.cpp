@@ -154,16 +154,16 @@ namespace
                 [](const std::string& v) { return v; });
 
             auto print = overloaded(
-                [](detail::void_type) { return std::string("void_type"); },
-                [](detail::wrong_arg_type) { return std::string("wrong_arg_type"); },
+                [](void_type) { return std::string("void_type"); },
+                [](wrong_arg_type) { return std::string("wrong_arg_type"); },
                 [](std::string v) { return v; },
                 [](auto&& v) { return std::to_string(v); });
 
-            using variant_type = std::variant<int, double, std::string, std::tuple<int, int>>;
+            using variant_type = std::variant<int, int, long, double, std::string, std::tuple<int, int>>;
 
             gbassert(std::visit(print, transform(fun, variant_type{ "pi = " })) == "pi = ");
             gbassert(std::visit(print, transform(fun, variant_type{ 3.1415 })) == "3.141500");
-            gbassert(std::visit(print, transform(fun, variant_type{ 1 })) == "void_type");
+            gbassert(std::visit(print, transform(fun, variant_type{ std::in_place_index<0>, 1 })) == "void_type");
             gbassert(std::visit(print, transform(fun, variant_type{ std::tuple(1,2) })) == "wrong_arg_type");
         }
     }
