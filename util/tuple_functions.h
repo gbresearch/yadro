@@ -33,6 +33,7 @@
 #include <type_traits>
 #include <functional>
 #include <utility>
+#include <variant>
 
 namespace gb::yadro::util
 {
@@ -94,7 +95,120 @@ namespace gb::yadro::util
         return os.str();
     }
 
+    //-------------------------------------------------------------------------
+    // get tuple value by run-time index, return is variant
+    constexpr auto tuple_to_variant(tuple_like auto&& t, std::size_t index)
+    {
+        using variant_type = decltype(std::apply([](auto&&... v) {
+            return std::variant<std::remove_cvref_t<decltype(v)>...>{};
+            }, t));
 
+        constexpr auto get_n = []<auto N>(this auto && self, auto && t, std::size_t index, std::index_sequence<N>)
+            -> variant_type
+        {
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+
+            if constexpr (N >= size)
+            {
+                throw util::exception_t{ "bad tuple index", index };
+            }
+            else
+            {
+                if (N == index)
+                    return variant_type(std::in_place_index<N>, std::get<N>(t));
+                else
+                    return self(t, index, std::index_sequence<N + 1>{});
+            }
+        };
+
+        return get_n(std::forward<decltype(t)>(t), index, std::index_sequence<0>{});
+    }
+
+    //-------------------------------------------------------------------------
+    // visit a member of tuple-like type by run-time index
+    // if Fn returns a value, it must be the same type for all arguments
+    template<class Fn>
+    constexpr auto visit(Fn fn, auto&& t, std::size_t index)
+    {
+        using ret_variant_type = decltype(std::apply([](auto&&... v) {
+            return std::variant<std::monostate, std::invoke_result_t<Fn, std::remove_cvref_t<decltype(v)>>...>{};
+            }, t));
+
+        using ret_t = std::invoke_result_t<Fn, decltype(std::get<0>(t))>;
+        using opt_ret_t = std::optional<ret_t>;
+
+        if constexpr (std::is_void_v<ret_t>)
+        {
+            std::visit(overloaded(
+                [&](auto&& t) { std::invoke(fn, std::forward<decltype(t)>(t)); }),
+                tuple_to_variant(t, index));
+        }
+        else
+        {
+            auto&& opt = std::visit(overloaded(
+                [&](auto&& t)
+                {
+                    static_assert(std::convertible_to<std::invoke_result_t<Fn, decltype(t)>, ret_t>,
+                        "function must return the same type for all argument types");
+                    return opt_ret_t(std::invoke(fn, std::forward<decltype(t)>(t)));
+                }),
+                tuple_to_variant(t, index));
+            
+            if (opt)
+                return opt.value();
+
+            throw util::exception_t{ "bad tuple index", index };
+        }
+    }
+
+
+    //-------------------------------------------------------------------------
+    // transformation of variant
+    namespace detail
+    {
+        struct void_type {};
+        struct wrong_arg_type {};
+
+        template<class Fn, class... Args>
+        constexpr auto invoke_fn(Fn fn, Args&&...args)
+        {
+            if constexpr (not std::is_invocable_v<Fn, Args...>)
+                return wrong_arg_type{};
+            else if constexpr (std::is_void_v<std::invoke_result_t<Fn, Args...>>)
+                return std::invoke(std::forward<Fn>(fn), std::forward<Args>(args)...),
+                void_type{};
+            else
+                return std::invoke(fn, std::forward<Args>(args)...);
+        }
+
+        template<class Fn, class... Args>
+        using ret_t = decltype(invoke_fn(std::declval<Fn>(), std::declval<Args>()...));
+
+        template<auto N, class Fn, class...T>
+        auto transform_helper(Fn fn, const std::variant<T...>& v)
+            -> std::variant<ret_t<Fn, T>...>
+        {
+            using variant_type = std::variant<ret_t<Fn, T>...>;
+
+            if constexpr (N == sizeof...(T))
+                throw util::exception_t{ "transform variant error", N };
+            else if (N == v.index())
+                return variant_type(std::in_place_index<N>, invoke_fn(fn, std::get<N>(v)));
+            else
+                return transform_helper<N + 1>(fn, v);
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // transform variant to another variant applying function to vaiant argument
+    // discussion: https://stackoverflow.com/questions/78716234/how-to-transform-stdvariant-by-applying-specified-function
+    template<class Fn, class...T>
+    auto transform(Fn fn, const std::variant<T...>& v)
+    {
+        return detail::transform_helper<0>(fn, v);
+    }
+
+    //-------------------------------------------------------------------------
     template<std::size_t ...I>
     concept is_sorted_idx = std::ranges::is_sorted(std::array<std::size_t, sizeof...(I)>{I...});
 

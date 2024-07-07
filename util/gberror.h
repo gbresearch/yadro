@@ -33,7 +33,9 @@
 #include <concepts>
 #include <functional>
 #include <string>
+#include <sstream>
 #include <source_location>
+#include <stacktrace>
 
 namespace gb::yadro::util
 {
@@ -46,6 +48,72 @@ namespace gb::yadro::util
             (ss << ... << args);
         return ss.str();
     };
+
+    //-------------------------------------------------------------------------
+    // to_wstring function to convert multiple parameters to UTF-16 string
+    const auto to_wstring = [](auto&&... args)
+        {
+            std::wstringstream ss;
+            if constexpr (sizeof ...(args) != 0) // avoid -Werror=unused-value
+                (ss << ... << args);
+            return ss.str();
+        };
+
+    //-------------------------------------------------------------------------
+    // exception class with optional payload
+    template<class Data = void>
+    struct exception_t;
+
+    // exception class specialization w/o payload
+    template<>
+    struct exception_t<void>
+    {
+        exception_t(std::string error_str,
+            const std::source_location& loc = std::source_location::current(),
+            std::stacktrace trace = std::stacktrace::current()) //requires(std::same_as<Data, void>)
+            : _error_str{ std::move(error_str) },
+            _loc{ loc }, _trace{ trace }
+        {}
+
+        auto&& what() const noexcept { return _error_str; }
+        auto&& location() const noexcept { return _loc; }
+        auto location_str() const {
+            return to_string(_loc.file_name(), '(',
+                _loc.line(), ":", _loc.column(), ") \"", _loc.function_name(), "\"");
+        }
+        auto&& stacktrace() const noexcept { return _trace; }
+        auto stacktrace_str() const { return std::to_string(_trace); }
+        
+        auto message(bool include_stacktrace = false) const 
+        {
+            return include_stacktrace ? what() + "\n" + location_str() + "\n"
+                : what() + "\n" + location_str() + "\n" + stacktrace_str() + "\n";
+        }
+
+    private:
+        std::string _error_str;
+        std::source_location _loc;
+        std::stacktrace _trace;
+    };
+
+    // exception class specialization w/payload
+    template<class Data>
+    struct exception_t : exception_t<void>
+    {
+        exception_t(std::string error_str, Data data,
+            const std::source_location& loc = std::source_location::current(),
+            std::stacktrace trace = std::stacktrace::current())
+            : exception_t<void>(std::move(error_str), loc, trace),
+            _data{ std::move(data) }
+        {}
+
+        auto&& data(this auto&& self) { return std::forward<decltype(self)>(self)._data; }
+
+    private:
+        Data _data;
+    };
+
+    exception_t(std::string error_str)->exception_t<void>;
 
     //-------------------------------------------------------------------------
     // a generic error type

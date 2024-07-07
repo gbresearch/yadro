@@ -28,12 +28,155 @@
 
 #pragma once
 #include "gbwin.h"
+#include "tuple_functions.h"
+#include "gblog.h"
+#include "misc.h"
+#include "../async/threadpool.h"
+
+#include <string>
 
 #ifdef GBWINDOWS
 
 namespace gb::yadro::util
 {
+    // tuple to variant conversion: https://gcc.godbolt.org/z/q1bqdaoG8
+    //----------------------------------------------------------------------------------------------
+    // wrap lambda function returning another one taking tuple of parameters
+    template<class Fn>
+    constexpr auto unapply(Fn fn)
+    {
+        return [fn](auto&& t) { return std::apply(fn, std::forward<decltype(t)>(t)); };
+    }
 
+    //----------------------------------------------------------------------------------------------
+    template<class ...Actions>
+    struct winpipe_server_t
+    {
+        winpipe_server_t(const std::wstring& pipename, Actions&&... actions);
+        ~winpipe_server_t() { if (_pipe != INVALID_HANDLE_VALUE) CloseHandle(_pipe); }
+        
+        void run();
+        auto run(async::threadpool<>&);
+
+    private:
+        std::wstring _pipename; // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
+        HANDLE _pipe = INVALID_HANDLE_VALUE;
+        //static util::logger _log{ std::cout };
+        std::tuple<Actions...> _actions;
+
+        template<class T> requires(std::is_trivially_copyable_v<T>)
+        void send(const T& p) const
+        {
+            if (DWORD bytes_written{};
+                not WriteFile(_pipe, &p, sizeof(p), &bytes_written, nullptr) || bytes_written != sizeof(p))
+                throw util::exception_t("failed to write to pipe: ", GetLastError());
+        }
+        
+        template<class ...T>
+        void send(const std::tuple<T...>& t) const { std::apply([&](auto&&... v) { (send(v),...); }, t); }
+
+        template<class T> requires(std::is_trivially_copyable_v<T>)
+        void receive(T& t) const
+        {
+            if (DWORD bytes_read{};
+                not ReadFile(_pipe, &t, sizeof(t), &bytes_read, nullptr) || bytes_read != sizeof(t))
+                throw util::exception_t("failed to read from pipe: ", GetLastError());
+
+            return t;
+        }
+
+        template<class... T>
+        void receive(std::tuple<T...>& t) const
+        {
+            std::apply([](auto& ...v) { receive(v); }, t);
+        }
+    };
+
+    //----------------------------------------------------------------------------------------------
+    class winpipe_client_t
+    {
+
+    };
+
+    //----------------------------------------------------------------------------------------------
+    // https://learn.microsoft.com/en-us/windows/win32/ipc/multithreaded-pipe-server
+    template<class ...Actions>
+    inline winpipe_server_t<Actions...>::winpipe_server_t(const std::wstring& pipename, Actions&&... actions)
+        : _pipename(pipename)
+    {
+        const DWORD buf_size = 1024; // unsigned long
+        HANDLE hPipe = INVALID_HANDLE_VALUE;
+
+        _pipe = CreateNamedPipe(
+                    _pipename.c_str(),             // pipe name 
+                    PIPE_ACCESS_DUPLEX,       // read/write access 
+                    PIPE_TYPE_MESSAGE |       // message type pipe 
+                    PIPE_READMODE_MESSAGE |   // message-read mode 
+                    PIPE_WAIT,                // blocking mode 
+                    PIPE_UNLIMITED_INSTANCES, // max. instances (255)
+                    buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB)
+                    buf_size,                  // input buffer size 
+                    0,                        // client time-out 
+                    NULL);                    // default security attribute             
+
+        if (hPipe == INVALID_HANDLE_VALUE)
+        {
+            std::string str_name(_pipename.size(), 0);
+            std::transform(_pipename.begin(), _pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
+            throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
+        }
+
+        // connect to client, ERROR_PIPE_CONNECTED means client connected before ConnectNamedPipe called
+        // ConnectNamedPipe blocks indefinitely until connected or failed
+        if (auto is_connected = ConnectNamedPipe(hPipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED; !is_connected)
+        {
+            throw util::exception_t("failed to connect to pipe: ", GetLastError());
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------
+    template<class ...Actions>
+    inline void winpipe_server_t<Actions...>::run()
+    {
+        auto send_n = [&]<auto N>()
+        {
+            if (N > sizeof...(Actions))
+                throw util::exception_t("invalid request", N);
+
+            auto&& action = std::get<N>(_actions);
+            typename lambda_traits<std::remove_cvref_t<decltype(action)>>::Args t;
+            receive(t);
+            send(std::invoke(action, t));
+        };
+
+        for(auto action_id = receive<std::uint32_t>(); action_id < sizeof...(Actions); action_id = receive<std::uint32_t>())
+        {
+            switch (action_id)
+            {
+            case 0: send<0>(); break;
+            case 1: send<1>(); break;
+            case 2: send<2>(); break;
+            case 3: send<3>(); break;
+            case 4: send<4>(); break;
+            case 5: send<5>(); break;
+            case 6: send<6>(); break;
+            case 7: send<7>(); break;
+            case 8: send<8>(); break;
+            case 9: send<9>(); break;
+            case 10: send<10>(); break;
+            case 11: send<11>(); break;
+            case 12: send<12>(); break;
+            case 13: send<13>(); break;
+            case 14: send<14>(); break;
+            case 15: send<15>(); break;
+            case 16: send<16>(); break;
+            case 17: send<17>(); break;
+            case 18: send<18>(); break;
+            case 19: send<19>(); break;
+            default: throw util::exception_t{ "invalid request: ", action_id };
+            }
+        }
+    }
 }
 
 #endif

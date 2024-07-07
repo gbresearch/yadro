@@ -128,8 +128,44 @@ namespace
         static_assert(aggregate_member_count<B>() == 4);
         // aggregate_to_tuple(B{}) doesn't work, gcc/clang - compilation failure, MSVC - incorrect result
 
-        // test tuple flattening
-        static_assert(make_flat_tuple(std::tuple{ 'a', std::tuple{'b', std::tuple{std::array{1,2,3},4}} }) == std::tuple{ 'a','b',1,2,3,4 });
+        {
+            // test tuple flattening
+            static_assert(make_flat_tuple(std::tuple{ 'a', std::tuple{'b', std::tuple{std::array{1,2,3},4}} }) == std::tuple{ 'a','b',1,2,3,4 });
+
+            // conversion tuple to variant
+            static_assert(tuple_to_variant(std::tuple{ 1,2. }, 0) ==
+                std::variant<int, double>(std::in_place_index<0>, 1));
+            static_assert(tuple_to_variant(std::tuple{ 1,2. }, 1) ==
+                std::variant<int, double>(std::in_place_index<1>, 2.));
+            static_assert(tuple_to_variant(std::array{ 1,2 }, 0) ==
+                std::variant<int, int>(std::in_place_index<0>, 1));
+            static_assert(visit([](auto v) { return (double)v; }, std::tuple{ 1,2. }, 1) == 2.);
+            static_assert(visit([](auto v) { return v; }, std::array{ 1,2 }, 0) == 1);
+            try {
+                auto t = tuple_to_variant(std::array{ 1,2 }, 4);
+            }
+            catch (exception_t<>& e) { gbassert(e.what() == "bad tuple index"); }
+        }
+        {
+            // test variant transformation
+            auto fun = overloaded(
+                [](double v) { return v; },
+                [](int v) { /* doesn't return */; },
+                [](const std::string& v) { return v; });
+
+            auto print = overloaded(
+                [](detail::void_type) { return std::string("void_type"); },
+                [](detail::wrong_arg_type) { return std::string("wrong_arg_type"); },
+                [](std::string v) { return v; },
+                [](auto&& v) { return std::to_string(v); });
+
+            using variant_type = std::variant<int, double, std::string, std::tuple<int, int>>;
+
+            gbassert(std::visit(print, transform(fun, variant_type{ "pi = " })) == "pi = ");
+            gbassert(std::visit(print, transform(fun, variant_type{ 3.1415 })) == "3.141500");
+            gbassert(std::visit(print, transform(fun, variant_type{ 1 })) == "void_type");
+            gbassert(std::visit(print, transform(fun, variant_type{ std::tuple(1,2) })) == "wrong_arg_type");
+        }
     }
 
     GB_TEST(util, misc)

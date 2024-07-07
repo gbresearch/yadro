@@ -50,6 +50,22 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
+    // lambda function traits, deducing return type and parameters
+    template<class Fn> struct lambda_traits;
+
+    template< class R, class G, class ... A >
+    struct lambda_traits<R(G::*)(A...) const>
+    {
+        using Ret = R;
+        using Args = std::tuple<A...>;
+    };
+
+    template<class Fn>
+    struct lambda_traits : lambda_traits<decltype(&Fn::operator())>
+    {
+    };
+
+    //-------------------------------------------------------------------------
     // move_forward function
     // if supplied parameter is (qualified) lvalue, returns (qualified) lvalue reference
     // if supplied parameter is (qualified) rvalue, returns (qualified) value using move constructor
