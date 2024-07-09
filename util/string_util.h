@@ -31,6 +31,7 @@
 #include <span>
 #include <ranges>
 #include <vector>
+#include <type_traits>
 
 namespace gb::yadro::util
 {
@@ -38,7 +39,7 @@ namespace gb::yadro::util
     inline bool is_base64(unsigned char c) { return std::isalnum(c) || c == '+' || c == '/'; }
     //-------------------------------------------------------------------------
     // base64 encoding (binary to ASCII subset)
-    inline std::string base64_encode(std::ranges::sized_range auto&& binary_buffer)
+    inline auto base64_encode(std::ranges::sized_range auto&& binary_buffer)
     {
         auto byte_span = std::as_bytes(std::span(binary_buffer));
         auto length = byte_span.size_bytes();
@@ -70,6 +71,21 @@ namespace gb::yadro::util
         }
 
         return encoded;
+    }
+
+    //-------------------------------------------------------------------------
+    // base64 encoding (binary to ASCII subset)
+    inline auto base64_encode(const char* str)
+    {
+        return base64_encode(std::string_view(str));
+    }
+
+    //-------------------------------------------------------------------------
+    // base64 encoding (binary to ASCII subset)
+    template<class T>
+    inline auto base64_encode(const T& t) requires(std::is_aggregate_v<T> or std::is_fundamental_v<T>)
+    {
+        return base64_encode(std::span(std::addressof(t), 1));
     }
 
     //-------------------------------------------------------------------------
@@ -174,4 +190,100 @@ namespace gb::yadro::util
                 s1, s2, std::char_traits<char>::length(s1)) == 0;
     }
 
+
+
+    //-------------------------------------------------------------------------
+    // MD5 sum per RFC 1321
+    class md5 
+    {
+    public:
+        md5();
+
+        md5& update(const std::uint8_t* data, size_t length);
+
+        md5& update(auto&& t) requires (std::is_aggregate_v<std::remove_cvref_t<decltype(t)>> or std::is_fundamental_v<std::remove_cvref_t<decltype(t)>>)
+        {
+            return update(reinterpret_cast<const std::uint8_t*>(std::addressof(t)), sizeof(t));
+        }
+
+        md5& update(std::ranges::sized_range auto&& r) requires(not std::is_aggregate_v<std::remove_cvref_t<decltype(r)>>)
+        {
+            return update(reinterpret_cast<const std::uint8_t*>(std::addressof(*std::ranges::begin(r))), std::ranges::size(r));
+        }
+
+        md5& update(const char* str)
+        {
+            return update(std::string_view(str));
+        }
+
+        md5& finilize();
+            
+        std::array<std::uint8_t, 16> digest() const;
+
+        std::string to_string() const;
+
+    private:
+        void transform(const uint8_t block[64]);
+        static void encode(uint8_t* output, const uint32_t* input, size_t length);
+        static void decode(uint32_t* output, const uint8_t* input, size_t length);
+
+        static uint32_t F(uint32_t x, uint32_t y, uint32_t z) { return (x & y) | (~x & z); }
+        static uint32_t G(uint32_t x, uint32_t y, uint32_t z) { return (x & z) | (y & ~z); }
+        static uint32_t H(uint32_t x, uint32_t y, uint32_t z) { return x ^ y ^ z; }
+        static uint32_t I(uint32_t x, uint32_t y, uint32_t z) { return y ^ (x | ~z); }
+
+        static void FF(uint32_t& a, uint32_t b, uint32_t c, uint32_t d, uint32_t x, uint32_t s, uint32_t ac) {
+            a += F(b, c, d) + x + ac;
+            a = rotate_left(a, s) + b;
+        }
+        static void GG(uint32_t& a, uint32_t b, uint32_t c, uint32_t d, uint32_t x, uint32_t s, uint32_t ac) {
+            a += G(b, c, d) + x + ac;
+            a = rotate_left(a, s) + b;
+        }
+        static void HH(uint32_t& a, uint32_t b, uint32_t c, uint32_t d, uint32_t x, uint32_t s, uint32_t ac) {
+            a += H(b, c, d) + x + ac;
+            a = rotate_left(a, s) + b;
+        }
+        static void II(uint32_t& a, uint32_t b, uint32_t c, uint32_t d, uint32_t x, uint32_t s, uint32_t ac) {
+            a += I(b, c, d) + x + ac;
+            a = rotate_left(a, s) + b;
+        }
+
+        static uint32_t rotate_left(uint32_t x, uint32_t n) {
+            return (x << n) | (x >> (32 - n));
+        }
+
+        static constexpr uint32_t S11 = 7;
+        static constexpr uint32_t S12 = 12;
+        static constexpr uint32_t S13 = 17;
+        static constexpr uint32_t S14 = 22;
+        static constexpr uint32_t S21 = 5;
+        static constexpr uint32_t S22 = 9;
+        static constexpr uint32_t S23 = 14;
+        static constexpr uint32_t S24 = 20;
+        static constexpr uint32_t S31 = 4;
+        static constexpr uint32_t S32 = 11;
+        static constexpr uint32_t S33 = 16;
+        static constexpr uint32_t S34 = 23;
+        static constexpr uint32_t S41 = 6;
+        static constexpr uint32_t S42 = 10;
+        static constexpr uint32_t S43 = 15;
+        static constexpr uint32_t S44 = 21;
+
+        uint32_t state[4]; // State (ABCD)
+        uint32_t bitCount[2]; // Number of bits, modulo 2^64 (low-order word first)
+        uint8_t buffer[64]; // Input buffer
+        bool finilized = false;
+    };
+
+    //-------------------------------------------------------------------------
+    // md5 functions
+    inline auto md5string(auto&& t) 
+    {
+        return md5().update(std::forward<decltype(t)>(t)).finilize().to_string();
+    }
+    inline auto md5digest(auto&& t)
+    {
+        return md5().update(std::forward<decltype(t)>(t)).finilize().digest();
+    }
 }

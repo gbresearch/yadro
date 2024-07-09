@@ -283,15 +283,29 @@ unset multiplot)*";
 
     GB_TEST(util, string_util)
     {
+        // test bas64
         std::vector v{ 0,1,2,3,4,5,6,7,8,9 };
         gbassert(base64_encode(v) == "AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAA==");
         auto vv{ base64_decode(base64_encode(v)) };
         gbassert(std::ranges::equal(std::as_bytes(std::span(v)), std::as_bytes(std::span(vv))));
         gbassert(base64_encode(base64_decode(base64_encode(v))) == "AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAA==");
+        gbassert(base64_encode(2024) == "6AcAAA==");
+        gbassert(base64_encode(std::array{ 2024u, 7u, 8u }) == "6AcAAAcAAAAIAAAA");
+
+        // test MD5
+        gbassert(md5string("The quick brown fox jumps over the lazy dog") == "9e107d9d372bb6826bd81d3542a419d6");
+        gbassert(md5string("The quick brown fox jumps over the lazy dog.") == "e4d909c290d0fb1ca068ffaddf22cbd0");
+        gbassert(md5string("") == "d41d8cd98f00b204e9800998ecf8427e");
+        gbassert(md5string("2024/07/08") == "f241350f66d24efb8720e345b462c5fc");
+        gbassert(md5string(std::array{ 2024u, 7u, 8u }) == "73bf0bee1976d89dee2f6a293eca3312");
+        gbassert(md5digest("2024/07/08") == md5digest("2024/07/08"));
+        gbassert(md5digest("2024/07/08") != md5digest("2024/7/8"));
+        gbassert(base64_encode(md5digest("2024/07/08")) == "8kE1D2bSTvuHIONFtGLF/A==");
     }
 
     GB_TEST(util, win_pipe)
     {
-
+#ifndef GBWINDOWS
+#endif
     }
 }

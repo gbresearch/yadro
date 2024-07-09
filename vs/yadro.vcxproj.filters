@@ -124,25 +124,13 @@
     <ClCompile Include="..\archive\archive.cpp">
       <Filter>archive</Filter>
     </ClCompile>
-    <ClCompile Include="..\async\taskcontainer.cpp">
-      <Filter>async</Filter>
-    </ClCompile>
-    <ClCompile Include="..\async\threadpool.cpp">
-      <Filter>async</Filter>
-    </ClCompile>
-    <ClCompile Include="..\container\graph.cpp">
-      <Filter>container</Filter>
-    </ClCompile>
-    <ClCompile Include="..\container\static_string.cpp">
-      <Filter>container</Filter>
-    </ClCompile>
-    <ClCompile Include="..\container\static_vector.cpp">
-      <Filter>container</Filter>
-    </ClCompile>
     <ClCompile Include="..\container\tree.cpp">
       <Filter>container</Filter>
     </ClCompile>
     <ClCompile Include="..\util\file_mutex.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\string_util.cpp">
       <Filter>util</Filter>
     </ClCompile>
   </ItemGroup>

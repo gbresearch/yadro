@@ -30,6 +30,8 @@
 #include <thread>
 #include <chrono>
 
+#pragma comment(lib, "yadro")
+
 int main()
 {
     using namespace gb::yadro::util;

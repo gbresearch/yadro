@@ -152,13 +152,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp" />
-    <ClCompile Include="..\async\taskcontainer.cpp" />
-    <ClCompile Include="..\async\threadpool.cpp" />
-    <ClCompile Include="..\container\graph.cpp" />
-    <ClCompile Include="..\container\static_string.cpp" />
-    <ClCompile Include="..\container\static_vector.cpp" />
     <ClCompile Include="..\container\tree.cpp" />
     <ClCompile Include="..\util\file_mutex.cpp" />
+    <ClCompile Include="..\util\string_util.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
