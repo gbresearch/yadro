@@ -194,11 +194,8 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // MD5 sum per RFC 1321
-    class md5 
+    struct md5 
     {
-    public:
-        md5();
-
         md5& update(const std::uint8_t* data, size_t length);
 
         md5& update(auto&& t) requires (std::is_aggregate_v<std::remove_cvref_t<decltype(t)>> or std::is_fundamental_v<std::remove_cvref_t<decltype(t)>>)
@@ -270,20 +267,24 @@ namespace gb::yadro::util
         static constexpr uint32_t S43 = 15;
         static constexpr uint32_t S44 = 21;
 
-        uint32_t state[4]; // State (ABCD)
-        uint32_t bitCount[2]; // Number of bits, modulo 2^64 (low-order word first)
+        uint32_t state[4]{ 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 }; // State (ABCD)
+        uint32_t bitCount[2]{}; // Number of bits, modulo 2^64 (low-order word first)
         uint8_t buffer[64]; // Input buffer
         bool finilized = false;
     };
 
     //-------------------------------------------------------------------------
     // md5 functions
-    inline auto md5string(auto&& t) 
+    inline auto md5string(auto&& ...t) 
     {
-        return md5().update(std::forward<decltype(t)>(t)).finilize().to_string();
+        md5 _{};
+        (_.update(std::forward<decltype(t)>(t)), ...);
+        return _.finilize().to_string();
     }
-    inline auto md5digest(auto&& t)
+    inline auto md5digest(auto&& ...t)
     {
-        return md5().update(std::forward<decltype(t)>(t)).finilize().digest();
+        md5 _{};
+        (_.update(std::forward<decltype(t)>(t)), ...);
+        return _.finilize().digest();
     }
 }

@@ -40,16 +40,6 @@
 
 namespace gb::yadro::util
 {
-    md5::md5()
-    {
-        bitCount[0] = bitCount[1] = 0;
-        state[0] = 0x67452301;
-        state[1] = 0xefcdab89;
-        state[2] = 0x98badcfe;
-        state[3] = 0x10325476;
-    }
-
-
     md5& md5::update(const uint8_t* data, size_t length)
     {
         gbassert(not finilized); // can't update finilized md5

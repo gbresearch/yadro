@@ -300,6 +300,7 @@ unset multiplot)*";
         gbassert(md5string(std::array{ 2024u, 7u, 8u }) == "73bf0bee1976d89dee2f6a293eca3312");
         gbassert(md5digest("2024/07/08") == md5digest("2024/07/08"));
         gbassert(md5digest("2024/07/08") != md5digest("2024/7/8"));
+        gbassert(md5string("2024/07/08", "2024/7/8") == "500faf436e1f15bbac22a95b1e896b02");
         gbassert(base64_encode(md5digest("2024/07/08")) == "8kE1D2bSTvuHIONFtGLF/A==");
     }
 
