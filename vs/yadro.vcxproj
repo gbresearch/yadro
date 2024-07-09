@@ -142,7 +142,10 @@
     <ClInclude Include="..\util\gbutil.h" />
     <ClInclude Include="..\util\gbwin.h" />
     <ClInclude Include="..\util\gnuplot.h" />
+    <ClInclude Include="..\util\hash_util.h" />
     <ClInclude Include="..\util\misc.h" />
+    <ClInclude Include="..\util\string_util.h" />
+    <ClInclude Include="..\util\time_util.h" />
     <ClInclude Include="..\util\traits.h" />
     <ClInclude Include="..\util\tuple_functions.h" />
     <ClInclude Include="..\util\win_pipe.h" />

@@ -110,6 +110,15 @@
     <ClInclude Include="..\util\gbutil.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\string_util.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\time_util.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\hash_util.h">
+      <Filter>util</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

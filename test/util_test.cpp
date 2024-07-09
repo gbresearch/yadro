@@ -26,14 +26,7 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-#include "../util/gbtest.h"
-#include "../util/gblog.h"
-#include "../util/gbtimer.h"
-#include "../util/misc.h"
-#include "../util/tuple_functions.h"
-#include "../util/gnuplot.h"
-#include "../util/gbwin.h"
-#include "../util/win_pipe.h"
+#include "../util/gbutil.h"
 
 #include <sstream>
 #include <string>
@@ -286,6 +279,15 @@ unset multiplot)*";
         lstr.visit([](auto&& s) { gbassert(s == "xxx"); });
         lstr.visit([](auto&& s, auto&& arg) { s = std::string("hello") + arg; }, " world");
         lstr.visit([](auto&& s) { gbassert(s == "hello world"); });
+    }
+
+    GB_TEST(util, string_util)
+    {
+        std::vector v{ 0,1,2,3,4,5,6,7,8,9 };
+        gbassert(base64_encode(v) == "AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAA==");
+        auto vv{ base64_decode(base64_encode(v)) };
+        gbassert(std::ranges::equal(std::as_bytes(std::span(v)), std::as_bytes(std::span(vv))));
+        gbassert(base64_encode(base64_decode(base64_encode(v))) == "AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAA==");
     }
 
     GB_TEST(util, win_pipe)

@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -27,20 +27,34 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include <chrono>
+#include <sstream>
+#include <thread>
 
-#include "file_mutex.h"
-#include "gberror.h"
-#include "gblog.h"
-#include "gbmacro.h"
-#include "gbmemory.h"
-#include "gbtest.h"
-#include "gbtimer.h"
-#include "gbwin.h"
-#include "gnuplot.h"
-#include "hash_util.h"
-#include "misc.h"
-#include "string_util.h"
-#include "time_util.h"
-#include "traits.h"
-#include "tuple_functions.h"
-#include "win_pipe.h"
+namespace gb::yadro::util
+{
+    //-------------------------------------------------------------------------
+    inline auto time_stamp()
+    {
+        auto tstamp{ std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) };
+
+        return (std::ostringstream{} << "[" << std::put_time(std::localtime(&tstamp), "%F %T")
+            << "] [pid: " << ::_getpid() << ", tid: " << std::this_thread::get_id() << "]").str();
+    }
+
+    //-------------------------------------------------------------------------
+    // DateTime conversion
+    inline auto datetime_to_chrono(double datetime)
+    {
+        using namespace std::chrono_literals;
+        auto days = unsigned(datetime);
+        auto hours = unsigned((datetime - days) * 24);
+        auto mins = unsigned(((datetime - days) * 24 - hours) * 60);
+        auto secs = std::lround((((datetime - days) * 24 - hours) * 60 - mins) * 60);
+        return std::chrono::sys_days{ 1899y / 12 / 30 } + std::chrono::days(days)
+            + std::chrono::hours(hours)
+            + std::chrono::minutes(mins)
+            + std::chrono::seconds(secs);
+    }
+
+}

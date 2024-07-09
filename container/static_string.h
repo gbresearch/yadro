@@ -41,6 +41,7 @@
 #include <span>
 #include "../util/gberror.h"
 #include "../util/misc.h"
+#include "../util/string_util.h"
 #include "../archive/archive.h"
 
 #pragma warning( disable: 4996 )

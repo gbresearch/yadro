@@ -37,6 +37,7 @@
 #include "gblog.h"
 #include "gbtimer.h"
 #include "gberror.h"
+#include "time_util.h"
 #include "../async/threadpool.h"
 
 namespace gb::yadro::util

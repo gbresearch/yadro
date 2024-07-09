@@ -42,6 +42,7 @@
 #include "gbwin.h"
 #include "misc.h"
 #include "gberror.h"
+#include "string_util.h"
 
 //-------------------------------------------------------------------------------------------------
 // C++ interface for gnuplot (Windows only)

@@ -31,6 +31,7 @@
 #include "tuple_functions.h"
 #include "gblog.h"
 #include "misc.h"
+#include "../archive/archive.h"
 #include "../async/threadpool.h"
 
 #include <string>
@@ -39,22 +40,106 @@
 
 namespace gb::yadro::util
 {
-    // tuple to variant conversion: https://gcc.godbolt.org/z/q1bqdaoG8
-    //----------------------------------------------------------------------------------------------
-    // wrap lambda function returning another one taking tuple of parameters
-    template<class Fn>
-    constexpr auto unapply(Fn fn)
-    {
-        return [fn](auto&& t) { return std::apply(fn, std::forward<decltype(t)>(t)); };
-    }
+    struct owinpipe_stream;
+    struct iwinpipe_stream;
+    using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
+    using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
+
+    template<class ...Functions> struct winpipe_server_t;
+
+    constexpr auto max_pipe_buffer_size = 16384u;// 16k, Win32 API gives no guarantees about the max buffer size
+    constexpr auto chunk_size = 1024u;
 
     //----------------------------------------------------------------------------------------------
-    template<class ...Actions>
+    struct owinpipe_stream
+    {
+        using char_type = char;
+        explicit owinpipe_stream(HANDLE pipe) : _pipe(pipe) {}
+
+        void write(const char_type* c, std::streamsize size)
+        {
+            gbassert(size < max_pipe_buffer_size);
+
+            if (DWORD bytes_written{};
+                not WriteFile(_pipe, c, (DWORD)size, &bytes_written, nullptr) || bytes_written != size)
+                throw util::exception_t("owinpipe_stream failed to write to pipe: ", GetLastError());
+
+            // write in chunks
+            char next_chunk[] = "next chunk\0";
+
+            for (std::streamsize sent_bytes = 0; sent_bytes < size;)
+            {
+                // read request for the next chunk
+                if (DWORD bytes_read{};
+                    not ReadFile(_pipe, next_chunk, (DWORD)sizeof(next_chunk), &bytes_read, nullptr)
+                    || bytes_read != (DWORD)sizeof(next_chunk))
+                    throw util::exception_t("owinpipe_stream failed to receive next chunk request: ", GetLastError());
+
+                auto bytes_to_send = size - sent_bytes > chunk_size ? chunk_size : size - sent_bytes;
+
+                if (DWORD bytes_written{};
+                    not WriteFile(_pipe, &c[sent_bytes], (DWORD)bytes_to_send, &bytes_written, nullptr)
+                    || bytes_written != bytes_to_send)
+                    throw util::exception_t("owinpipe_stream failed to write chunk to pipe: ", GetLastError());
+                else
+                    sent_bytes += bytes_written;
+            }
+        }
+
+    private:
+        HANDLE _pipe = INVALID_HANDLE_VALUE;
+    };
+
+
+    //----------------------------------------------------------------------------------------------
+    struct iwinpipe_stream
+    {
+        using char_type = char;
+        explicit iwinpipe_stream(HANDLE pipe) : _pipe(pipe) {}
+
+        void read(char_type* c, std::streamsize size)
+        {
+            // read in chunks
+            char next_chunk[] = "next chunk\0";
+
+            for (std::streamsize received_bytes = 0; received_bytes < size; gbassert(received_bytes <= size))
+            {
+                // request the next chunk
+                if (DWORD bytes_written{};
+                    not WriteFile(_pipe, next_chunk, (DWORD)sizeof(next_chunk), &bytes_written, nullptr)
+                    || bytes_written != (DWORD)sizeof(next_chunk))
+                    throw util::exception_t("iwinpipe_stream failed to request next chunk: ", GetLastError());
+
+                if (DWORD bytes_read{};
+                    not ReadFile(_pipe, &c[received_bytes], chunk_size, &bytes_read, nullptr) || bytes_read == 0)
+                    throw util::exception_t("iwinpipe_stream failed to read chunk from pipe: ", GetLastError());
+                else
+                    received_bytes += bytes_read;
+            }
+        }
+
+    private:
+        HANDLE _pipe = INVALID_HANDLE_VALUE;
+    };
+
+    //----------------------------------------------------------------------------------------------
+    template<class T, class Functions>
+    concept server_function_c = std::convertible_to< T, std::tuple<std::string, Functions>>;
+    //----------------------------------------------------------------------------------------------
+    template<class ...Functions>
     struct winpipe_server_t
     {
-        winpipe_server_t(const std::wstring& pipename, Actions&&... actions);
-        ~winpipe_server_t() { if (_pipe != INVALID_HANDLE_VALUE) CloseHandle(_pipe); }
-        
+        winpipe_server_t(const std::wstring& pipename, std::tuple<std::string, Functions>&&... actions);
+        ~winpipe_server_t()
+        {
+            if (_pipe != INVALID_HANDLE_VALUE)
+            {
+                FlushFileBuffers(_pipe);
+                DisconnectNamedPipe(_pipe);
+                CloseHandle(_pipe);
+            }
+        }
+
         void run();
         auto run(async::threadpool<>&);
 
@@ -62,47 +147,35 @@ namespace gb::yadro::util
         std::wstring _pipename; // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
         HANDLE _pipe = INVALID_HANDLE_VALUE;
         //static util::logger _log{ std::cout };
-        std::tuple<Actions...> _actions;
+        std::tuple<std::tuple<std::string, Functions>...> _actions;
 
-        template<class T> requires(std::is_trivially_copyable_v<T>)
-        void send(const T& p) const
+        template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
+            void receive(T& t) const
         {
-            if (DWORD bytes_written{};
-                not WriteFile(_pipe, &p, sizeof(p), &bytes_written, nullptr) || bytes_written != sizeof(p))
-                throw util::exception_t("failed to write to pipe: ", GetLastError());
-        }
-        
-        template<class ...T>
-        void send(const std::tuple<T...>& t) const { std::apply([&](auto&&... v) { (send(v),...); }, t); }
-
-        template<class T> requires(std::is_trivially_copyable_v<T>)
-        void receive(T& t) const
-        {
-            if (DWORD bytes_read{};
-                not ReadFile(_pipe, &t, sizeof(t), &bytes_read, nullptr) || bytes_read != sizeof(t))
-                throw util::exception_t("failed to read from pipe: ", GetLastError());
-
-            return t;
+            iwinpipe_archive a;
+            a(t);
         }
 
-        template<class... T>
-        void receive(std::tuple<T...>& t) const
+        template<class T> requires(archive::is_serializable_v<owinpipe_archive, std::remove_cvref_t<T>>)
+            void send(const T& t) const
         {
-            std::apply([](auto& ...v) { receive(v); }, t);
+            owinpipe_archive a;
+            a(t);
         }
     };
 
     //----------------------------------------------------------------------------------------------
-    class winpipe_client_t
+    struct winpipe_client_t
     {
 
     };
 
     //----------------------------------------------------------------------------------------------
     // https://learn.microsoft.com/en-us/windows/win32/ipc/multithreaded-pipe-server
-    template<class ...Actions>
-    inline winpipe_server_t<Actions...>::winpipe_server_t(const std::wstring& pipename, Actions&&... actions)
-        : _pipename(pipename)
+    template<class ...Functions>
+    inline winpipe_server_t<Functions...>::winpipe_server_t(const std::wstring& pipename,
+        std::tuple<std::string, Functions>&&... actions)
+        : _pipename(pipename), _actions{ std::tuple{ actions... } }
     {
         const DWORD buf_size = 1024; // unsigned long
         HANDLE hPipe = INVALID_HANDLE_VALUE;
@@ -114,7 +187,7 @@ namespace gb::yadro::util
                     PIPE_READMODE_MESSAGE |   // message-read mode 
                     PIPE_WAIT,                // blocking mode 
                     PIPE_UNLIMITED_INSTANCES, // max. instances (255)
-                    buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB)
+                    buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
                     buf_size,                  // input buffer size 
                     0,                        // client time-out 
                     NULL);                    // default security attribute             
@@ -135,12 +208,12 @@ namespace gb::yadro::util
     }
 
     //----------------------------------------------------------------------------------------------
-    template<class ...Actions>
-    inline void winpipe_server_t<Actions...>::run()
+    template<class ...Functions>
+    inline void winpipe_server_t<Functions...>::run()
     {
         auto send_n = [&]<auto N>()
         {
-            if (N > sizeof...(Actions))
+            if (N > sizeof...(Functions))
                 throw util::exception_t("invalid request", N);
 
             auto&& action = std::get<N>(_actions);
@@ -149,7 +222,7 @@ namespace gb::yadro::util
             send(std::invoke(action, t));
         };
 
-        for(auto action_id = receive<std::uint32_t>(); action_id < sizeof...(Actions); action_id = receive<std::uint32_t>())
+        for(auto action_id = receive<std::uint32_t>(); action_id < sizeof...(Functions); action_id = receive<std::uint32_t>())
         {
             switch (action_id)
             {

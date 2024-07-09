@@ -239,7 +239,6 @@ namespace gb::yadro::archive
     {
         using char_type = typename container_t::value_type;
         using omem_t = omem_stream< container_t>;
-        //using char_type = char;
         explicit imem_stream(omem_t&& om) : _buf(std::move(om._buf)) {}
         explicit imem_stream(const omem_t& om) : _buf(om._buf) {}
         explicit imem_stream(archive<omem_t, archive_format_t::custom>&& oma) : imem_stream(std::move(oma.get_stream())) {}

@@ -36,6 +36,7 @@
 #include <span>
 #include "../util/gberror.h"
 #include "../util/misc.h"
+#include "../util/string_util.h"
 
 namespace gb::yadro::container
 {

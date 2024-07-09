@@ -33,7 +33,6 @@
 #include <span>
 #include <compare>
 #include <utility>
-#include <chrono>
 #include <variant>
 #include <string>
 #include <sstream>
@@ -45,7 +44,7 @@
 #include <random>
 #include "gberror.h"
 
-// miscellaneous utilities
+// miscellaneous utilities (dumping ground)
 
 namespace gb::yadro::util
 {
@@ -116,97 +115,7 @@ namespace gb::yadro::util
         return false;
     }
 
-    //-------------------------------------------------------------------------
-    // hash functions
-    //-------------------------------------------------------------------------
-    inline auto make_hash(const char* str) { return std::hash<std::string>{}(str); }
-    inline auto make_hash(const wchar_t* str) { return std::hash<std::wstring>{}(str); }
-    inline auto make_hash(const auto& v) requires requires{ std::hash<std::remove_cvref_t<decltype(v)>>{}(v); }
-    { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
-    // TODO: remove after experiment
-    inline auto make_hash(unsigned v) { return v; };
-
-    // combine hashes
-    inline auto make_hash(const auto& v, const auto&... ts) requires(sizeof ...(ts) != 0);
-    // pair, tuple, array
-    inline constexpr auto make_hash(auto&& v) requires requires { std::get<0>(v); };
-    // ranges
-    inline auto make_hash(const std::ranges::common_range auto& r);
-
-    // combine hashes
-    inline auto make_hash(const auto& v, const auto&... ts) requires(sizeof ...(ts) != 0)
-    {
-        auto seed = make_hash(v);
-        ((seed ^= make_hash(ts) + 0x9e3779b9 + (seed << 6) + (seed >> 2)), ...);
-        return seed;
-    }
     
-    // ranges
-    inline auto make_hash(const std::ranges::common_range auto& r)
-    {
-        auto seed = make_hash(0);
-        for (auto&& v : r)
-            seed = make_hash(seed, v);
-        return seed;
-    }
-
-    // pair, tuple, array
-    inline constexpr auto make_hash(auto&& v) requires requires { std::get<0>(v); }
-    {
-        return std::apply([](auto&&... t) { return make_hash(t...); }, v);
-    }
-
-#if defined(clang_p1061)
-    // https://gcc.godbolt.org/z/sMdqMY4Yv
-    // https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/p1061r5.html
-    inline constexpr auto make_hash(auto&& t) requires (std::is_class_v<std::remove_cvref_t<decltype(t)>>)
-    {
-        auto [...a] = std::forward<decltype(t)>(t);
-        return make_hash(a...);
-    }
-#endif
-
-    using make_hash_t = decltype([](auto&& ...v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)...); });
-    
-    //-------------------------------------------------------------------------
-    inline auto time_stamp()
-    {
-        auto tstamp{ std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) };
-
-        return (std::ostringstream{} << "[" << std::put_time(std::localtime(&tstamp), "%F %T")
-            << "] [pid: " << ::_getpid() << ", tid: " << std::this_thread::get_id() << "]").str();
-    }
-
-    //-------------------------------------------------------------------------
-    // DateTime conversion
-    inline auto datetime_to_chrono(double datetime)
-    {
-        using namespace std::chrono_literals;
-        auto days = unsigned(datetime);
-        auto hours = unsigned((datetime - days) * 24);
-        auto mins = unsigned(((datetime - days) * 24 - hours) * 60);
-        auto secs = std::lround((((datetime - days) * 24 - hours) * 60 - mins) * 60);
-        return std::chrono::sys_days{ 1899y / 12 / 30 } + std::chrono::days(days)
-            + std::chrono::hours(hours)
-            + std::chrono::minutes(mins)
-            + std::chrono::seconds(secs);
-    }
-
-    //-------------------------------------------------------------------------
-    // tokenize string based on specified delimiter
-    //-------------------------------------------------------------------------
-    template<class T>
-    inline auto tokenize(const std::basic_string<T>& input, T separator)
-    {
-        std::vector<std::basic_string<T>> tokens;
-        std::basic_istringstream<T> token_stream(input);
-
-        for (std::string token;  std::getline(token_stream, token, separator);)
-            tokens.push_back(token);
-
-        return tokens;
-    }
-
     //-------------------------------------------------------------------------
     // transform vector function for multiple equally sized ranges,
     // output range contains the result of transform_fn called on each element
@@ -349,43 +258,6 @@ namespace gb::yadro::util
     template<class T, class U>
     retainer(T&, U&&) -> retainer<T>;
 
-    //---------------------
-    // span 3-way comparison
-    template<class T1, std::size_t Extent1, class T2, std::size_t Extent2>
-    auto compare(const std::span<T1, Extent1>& s1, const std::span<T2, Extent2>& s2) requires(std::three_way_comparable_with<T1, T2>)
-    {
-        using ordering_t = std::compare_three_way_result_t<T1, T2>;
-        if (s1.size() < s2.size())
-            return ordering_t::less;
-        else if (s1.size() > s2.size())
-            return ordering_t::greater;
-        else for (std::size_t i = 0; i < s1.size(); ++i)
-        {
-            auto cmp = s1[i] <=> s2[i];
-            if (std::is_neq(cmp))
-                return cmp;
-        }
-        return ordering_t::equivalent;
-    }
-
-    //---------------------
-    template<class CharT, class Traits>
-    auto compare(const CharT* s1, const CharT* s2, std::size_t size1, std::size_t size2) {
-        auto comp = Traits::compare(s1, s2, std::min(size1, size2));
-        return comp < 0 ? std::weak_ordering::less
-            : comp > 0 ? std::weak_ordering::greater
-            : size1 < size2 ? std::weak_ordering::less
-            : size1 > size2 ? std::weak_ordering::greater
-            : std::weak_ordering::equivalent;
-    }
-
-    //-------------------------------------------------------------------------
-    constexpr auto strings_equal(const char* s1, const char* s2) {
-        return std::char_traits<char>::length(s1) ==
-            std::char_traits<char>::length(s2) &&
-            std::char_traits<char>::compare(
-                s1, s2, std::char_traits<char>::length(s1)) == 0;
-    }
 
     //-----------------------------------------------------------------------------------------------
     // variable parameters
