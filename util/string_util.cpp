@@ -73,7 +73,7 @@ namespace gb::yadro::util
         return *this;
     }
 
-    md5& md5::finilize()
+    md5& md5::finalize()
     {
         if (not finilized)
         {

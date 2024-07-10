@@ -213,7 +213,7 @@ namespace gb::yadro::util
             return update(std::string_view(str));
         }
 
-        md5& finilize();
+        md5& finalize();
             
         std::array<std::uint8_t, 16> digest() const;
 
@@ -279,12 +279,12 @@ namespace gb::yadro::util
     {
         md5 _{};
         (_.update(std::forward<decltype(t)>(t)), ...);
-        return _.finilize().to_string();
+        return _.finalize().to_string();
     }
     inline auto md5digest(auto&& ...t)
     {
         md5 _{};
         (_.update(std::forward<decltype(t)>(t)), ...);
-        return _.finilize().digest();
+        return _.finalize().digest();
     }
 }

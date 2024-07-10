@@ -191,6 +191,58 @@ namespace
         gbassert(v4 == std::variant<int, char, std::string>{"variant"});
         gbassert(compare_arrays(iarr, std::array<int, 5>{ 5, 4, 3, 2, 1 }));
         std::remove("archive_test.eraseme");
+
+        // test serialization size and md5
+        if constexpr (sizeof(std::size_t) == 4)
+        {
+            gbassert(serialization_size(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                std::variant<int, char, std::string>{"variant"},
+                std::vector{ 20, 21, 22, 23, 24, 25 },
+                std::optional<int>{111},
+                std::optional<int>{},
+                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::tuple{ 30, 50.55, std::string("tuple three") },
+                enum_type::three,
+                std::string("Hello World"),
+                123, 3.14, 2.7f) == 209);
+            gbassert(serialization_md5(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                std::variant<int, char, std::string>{"variant"},
+                std::vector{ 20, 21, 22, 23, 24, 25 },
+                std::optional<int>{111},
+                std::optional<int>{},
+                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::tuple{ 30, 50.55, std::string("tuple three") },
+                enum_type::three,
+                std::string("Hello World"),
+                123, 3.14, 2.7f) == "373df5c5f196bc79cb19f435900de457");
+        }
+        if constexpr (sizeof(std::size_t) == 8)
+        {
+            gbassert(serialization_size(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                std::variant<int, char, std::string>{"variant"},
+                std::vector{ 20, 21, 22, 23, 24, 25 },
+                std::optional<int>{111},
+                std::optional<int>{},
+                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::tuple{ 30, 50.55, std::string("tuple three") },
+                enum_type::three,
+                std::string("Hello World"),
+                123, 3.14, 2.7f) == 261);
+            gbassert(serialization_md5(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                std::variant<int, char, std::string>{"variant"},
+                std::vector{ 20, 21, 22, 23, 24, 25 },
+                std::optional<int>{111},
+                std::optional<int>{},
+                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
+                std::tuple{ 30, 50.55, std::string("tuple three") },
+                enum_type::three,
+                std::string("Hello World"),
+                123, 3.14, 2.7f) == "79c7976557c1fe711c3a1bf86e3187fa");
+        }
     }
 
 }

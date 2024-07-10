@@ -35,6 +35,7 @@
 #include "../async/threadpool.h"
 
 #include <string>
+#include <variant>
 
 #ifdef GBWINDOWS
 
@@ -46,9 +47,19 @@ namespace gb::yadro::util
     using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
 
     template<class ...Functions> struct winpipe_server_t;
+    struct winpipe_client_t;
 
     constexpr auto max_pipe_buffer_size = 16384u;// 16k, Win32 API gives no guarantees about the max buffer size
     constexpr auto chunk_size = 1024u;
+
+    template<class T>
+    auto decode_message(const std::variant<T, std::string> msg)
+    {
+        if (msg.index != 0)
+            throw util::exception_t(std::get<1>(msg));
+        else
+            return std::get<0>(msg);
+    }
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
@@ -125,9 +136,43 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     template<class T, class Functions>
     concept server_function_c = std::convertible_to< T, std::tuple<std::string, Functions>>;
+    
+    //----------------------------------------------------------------------------------------------
+    struct winpipe_base_t
+    {
+        winpipe_base_t() : _log{ std::make_unique<util::logger>(std::cout) } {}
+
+        winpipe_base_t(winpipe_base_t&& other) 
+            : _pipe(other._pipe), _log(std::move(other._log)) { other._pipe = INVALID_HANDLE_VALUE; }
+
+        void set_logger(auto&&...args) 
+        {
+            _log = std::make_unique<util::logger>(std::forward<decltype(args)>(args)...);
+        }
+
+        void log(auto&&...args) const { if (_log) _log->writeln(std::forward<decltype(args)>(args)...); }
+
+        template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
+            void receive(T& t) const
+        {
+            iwinpipe_archive a{ _pipe };
+            a(t);
+        }
+
+        template<class T> requires(archive::is_serializable_v<owinpipe_archive, std::remove_cvref_t<T>>)
+            void send(const T& t) const
+        {
+            owinpipe_archive a{ _pipe };
+            a(t);
+        }
+    protected:
+        HANDLE _pipe = INVALID_HANDLE_VALUE;
+        std::unique_ptr<util::logger> _log;
+    };
+
     //----------------------------------------------------------------------------------------------
     template<class ...Functions>
-    struct winpipe_server_t
+    struct winpipe_server_t : winpipe_base_t
     {
         winpipe_server_t(const std::wstring& pipename, std::tuple<std::string, Functions>&&... actions);
         ~winpipe_server_t()
@@ -144,30 +189,36 @@ namespace gb::yadro::util
         auto run(async::threadpool<>&);
 
     private:
-        std::wstring _pipename; // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
-        HANDLE _pipe = INVALID_HANDLE_VALUE;
-        //static util::logger _log{ std::cout };
         std::tuple<std::tuple<std::string, Functions>...> _actions;
-
-        template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
-            void receive(T& t) const
-        {
-            iwinpipe_archive a;
-            a(t);
-        }
-
-        template<class T> requires(archive::is_serializable_v<owinpipe_archive, std::remove_cvref_t<T>>)
-            void send(const T& t) const
-        {
-            owinpipe_archive a;
-            a(t);
-        }
     };
 
     //----------------------------------------------------------------------------------------------
-    struct winpipe_client_t
+    struct winpipe_client_t : winpipe_base_t
     {
-
+        winpipe_client_t(const std::wstring& pipename) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
+        {
+            if(_pipe = CreateFile(
+                pipename.c_str(),
+                GENERIC_READ |  // read and write access 
+                GENERIC_WRITE,
+                0,              // no sharing 
+                nullptr,        // default security attributes
+                OPEN_EXISTING,  // opens existing pipe 
+                0,              // default attributes 
+                nullptr);       // no template file 
+                _pipe == INVALID_HANDLE_VALUE)
+            {
+                std::string str_name(pipename.size(), 0);
+                std::transform(pipename.begin(), pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
+                log("failed to create pipe: " + str_name, ": ", GetLastError());
+                throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
+            }
+        }
+        ~winpipe_client_t()
+        {
+            if (_pipe != INVALID_HANDLE_VALUE)
+                CloseHandle(_pipe);
+        }
     };
 
     //----------------------------------------------------------------------------------------------
@@ -175,34 +226,35 @@ namespace gb::yadro::util
     template<class ...Functions>
     inline winpipe_server_t<Functions...>::winpipe_server_t(const std::wstring& pipename,
         std::tuple<std::string, Functions>&&... actions)
-        : _pipename(pipename), _actions{ std::tuple{ actions... } }
+        : _actions{ std::tuple{ actions... } }
     {
-        const DWORD buf_size = 1024; // unsigned long
-        HANDLE hPipe = INVALID_HANDLE_VALUE;
+        const DWORD buf_size = 1024; // unsigned long (Windows doesn't have t honor it)
 
-        _pipe = CreateNamedPipe(
-                    _pipename.c_str(),             // pipe name 
-                    PIPE_ACCESS_DUPLEX,       // read/write access 
-                    PIPE_TYPE_MESSAGE |       // message type pipe 
-                    PIPE_READMODE_MESSAGE |   // message-read mode 
-                    PIPE_WAIT,                // blocking mode 
-                    PIPE_UNLIMITED_INSTANCES, // max. instances (255)
-                    buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
-                    buf_size,                  // input buffer size 
-                    0,                        // client time-out 
-                    NULL);                    // default security attribute             
+        if (_pipe = CreateNamedPipe(
+            pipename.c_str(),             // pipe name 
+            PIPE_ACCESS_DUPLEX,       // read/write access 
+            PIPE_TYPE_MESSAGE |       // message type pipe 
+            PIPE_READMODE_MESSAGE |   // message-read mode 
+            PIPE_WAIT,                // blocking mode 
+            PIPE_UNLIMITED_INSTANCES, // max. instances (255)
+            buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
+            buf_size,                  // input buffer size 
+            0,                        // client time-out 
+            nullptr);                    // default security attribute             
 
-        if (hPipe == INVALID_HANDLE_VALUE)
+            _pipe == INVALID_HANDLE_VALUE)
         {
-            std::string str_name(_pipename.size(), 0);
-            std::transform(_pipename.begin(), _pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
+            std::string str_name(pipename.size(), 0);
+            std::transform(pipename.begin(), pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
+            log("failed to create pipe: ", str_name, ": ", GetLastError());
             throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
         }
 
         // connect to client, ERROR_PIPE_CONNECTED means client connected before ConnectNamedPipe called
         // ConnectNamedPipe blocks indefinitely until connected or failed
-        if (auto is_connected = ConnectNamedPipe(hPipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED; !is_connected)
+        if (auto is_connected = ConnectNamedPipe(_pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED; !is_connected)
         {
+            log("failed to connect to pipe: ", _pipe, ": ", GetLastError());
             throw util::exception_t("failed to connect to pipe: ", GetLastError());
         }
     }

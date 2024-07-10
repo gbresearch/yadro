@@ -49,6 +49,7 @@
 #include <span>
 #include <ranges>
 
+#include "../util/string_util.h"
 #include "archive_traits.h"
 
 namespace gb::yadro::archive
@@ -200,6 +201,7 @@ namespace gb::yadro::archive
         auto get_size() const { return _size; }
     private:
         std::uint64_t _size;
+        std::optional<std::string> _md5sum;
     };
 
     // calculate the size (in bytes) of buffer necessary to serialize binary data
@@ -210,6 +212,30 @@ namespace gb::yadro::archive
         return ar.get_stream().get_size();
     }
     
+    //---------------------------------------------------------------------
+    // archive_size_stream is archive proxy class for size calculation
+    struct archive_md5_stream
+    {
+        using char_type = std::uint8_t;
+
+        void write(const char_type* c, std::streamsize size)
+        {
+            _md5.update(c, (std::size_t)size);
+        }
+
+        auto& get_md5() { return _md5; }
+    private:
+        util::md5 _md5;
+    };
+
+    // calculate the size (in bytes) of buffer necessary to serialize binary data
+    inline auto serialization_md5(auto&&... args)
+    {
+        archive< archive_md5_stream, archive_format_t::custom> ar;
+        ar(std::forward<decltype(args)>(args)...);
+        return ar.get_stream().get_md5().finalize().to_string();
+    }
+
     //---------------------------------------------------------------------
     template<std::ranges::sized_range>
     struct imem_stream;
