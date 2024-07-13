@@ -700,14 +700,19 @@ namespace gb::yadro::archive
     template<class Archive, class T, class E>
     auto serialize(Archive&& a, std::expected<T, E>& exp) requires(is_iarchive_v<Archive>)
     {
+        static_assert(!std::is_void_v<E>);
+
         auto has_value = false;
         a(serialize_as<std::uint32_t>(has_value));
         
         if (has_value)
         {
-            T value{};
-            a(value);
-            exp = value;
+            if constexpr (!std::is_void_v<T>)
+            {
+                T value{};
+                a(value);
+                exp = value;
+            }
         }
         else
         {
@@ -720,9 +725,14 @@ namespace gb::yadro::archive
     template<class Archive, class T, class E>
     auto serialize(Archive&& a, const std::expected<T, E>& exp) requires(is_oarchive_v<Archive>)
     {
+        static_assert(!std::is_void_v<E>);
+
         a(serialize_as<std::uint32_t>(exp.has_value()));
         if (exp)
-            a(exp.value());
+        {
+            if constexpr (!std::is_void_v<T>)
+                a(exp.value());
+        }
         else
             a(exp.error());
     }

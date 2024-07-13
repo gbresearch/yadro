@@ -314,35 +314,35 @@ unset multiplot)*";
     {
 #ifdef GBWINDOWS
         auto f = std::async(std::launch::async, [&] {
-            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe");
 #if defined(GB_DEBUGGING)
-            server.set_logger(std::cout);
+            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe", std::cout);
+            server.set_send_receive_log(true);
+#else
+            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe");
 #endif
-            server.run([](int i) { return i; }, [](std::vector<int> v) { return v; }
-                ); // echo
+            server.run(
+                [](int) {},
+                std::function([&](int i) { return reinterpret_cast<std::uint64_t>(server.get_handle()); }),
+                [](std::vector<int> v) { return v; }, // echo vector
+                [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; }
+                );
             });
-        
-        using namespace std::chrono_literals;
-        std::this_thread::sleep_for(20ms); // give time for server to start
-        
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe");
 
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(50ms); // give time for server to start
+#if defined(GB_DEBUGGING)
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", std::cout);
+#else
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe");
+#endif
+        gbassert(client.request<void>(0, 1));
+        gbassert(client.request<std::uint64_t>(1, 0));
+        gbassert(client.request<std::array<int, 3>>(3, 1, 2, 3).value() == std::array{ 1,2,3 });
         std::vector<int> vec(1000000, 0);
         vec[0] = 1; vec[1] = 2; vec[3] = 3; vec[4] = 4; vec[5] = 5; vec.back() = 12345;
-        auto response = client.request<std::vector<int>>(1, vec);
-        gbassert(*response == vec);
-#if defined(GB_DEBUGGING)
-        if (response)
-            for (auto counter = 0; auto v : *response)
-            {
-                ++counter;
-                if (counter < 100 || counter + 100 > response->size())
-                    std::cout << v << ",";
-            }
-        else
-            std::cout << "pipe error: " << response.error() << "\n";
-        std::cout << "\n";
-#endif
+        auto response = client.request<std::vector<int>>(2, vec);
+        gbassert(response.value() == vec);
+        client.disconnect();
         f.get();
 #endif
     }
