@@ -63,6 +63,12 @@ namespace gb::yadro::util
     {
     };
 
+    template<class Fn>
+    using lambda_args = typename lambda_traits<Fn>::Args;
+
+    template<class Fn>
+    using lambda_ret = typename lambda_traits<Fn>::Ret;
+
     //-------------------------------------------------------------------------
     // move_forward function
     // if supplied parameter is (qualified) lvalue, returns (qualified) lvalue reference

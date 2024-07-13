@@ -66,7 +66,7 @@ namespace gb::yadro::util
     }
     
     //-------------------------------------------------------------------------
-    // convert multile tuples to string in format {x,x,x}
+    // convert multiple tuples to string in format {x,x,x}
     // std::ignore values are skipped
     inline auto tuple_to_string(const tuple_like auto& ... tuples)
     {
@@ -96,7 +96,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    // get tuple value by run-time index, return is variant
+    // get tuple value by run-time index, returning a variant of the same types
     constexpr auto tuple_to_variant(tuple_like auto&& t, std::size_t index)
     {
         using variant_type = decltype(std::apply([](auto&&... v) {
@@ -122,43 +122,6 @@ namespace gb::yadro::util
         };
 
         return get_n(std::forward<decltype(t)>(t), index, std::index_sequence<0>{});
-    }
-
-    //-------------------------------------------------------------------------
-    // visit a member of tuple-like type by run-time index
-    // if Fn returns a value, it must be the same type for all arguments
-    template<class Fn>
-    constexpr auto visit(Fn fn, auto&& t, std::size_t index)
-    {
-        using ret_variant_type = decltype(std::apply([](auto&&... v) {
-            return std::variant<std::monostate, std::invoke_result_t<Fn, std::remove_cvref_t<decltype(v)>>...>{};
-            }, t));
-
-        using ret_t = std::invoke_result_t<Fn, decltype(std::get<0>(t))>;
-        using opt_ret_t = std::optional<ret_t>;
-
-        if constexpr (std::is_void_v<ret_t>)
-        {
-            std::visit(overloaded(
-                [&](auto&& t) { std::invoke(fn, std::forward<decltype(t)>(t)); }),
-                tuple_to_variant(t, index));
-        }
-        else
-        {
-            auto&& opt = std::visit(overloaded(
-                [&](auto&& t)
-                {
-                    static_assert(std::convertible_to<std::invoke_result_t<Fn, decltype(t)>, ret_t>,
-                        "function must return the same type for all argument types");
-                    return opt_ret_t(std::invoke(fn, std::forward<decltype(t)>(t)));
-                }),
-                tuple_to_variant(t, index));
-            
-            if (opt)
-                return opt.value();
-
-            throw util::exception_t{ "bad tuple index", index };
-        }
     }
 
     //-------------------------------------------------------------------------

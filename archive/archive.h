@@ -48,6 +48,7 @@
 #include <unordered_map>
 #include <span>
 #include <ranges>
+#include <expected>
 
 #include "../util/string_util.h"
 #include "archive_traits.h"
@@ -695,6 +696,37 @@ namespace gb::yadro::archive
         for (auto it = s.begin(); it != s.end(); ++it)
             a(*it);
     }
+    //---------------------------------------------------------------------
+    template<class Archive, class T, class E>
+    auto serialize(Archive&& a, std::expected<T, E>& exp) requires(is_iarchive_v<Archive>)
+    {
+        auto has_value = false;
+        a(serialize_as<std::uint32_t>(has_value));
+        
+        if (has_value)
+        {
+            T value{};
+            a(value);
+            exp = value;
+        }
+        else
+        {
+            E error{};
+            a(error);
+            exp = std::unexpected<E>(error);
+        }
+    }
+
+    template<class Archive, class T, class E>
+    auto serialize(Archive&& a, const std::expected<T, E>& exp) requires(is_oarchive_v<Archive>)
+    {
+        a(serialize_as<std::uint32_t>(exp.has_value()));
+        if (exp)
+            a(exp.value());
+        else
+            a(exp.error());
+    }
+
 #if defined(clang_p1061)
     //---------------------------------------------------------------------
     // serialize aggregate-like types using variadic structured bindings

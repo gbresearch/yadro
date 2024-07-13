@@ -31,11 +31,13 @@
 #include "tuple_functions.h"
 #include "gblog.h"
 #include "misc.h"
+#include "time_util.h"
 #include "../archive/archive.h"
 #include "../async/threadpool.h"
 
 #include <string>
 #include <variant>
+#include <tuple>
 
 #ifdef GBWINDOWS
 
@@ -46,20 +48,10 @@ namespace gb::yadro::util
     using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
     using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
 
-    template<class ...Functions> struct winpipe_server_t;
+    struct winpipe_server_t;
     struct winpipe_client_t;
 
-    constexpr auto max_pipe_buffer_size = 16384u;// 16k, Win32 API gives no guarantees about the max buffer size
-    constexpr auto chunk_size = 1024u;
-
-    template<class T>
-    auto decode_message(const std::variant<T, std::string> msg)
-    {
-        if (msg.index != 0)
-            throw util::exception_t(std::get<1>(msg));
-        else
-            return std::get<0>(msg);
-    }
+    constexpr auto pipe_chunk_size = 1024;
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
@@ -69,14 +61,8 @@ namespace gb::yadro::util
 
         void write(const char_type* c, std::streamsize size)
         {
-            gbassert(size < max_pipe_buffer_size);
-
-            if (DWORD bytes_written{};
-                not WriteFile(_pipe, c, (DWORD)size, &bytes_written, nullptr) || bytes_written != size)
-                throw util::exception_t("owinpipe_stream failed to write to pipe: ", GetLastError());
-
             // write in chunks
-            char next_chunk[] = "next chunk\0";
+            char next_chunk[] = "next\0";
 
             for (std::streamsize sent_bytes = 0; sent_bytes < size;)
             {
@@ -86,7 +72,7 @@ namespace gb::yadro::util
                     || bytes_read != (DWORD)sizeof(next_chunk))
                     throw util::exception_t("owinpipe_stream failed to receive next chunk request: ", GetLastError());
 
-                auto bytes_to_send = size - sent_bytes > chunk_size ? chunk_size : size - sent_bytes;
+                auto bytes_to_send = size - sent_bytes > pipe_chunk_size ? pipe_chunk_size : size - sent_bytes;
 
                 if (DWORD bytes_written{};
                     not WriteFile(_pipe, &c[sent_bytes], (DWORD)bytes_to_send, &bytes_written, nullptr)
@@ -111,7 +97,7 @@ namespace gb::yadro::util
         void read(char_type* c, std::streamsize size)
         {
             // read in chunks
-            char next_chunk[] = "next chunk\0";
+            char next_chunk[] = "next\0";
 
             for (std::streamsize received_bytes = 0; received_bytes < size; gbassert(received_bytes <= size))
             {
@@ -122,7 +108,7 @@ namespace gb::yadro::util
                     throw util::exception_t("iwinpipe_stream failed to request next chunk: ", GetLastError());
 
                 if (DWORD bytes_read{};
-                    not ReadFile(_pipe, &c[received_bytes], chunk_size, &bytes_read, nullptr) || bytes_read == 0)
+                    not ReadFile(_pipe, &c[received_bytes], pipe_chunk_size, &bytes_read, nullptr) || bytes_read == 0)
                     throw util::exception_t("iwinpipe_stream failed to read chunk from pipe: ", GetLastError());
                 else
                     received_bytes += bytes_read;
@@ -140,7 +126,7 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     struct winpipe_base_t
     {
-        winpipe_base_t() : _log{ std::make_unique<util::logger>(std::cout) } {}
+        winpipe_base_t() = default;
 
         winpipe_base_t(winpipe_base_t&& other) 
             : _pipe(other._pipe), _log(std::move(other._log)) { other._pipe = INVALID_HANDLE_VALUE; }
@@ -150,46 +136,34 @@ namespace gb::yadro::util
             _log = std::make_unique<util::logger>(std::forward<decltype(args)>(args)...);
         }
 
-        void log(auto&&...args) const { if (_log) _log->writeln(std::forward<decltype(args)>(args)...); }
+        void log(auto&&...args) const { if (_log) _log->writeln(util::time_stamp(), ": ", std::forward<decltype(args)>(args)...); }
 
         template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
-            void receive(T& t) const
+        void receive(T& t) const
         {
             iwinpipe_archive a{ _pipe };
             a(t);
+            log("received: ", archive::serialization_size(t), ", md5: ", archive::serialization_md5(t), " pipe: ", _pipe);
+        }
+
+        template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
+        T receive() const
+        {
+            T t;
+            receive(t);
+            return t;
         }
 
         template<class T> requires(archive::is_serializable_v<owinpipe_archive, std::remove_cvref_t<T>>)
-            void send(const T& t) const
+        void send(const T& t) const
         {
+            log("sending: ", archive::serialization_size(t), ", md5: ", archive::serialization_md5(t), " pipe: ", _pipe);
             owinpipe_archive a{ _pipe };
             a(t);
         }
     protected:
         HANDLE _pipe = INVALID_HANDLE_VALUE;
         std::unique_ptr<util::logger> _log;
-    };
-
-    //----------------------------------------------------------------------------------------------
-    template<class ...Functions>
-    struct winpipe_server_t : winpipe_base_t
-    {
-        winpipe_server_t(const std::wstring& pipename, std::tuple<std::string, Functions>&&... actions);
-        ~winpipe_server_t()
-        {
-            if (_pipe != INVALID_HANDLE_VALUE)
-            {
-                FlushFileBuffers(_pipe);
-                DisconnectNamedPipe(_pipe);
-                CloseHandle(_pipe);
-            }
-        }
-
-        void run();
-        auto run(async::threadpool<>&);
-
-    private:
-        std::tuple<std::tuple<std::string, Functions>...> _actions;
     };
 
     //----------------------------------------------------------------------------------------------
@@ -213,22 +187,99 @@ namespace gb::yadro::util
                 log("failed to create pipe: " + str_name, ": ", GetLastError());
                 throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
             }
+            log("client opened pipe: ", _pipe);
         }
         ~winpipe_client_t()
         {
+            log("client destructor: ", _pipe);
             if (_pipe != INVALID_HANDLE_VALUE)
                 CloseHandle(_pipe);
+        }
+
+        template<class T>
+        auto request(unsigned fn_id, auto&& ...params)
+        {
+            log("client sending request: ", _pipe);
+            send(fn_id);
+            send(std::tuple{ params... });
+            return receive<std::expected<T, std::string>>();
+        }
+    };
+
+    //----------------------------------------------------------------------------------------------
+    struct winpipe_server_t : winpipe_base_t
+    {
+        winpipe_server_t(const std::wstring& pipename);
+        ~winpipe_server_t()
+        {
+            log("server destructor: ", _pipe);
+
+            if (_pipe != INVALID_HANDLE_VALUE)
+            {
+                FlushFileBuffers(_pipe);
+                DisconnectNamedPipe(_pipe);
+                CloseHandle(_pipe);
+            }
+        }
+
+        void run();
+        void run(async::threadpool<>&);
+
+        template<class ...Fn>
+        void run(Fn... functions)
+        {
+            static_assert(sizeof...(Fn) != 0, "server must have at least one function");
+            std::tuple<Fn...> fun_tuple{ functions... };
+            auto fun_index = receive<unsigned>();
+            log("client requested function: ", fun_index);
+
+            if (fun_index >= sizeof...(functions))
+            {
+                log("wrong function index: ", fun_index);
+                send(std::expected<int, std::string>{std::unexpected{ "wrong function index: " + std::to_string(fun_index) }});
+            }
+            else
+            {
+                std::visit([&](auto&& fn)
+                    {
+                        using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
+                        auto params = receive<lambda_args<lambda_type>>();
+                        log("received parameters for function: ", fun_index);
+                        using sent_t = std::expected< lambda_ret<lambda_type>, std::string>;
+
+                        try
+                        {
+                            send(sent_t{ std::apply([&](auto&& ...args) {
+                                return fn(std::move(args)...);
+                                }, params) });
+                            log("sent response from function: ", fun_index);
+                        }
+                        catch (util::exception_t<>& e)
+                        {
+                            log("exception: ", e.what());
+                            send(sent_t{ std::unexpected{e.what()} });
+                        }
+                        catch (std::exception& e)
+                        {
+                            log("exception: ", e.what());
+                            send(sent_t{ std::unexpected{e.what()} });
+                        }
+                        catch (...)
+                        {
+                            log("unknown exception");
+                            send(sent_t{ std::unexpected{std::string("unknown exception")}});
+                        }
+
+                    }, util::tuple_to_variant(fun_tuple, fun_index));
+            }
         }
     };
 
     //----------------------------------------------------------------------------------------------
     // https://learn.microsoft.com/en-us/windows/win32/ipc/multithreaded-pipe-server
-    template<class ...Functions>
-    inline winpipe_server_t<Functions...>::winpipe_server_t(const std::wstring& pipename,
-        std::tuple<std::string, Functions>&&... actions)
-        : _actions{ std::tuple{ actions... } }
+    inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename)
     {
-        const DWORD buf_size = 1024; // unsigned long (Windows doesn't have t honor it)
+        const DWORD buf_size = 4096; // unsigned long (Windows doesn't have t honor it)
 
         if (_pipe = CreateNamedPipe(
             pipename.c_str(),             // pipe name 
@@ -239,7 +290,7 @@ namespace gb::yadro::util
             PIPE_UNLIMITED_INSTANCES, // max. instances (255)
             buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
             buf_size,                  // input buffer size 
-            0,                        // client time-out 
+            500,                        // client time-out 
             nullptr);                    // default security attribute             
 
             _pipe == INVALID_HANDLE_VALUE)
@@ -250,6 +301,8 @@ namespace gb::yadro::util
             throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
         }
 
+        log("server created pipe: ", _pipe);
+
         // connect to client, ERROR_PIPE_CONNECTED means client connected before ConnectNamedPipe called
         // ConnectNamedPipe blocks indefinitely until connected or failed
         if (auto is_connected = ConnectNamedPipe(_pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED; !is_connected)
@@ -257,50 +310,7 @@ namespace gb::yadro::util
             log("failed to connect to pipe: ", _pipe, ": ", GetLastError());
             throw util::exception_t("failed to connect to pipe: ", GetLastError());
         }
-    }
-
-    //----------------------------------------------------------------------------------------------
-    template<class ...Functions>
-    inline void winpipe_server_t<Functions...>::run()
-    {
-        auto send_n = [&]<auto N>()
-        {
-            if (N > sizeof...(Functions))
-                throw util::exception_t("invalid request", N);
-
-            auto&& action = std::get<N>(_actions);
-            typename lambda_traits<std::remove_cvref_t<decltype(action)>>::Args t;
-            receive(t);
-            send(std::invoke(action, t));
-        };
-
-        for(auto action_id = receive<std::uint32_t>(); action_id < sizeof...(Functions); action_id = receive<std::uint32_t>())
-        {
-            switch (action_id)
-            {
-            case 0: send<0>(); break;
-            case 1: send<1>(); break;
-            case 2: send<2>(); break;
-            case 3: send<3>(); break;
-            case 4: send<4>(); break;
-            case 5: send<5>(); break;
-            case 6: send<6>(); break;
-            case 7: send<7>(); break;
-            case 8: send<8>(); break;
-            case 9: send<9>(); break;
-            case 10: send<10>(); break;
-            case 11: send<11>(); break;
-            case 12: send<12>(); break;
-            case 13: send<13>(); break;
-            case 14: send<14>(); break;
-            case 15: send<15>(); break;
-            case 16: send<16>(); break;
-            case 17: send<17>(); break;
-            case 18: send<18>(); break;
-            case 19: send<19>(); break;
-            default: throw util::exception_t{ "invalid request: ", action_id };
-            }
-        }
+        log("server connected client: ", _pipe);
     }
 }
 

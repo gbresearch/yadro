@@ -66,7 +66,7 @@ namespace gb::yadro::util
 
     // exception class specialization w/o payload
     template<>
-    struct exception_t<void>
+    struct exception_t<void> : std::exception
     {
         exception_t(std::string error_str,
             const std::source_location& loc = std::source_location::current(),
@@ -75,7 +75,8 @@ namespace gb::yadro::util
             _loc{ loc }, _trace{ trace }
         {}
 
-        auto&& what() const noexcept { return _error_str; }
+        const char* what() const noexcept { return _error_str.c_str(); }
+        auto&& what_str() const noexcept { return _error_str; }
         auto&& location() const noexcept { return _loc; }
         auto location_str() const {
             return to_string(_loc.file_name(), '(',
@@ -86,8 +87,13 @@ namespace gb::yadro::util
         
         auto message(bool include_stacktrace = false) const 
         {
-            return include_stacktrace ? what() + "\n" + location_str() + "\n"
-                : what() + "\n" + location_str() + "\n" + stacktrace_str() + "\n";
+            return include_stacktrace ? _error_str + "\n" + location_str() + "\n"
+                : _error_str + "\n" + location_str() + "\n" + stacktrace_str() + "\n";
+        }
+
+        void serialize(this auto&& self, auto&& archive)
+        {
+            archive(self._error_str); // only error string is serialized
         }
 
     private:
@@ -108,6 +114,12 @@ namespace gb::yadro::util
         {}
 
         auto&& data(this auto&& self) { return std::forward<decltype(self)>(self)._data; }
+
+        void serialize(this auto&& self, auto&& archive)
+        {
+            self.exception_t<void>::serialize(archive);
+            archive(self._data);
+        }
 
     private:
         Data _data;

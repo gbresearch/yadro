@@ -27,7 +27,6 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
-#include <thread>
 #include <mutex>
 #include <string>
 #include <chrono>

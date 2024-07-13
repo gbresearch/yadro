@@ -34,6 +34,7 @@
 #include <unordered_set>
 #include <vector>
 #include <deque>
+#include <future>
 
 namespace
 {
@@ -132,12 +133,17 @@ namespace
                 std::variant<int, double>(std::in_place_index<1>, 2.));
             static_assert(tuple_to_variant(std::array{ 1,2 }, 0) ==
                 std::variant<int, int>(std::in_place_index<0>, 1));
-            static_assert(visit([](auto v) { return (double)v; }, std::tuple{ 1,2. }, 1) == 2.);
-            static_assert(visit([](auto v) { return v; }, std::array{ 1,2 }, 0) == 1);
+            static_assert(std::visit([](auto v) { return (double)v; }, tuple_to_variant(std::tuple{ 1,2. }, 1)) == 2.);
+            static_assert(std::visit([](auto v) { return v; }, tuple_to_variant(std::array{ 1,2 }, 0)) == 1);
+
             try {
                 auto t = tuple_to_variant(std::array{ 1,2 }, 4);
             }
-            catch (exception_t<>& e) { gbassert(e.what() == "bad tuple index"); }
+            catch (exception_t<>& e) { gbassert(e.what_str() == "bad tuple index"); }
+
+            static_assert(std::get<0>(tuple_to_variant(std::tuple{ 1, 2.2, "string" }, 0)) == 1);
+            static_assert(std::get<1>(tuple_to_variant(std::tuple{ 1, 2.2, "string" }, 1)) == 2.2);
+            static_assert(std::get<2>(tuple_to_variant(std::tuple{ 1, 2.2, "string" }, 2)) == std::string("string"));
         }
         {
             // test variant transformation
@@ -306,7 +312,38 @@ unset multiplot)*";
 
     GB_TEST(util, win_pipe)
     {
-#ifndef GBWINDOWS
+#ifdef GBWINDOWS
+        auto f = std::async(std::launch::async, [&] {
+            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe");
+#if defined(GB_DEBUGGING)
+            server.set_logger(std::cout);
+#endif
+            server.run([](int i) { return i; }, [](std::vector<int> v) { return v; }
+                ); // echo
+            });
+        
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(20ms); // give time for server to start
+        
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe");
+
+        std::vector<int> vec(1000000, 0);
+        vec[0] = 1; vec[1] = 2; vec[3] = 3; vec[4] = 4; vec[5] = 5; vec.back() = 12345;
+        auto response = client.request<std::vector<int>>(1, vec);
+        gbassert(*response == vec);
+#if defined(GB_DEBUGGING)
+        if (response)
+            for (auto counter = 0; auto v : *response)
+            {
+                ++counter;
+                if (counter < 100 || counter + 100 > response->size())
+                    std::cout << v << ",";
+            }
+        else
+            std::cout << "pipe error: " << response.error() << "\n";
+        std::cout << "\n";
+#endif
+        f.get();
 #endif
     }
 }
