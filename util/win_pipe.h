@@ -32,12 +32,16 @@
 #include "gblog.h"
 #include "misc.h"
 #include "time_util.h"
+#include "string_util.h"
 #include "../archive/archive.h"
 #include "../async/threadpool.h"
 
 #include <string>
 #include <variant>
 #include <tuple>
+#include <memory>
+#include <atomic>
+#include <type_traits>
 
 #ifdef GBWINDOWS
 
@@ -48,10 +52,23 @@ namespace gb::yadro::util
     using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
     using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
 
+    // single-instance server
     struct winpipe_server_t;
     struct winpipe_client_t;
+    
+    // multi-instance server
+    template<class ...Fn>
+    void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
+    void shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args);
 
+    // server function concept
+    template<class T, class Functions>
+    concept server_function_c = std::convertible_to< T, std::tuple<std::string, Functions>>;
+
+    // constants
     constexpr auto pipe_chunk_size = 1024;
+    constexpr unsigned server_disconnect = -1;
+    constexpr unsigned server_shutdown = -2;
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
@@ -119,23 +136,22 @@ namespace gb::yadro::util
         HANDLE _pipe = INVALID_HANDLE_VALUE;
     };
 
-    //----------------------------------------------------------------------------------------------
-    template<class T, class Functions>
-    concept server_function_c = std::convertible_to< T, std::tuple<std::string, Functions>>;
     
     //----------------------------------------------------------------------------------------------
     struct winpipe_base_t
     {
         winpipe_base_t(auto&&... log_args) 
-            : _log(std::make_unique<util::logger>(std::forward<decltype(log_args)>(log_args)...))
+            : _log(std::make_shared<util::logger>(std::forward<decltype(log_args)>(log_args)...))
         {}
 
-        winpipe_base_t(winpipe_base_t&& other) 
+        winpipe_base_t(std::shared_ptr<util::logger> log) : _log(log) {}
+
+        winpipe_base_t(winpipe_base_t&& other) noexcept
             : _pipe(other._pipe), _log(std::move(other._log)) { other._pipe = INVALID_HANDLE_VALUE; }
 
         void set_logger(auto&&...args) 
         {
-            _log = std::make_unique<util::logger>(std::forward<decltype(args)>(args)...);
+            _log = std::make_shared<util::logger>(std::forward<decltype(args)>(args)...);
         }
 
         void set_send_receive_log(bool set) { _log_send_receive = set; }
@@ -168,46 +184,58 @@ namespace gb::yadro::util
         }
 
         auto get_handle() const { return _pipe; }
+    
     protected:
         HANDLE _pipe = INVALID_HANDLE_VALUE;
-        std::unique_ptr<util::logger> _log;
+    private:
+        std::shared_ptr<util::logger> _log;
         bool _log_send_receive = false;
     };
 
     //----------------------------------------------------------------------------------------------
     struct winpipe_client_t : winpipe_base_t
     {
-        winpipe_client_t(const std::wstring& pipename, auto&& ...log_args) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
-            : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...)
+        winpipe_client_t(const std::wstring& pipename, std::string client_name, unsigned connection_attempts, auto&& ...log_args) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
+            : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
         {
-            if(_pipe = CreateFile(
-                pipename.c_str(),
-                GENERIC_READ |  // read and write access 
-                GENERIC_WRITE,
-                0,              // no sharing 
-                nullptr,        // default security attributes
-                OPEN_EXISTING,  // opens existing pipe 
-                0,              // default attributes 
-                nullptr);       // no template file 
-                _pipe == INVALID_HANDLE_VALUE)
+            using namespace std::chrono_literals;
+            auto attempt = 0u;
+            for(; _pipe == INVALID_HANDLE_VALUE && attempt < connection_attempts; ++attempt)
+            {
+                if (attempt != 0)
+                    std::this_thread::sleep_for(10ms);
+
+                _pipe = CreateFile(
+                        pipename.c_str(),
+                        GENERIC_READ |  // read and write access 
+                        GENERIC_WRITE,
+                        0,              // no sharing 
+                        nullptr,        // default security attributes
+                        OPEN_EXISTING,  // opens existing pipe 
+                        0,              // default attributes 
+                        nullptr);       // no template file 
+            }
+
+            if(_pipe == INVALID_HANDLE_VALUE)
             {
                 std::string str_name(pipename.size(), 0);
                 std::transform(pipename.begin(), pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
-                log("failed to create pipe: " + str_name, ": ", GetLastError());
-                throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
+                auto error_string = util::to_string(_client_name, ": failed to open pipe: ", str_name, ": ", GetLastError());
+                log(error_string);
+                throw util::exception_t(error_string);
             }
-            log("client opened pipe");
+            log(_client_name, ": opened pipe after ", attempt, " attempts");
         }
         ~winpipe_client_t()
         {
-            log("client destructor");
+            log(_client_name, ": destructor");
             disconnect();
         }
 
         template<class T>
         auto request(unsigned fn_id, auto&& ...params) const
         {
-            log("client sending request");
+            log(_client_name, ": sending request");
             send(fn_id);
             send(std::tuple{ params... });
             return receive<std::expected<T, std::string>>();
@@ -217,17 +245,35 @@ namespace gb::yadro::util
         {
             if (_pipe != INVALID_HANDLE_VALUE)
             {
-                send<unsigned>(-1);
+                send<unsigned>(server_disconnect);
                 CloseHandle(_pipe);
                 _pipe = INVALID_HANDLE_VALUE;
             }
         }
+
+        void shutdown()
+        {
+            if (_pipe != INVALID_HANDLE_VALUE)
+            {
+                send<unsigned>(server_shutdown);
+                CloseHandle(_pipe);
+                _pipe = INVALID_HANDLE_VALUE;
+            }
+        }
+
+        auto&& get_name() const { return _client_name; }
+
+    private:
+        std::string _client_name;
     };
 
     //----------------------------------------------------------------------------------------------
     struct winpipe_server_t : winpipe_base_t
     {
         winpipe_server_t(const std::wstring& pipename, auto&& ...log_args);
+
+        winpipe_server_t(winpipe_server_t&& other) : winpipe_base_t(static_cast<winpipe_base_t&&>(other)) {}
+        
         ~winpipe_server_t()
         {
             log("server destructor");
@@ -243,8 +289,11 @@ namespace gb::yadro::util
         void run(async::threadpool<>&);
 
         template<class ...Fn>
-        void run(Fn... functions)
+        int run(Fn... functions)
         {
+            if (_pipe == INVALID_HANDLE_VALUE)
+                throw util::exception_t("can't run unconnected server");
+
             static_assert(sizeof...(Fn) != 0, "server must have at least one function");
             std::tuple<Fn...> fun_tuple{ functions... };
 
@@ -252,16 +301,22 @@ namespace gb::yadro::util
             {
                 auto fun_index = receive<unsigned>();
 
-                if (fun_index == -1)
+                if (fun_index == server_shutdown)
                 {
-                    log("client requested to stop session");
-                    return;
+                    log("client requested shutdown");
+                    return server_shutdown;
+                }
+
+                if (fun_index == server_disconnect)
+                {
+                    log("client requested disconnect");
+                    return 0;
                 }
 
                 if (fun_index >= sizeof...(functions))
                 {
                     log("error: client requested invalid function: ", fun_index);
-                    return;
+                    return 0;
                 }
 
                 log("client requested function: ", fun_index);
@@ -269,7 +324,7 @@ namespace gb::yadro::util
                 std::visit([&](auto&& fn)
                     {
                         using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
-                        auto params = receive<lambda_args<lambda_type>>();
+                        auto params = receive<lambda_pure_args<lambda_type>>();
                         log("received parameters for function: ", fun_index);
                         using sent_t = std::expected< lambda_ret<lambda_type>, std::string>;
 
@@ -312,7 +367,6 @@ namespace gb::yadro::util
     };
 
     //----------------------------------------------------------------------------------------------
-    // https://learn.microsoft.com/en-us/windows/win32/ipc/multithreaded-pipe-server
     inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, auto&& ...log_args)
         : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...)
     {
@@ -332,8 +386,7 @@ namespace gb::yadro::util
 
             _pipe == INVALID_HANDLE_VALUE)
         {
-            std::string str_name(pipename.size(), 0);
-            std::transform(pipename.begin(), pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
+            std::string str_name = util::from_wstring(pipename);
             log("failed to create pipe: ", str_name, ": ", GetLastError());
             throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
         }
@@ -349,6 +402,85 @@ namespace gb::yadro::util
             throw util::exception_t("failed to connect to pipe: ", last_error);
         }
         log("server connected client");
+    }
+
+    //----------------------------------------------------------------------------------------------
+    template<class ...Fn>
+    void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
+    {
+        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+        if (auto h_mutex = CreateMutex(NULL, TRUE, mutex_name.c_str()); GetLastError() == ERROR_ALREADY_EXISTS) 
+        {
+            // Another instance is already running
+            log->writeln("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
+            CloseHandle(h_mutex);
+        }
+        else
+        {
+            using namespace std::chrono_literals;
+            std::vector<std::future<int>> v;
+            std::atomic_bool shutdown{ false }; // signals client requesting server shutdown
+            std::atomic_bool noshutdown{ false }; // restrics where shutdown could happen
+            // guarantees that there is one instance of server running after shutdown signal
+
+            while (!shutdown && v.size() < 1000) // something is wrong if there are 1000 threads pending
+            {
+                // shutdown is allowed to be set
+                noshutdown = false;
+                noshutdown.notify_one();
+
+                if (v.size() % 100 == 0) // clean up periodically
+                    for (auto&& f : v)
+                        std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
+
+                winpipe_server_t server(pipename, log);
+                std::atomic_bool move_completed{ false };
+                noshutdown = true;
+                // shutdown is not allowed to be set till the end of the loop
+
+                auto f = std::async(std::launch::async,
+                    [&] {
+                        auto s{ std::move(server) };
+                        move_completed = true;
+                        move_completed.notify_one();
+                        auto ret = s.run(std::forward<decltype(fn)>(fn)...);
+
+                        if (ret == server_shutdown)
+                        {
+                            noshutdown.wait(true);
+                            shutdown = true;
+                        }
+
+                        return ret;
+                    });
+                
+                move_completed.wait(false);
+
+                v.push_back(std::move(f));
+            }
+
+            if(h_mutex)
+                CloseHandle(h_mutex);
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------
+    inline void shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args)
+    {
+        using namespace std::chrono_literals;
+        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+
+        if (auto h_mutex = CreateMutex(NULL, TRUE, mutex_name.c_str()); GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            // shutdown sequence
+            winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
+            // drain remaining instance, may fail if the previous client thread is too slow
+            try { winpipe_client_t(pipename, "drain", attempts, log_args...); }
+            catch (...) {}
+
+            if(h_mutex)
+                CloseHandle(h_mutex);
+        }
     }
 }
 

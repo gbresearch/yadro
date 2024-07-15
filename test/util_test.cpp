@@ -281,7 +281,7 @@ unset multiplot)*";
     GB_TEST(util, misc_locked)
     {
         locked_resource<int> lint{ 123 };
-        locked_resource<std::string> lstr{3, 'x'};
+        locked_resource<std::string> lstr{ 3, 'x' };
         lstr.visit([](auto&& s) { gbassert(s == "xxx"); });
         lstr.visit([](auto&& s, auto&& arg) { s = std::string("hello") + arg; }, " world");
         lstr.visit([](auto&& s) { gbassert(s == "hello world"); });
@@ -312,38 +312,62 @@ unset multiplot)*";
 
     GB_TEST(util, win_pipe)
     {
-#ifdef GBWINDOWS
-        auto f = std::async(std::launch::async, [&] {
-#if defined(GB_DEBUGGING)
-            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe", std::cout);
-            server.set_send_receive_log(true);
-#else
-            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe");
-#endif
-            server.run(
-                [](int) {},
-                std::function([&](int i) { return reinterpret_cast<std::uint64_t>(server.get_handle()); }),
-                [](std::vector<int> v) { return v; }, // echo vector
-                [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; }
-                );
-            });
-
         using namespace std::chrono_literals;
-        std::this_thread::sleep_for(50ms); // give time for server to start
-#if defined(GB_DEBUGGING)
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", std::cout);
-#else
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe");
-#endif
-        gbassert(client.request<void>(0, 1));
-        gbassert(client.request<std::uint64_t>(1, 0));
-        gbassert(client.request<std::array<int, 3>>(3, 1, 2, 3).value() == std::array{ 1,2,3 });
-        std::vector<int> vec(1000000, 0);
-        vec[0] = 1; vec[1] = 2; vec[3] = 3; vec[4] = 4; vec[5] = 5; vec.back() = 12345;
-        auto response = client.request<std::vector<int>>(2, vec);
-        gbassert(response.value() == vec);
-        client.disconnect();
-        f.get();
+#if defined(GBWINDOWS)
+        {   // single server-client test
+            auto f = std::async(std::launch::async, [] {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe");
+                server.run(
+                    [](int) {},
+                    std::function([&](int i) { return reinterpret_cast<std::uint64_t>(server.get_handle()); }),
+                    [](std::vector<int> v) { return v; }, // echo vector
+                    [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; }
+                );
+                });
+
+            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "", 5);
+            gbassert(client.request<void>(0, 1));
+            gbassert(client.request<std::uint64_t>(1, 0));
+            gbassert(client.request<std::array<int, 3>>(3, 1, 2, 3).value() == std::array{ 1,2,3 });
+            std::vector<int> vec(1'000'000, 0);
+            vec[0] = 1; vec[1] = 2; vec[3] = 3; vec[4] = 4; vec[5] = 5; vec.back() = 12345;
+            auto response = client.request<std::vector<int>>(2, vec);
+            gbassert(response.value() == vec);
+            // client.disconnect(); is implicit in client destructor
+        }
+        {   // test multi-instance server
+            auto f = std::async(std::launch::async, []
+                {
+                    start_server(L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                        [](int) {},
+                        [](const std::vector<int>& v) { return v; }, // echo vector
+                        [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; }
+                        );
+                });
+            {   // first client
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "", 5);
+                gbassert(client.request<void>(0, 1));
+                gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
+                client.disconnect();
+            }
+            {   // second client
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "", 5);
+                gbassert(client.request<void>(0, 1));
+                gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
+                client.disconnect();
+            }
+            {   // two clients, overlaping requests
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+                gbassert(client.request<void>(0, 1));
+                winpipe_client_t client1(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+                gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
+                client.disconnect();
+                gbassert(client1.request<void>(0, 1));
+                gbassert(client1.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
+            }
+            
+            shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 5);
+        }
 #endif
     }
 }

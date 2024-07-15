@@ -56,6 +56,7 @@ namespace gb::yadro::util
     {
         using Ret = R;
         using Args = std::tuple<A...>;
+        using PureArgs = std::tuple<std::remove_cvref_t<A>...>;
     };
 
     template<class Fn>
@@ -64,10 +65,13 @@ namespace gb::yadro::util
     };
 
     template<class Fn>
-    using lambda_args = typename lambda_traits<Fn>::Args;
+    using lambda_args = typename lambda_traits<std::remove_cvref_t<Fn>>::Args;
 
     template<class Fn>
-    using lambda_ret = typename lambda_traits<Fn>::Ret;
+    using lambda_pure_args = typename lambda_traits<std::remove_cvref_t<Fn>>::PureArgs;
+
+    template<class Fn>
+    using lambda_ret = typename lambda_traits<std::remove_cvref_t<Fn>>::Ret;
 
     //-------------------------------------------------------------------------
     // move_forward function

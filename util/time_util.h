@@ -36,9 +36,14 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     inline auto time_stamp()
     {
-        auto tstamp{ std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) };
+        using namespace std::chrono_literals;
+        using namespace std::chrono;
+        auto now = system_clock::now();
+        auto tstamp{ system_clock::to_time_t(now) };
+        auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
 
         return (std::ostringstream{} << "[" << std::put_time(std::localtime(&tstamp), "%F %T")
+            << '.' << std::setfill('0') << std::setw(3) << ms.count()
             << "] [pid: " << ::_getpid() << ", tid: " << std::this_thread::get_id() << "]").str();
     }
 

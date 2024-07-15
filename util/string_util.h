@@ -32,9 +32,21 @@
 #include <ranges>
 #include <vector>
 #include <type_traits>
+#include <algorithm>
 
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    // converting wide string to string by casting wchar to char
+    inline auto from_wstring(std::wstring wstr)
+    {
+        std::string str(wstr.size(), 0);
+        std::transform(wstr.begin(), wstr.end(), str.begin(), [](auto wc) { return static_cast<char>(wc); });
+        return str;
+    }
+
+    //-------------------------------------------------------------------------
+    // base64 encoding utils
     constexpr auto base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     inline bool is_base64(unsigned char c) { return std::isalnum(c) || c == '+' || c == '/'; }
     //-------------------------------------------------------------------------
