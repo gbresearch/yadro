@@ -474,8 +474,8 @@ namespace gb::yadro::util
         {
             // shutdown sequence
             winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
-            // drain remaining instance, may fail if the previous client thread is too slow
-            try { winpipe_client_t(pipename, "drain", attempts, log_args...); }
+            // drain remaining instances, may fail if the previous client thread is too slow
+            try { for(;;) winpipe_client_t(pipename, "drain", attempts, log_args...); }
             catch (...) {}
 
             if(h_mutex)
