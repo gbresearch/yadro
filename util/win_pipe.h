@@ -195,6 +195,12 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     struct winpipe_client_t : winpipe_base_t
     {
+        // anonymous client
+        winpipe_client_t(const std::wstring& pipename, unsigned connection_attempts, auto&& ...log_args) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
+            : winpipe_client_t(pipename, "", connection_attempts, std::forward<decltype(log_args)>(log_args)...)
+        {}
+        
+        // named client
         winpipe_client_t(const std::wstring& pipename, std::string client_name, unsigned connection_attempts, auto&& ...log_args) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
             : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
         {

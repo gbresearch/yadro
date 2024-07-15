@@ -325,7 +325,7 @@ unset multiplot)*";
                 );
                 });
 
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "", 5);
+            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
             gbassert(client.request<void>(0, 1));
             gbassert(client.request<std::uint64_t>(1, 0));
             gbassert(client.request<std::array<int, 3>>(3, 1, 2, 3).value() == std::array{ 1,2,3 });
@@ -345,13 +345,13 @@ unset multiplot)*";
                         );
                 });
             {   // first client
-                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "", 5);
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
                 gbassert(client.request<void>(0, 1));
                 gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
                 client.disconnect();
             }
             {   // second client
-                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "", 5);
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
                 gbassert(client.request<void>(0, 1));
                 gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
                 client.disconnect();
