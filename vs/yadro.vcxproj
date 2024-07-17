@@ -149,12 +149,14 @@
     <ClInclude Include="..\util\traits.h" />
     <ClInclude Include="..\util\tuple_functions.h" />
     <ClInclude Include="..\util\win_pipe.h" />
+    <ClInclude Include="..\util\win_service.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp" />
     <ClCompile Include="..\container\tree.cpp" />
     <ClCompile Include="..\util\file_mutex.cpp" />
     <ClCompile Include="..\util\string_util.cpp" />
+    <ClCompile Include="..\util\win_service.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

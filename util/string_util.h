@@ -37,6 +37,13 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
+    // converting command line to a vector of commands
+    template<class CharT>
+    inline auto wrap_cmd(int argc, const CharT* argv[])
+    {
+        return std::vector<std::basic_string<CharT>>(std::from_range, std::span(argv, argc));
+    }
+    //-------------------------------------------------------------------------
     // converting wide string to string by casting wchar to char
     inline auto from_wstring(std::wstring wstr)
     {

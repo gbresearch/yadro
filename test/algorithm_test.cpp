@@ -206,7 +206,7 @@ namespace
             auto opt = least_squares_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
                 data, std::tuple{ -2., 2. }, std::tuple{ -3., 3. });
 
-            auto [stat, opt_map] = opt.optimize(10ms, 4);
+            auto [stat, opt_map] = opt.optimize(50ms, 4);
 
 #if defined(GB_DEBUGGING)
             std::cout << stat << "\n";
@@ -229,7 +229,7 @@ namespace
             auto opt = least_abs_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
                 data, std::tuple{ -2., 2. }, std::tuple{ -3., 3. });
 
-            auto [stat, opt_map] = opt.optimize(10ms, 4);
+            auto [stat, opt_map] = opt.optimize(50ms, 4);
 
 #if defined(GB_DEBUGGING)
             std::cout << stat << "\n";

@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -28,20 +28,33 @@
 
 #pragma once
 
-#include "file_mutex.h"
-#include "gberror.h"
-#include "gblog.h"
-#include "gbmacro.h"
-#include "gbmemory.h"
-#include "gbtest.h"
-#include "gbtimer.h"
 #include "gbwin.h"
-#include "gnuplot.h"
-#include "hash_util.h"
-#include "misc.h"
-#include "string_util.h"
-#include "time_util.h"
-#include "traits.h"
-#include "tuple_functions.h"
-#include "win_pipe.h"
-#include "win_service.h"
+#include "gblog.h"
+
+#ifdef GBWINDOWS
+
+namespace gb::yadro::util
+{
+    using main_fn_t = void(*)(int, const char*[]);
+    using cleanup_fn_t = void(*)();
+
+    // main function for starting as service or as standalone executable
+    int win_service_main(const char* service_name, main_fn_t, cleanup_fn_t, int argc, const char*[]);
+    
+    // determine if running as service
+    bool is_service();
+
+    // Installs a service in the SCM database
+    void win_service_install(const char* service_name);
+
+    // example of use:
+    //void service_fn(int argc, const char* argv[]) { /* do something */ }
+    // void cleanup() { /* do clean up when service stopped */}
+    // 
+    //int main(int argc, const char* argv[])
+    //{
+    //    return win_service_main("may_service", service_fn, cleanup, argc, argv);
+    //}
+}
+
+#endif
