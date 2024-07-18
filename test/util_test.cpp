@@ -377,7 +377,7 @@ unset multiplot)*";
                         {
                             std::vector<int> vec(1'000'000, 0);
                             vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
-                            auto response = client.request<std::vector<int>>(1, vec);
+                            auto response = client.request<1, std::vector<int>>(vec);
                             gbassert(response.value() == vec);
                         }
                     });
@@ -388,7 +388,7 @@ unset multiplot)*";
                         {
                             std::vector<int> vec(1'000'000, 0);
                             vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
-                            auto response = client.request<std::vector<int>>(1, vec);
+                            auto response = client.request<1, std::vector<int>>(vec);
                             gbassert(response.value() == vec);
                         }
                     });
@@ -399,7 +399,7 @@ unset multiplot)*";
                         {
                             std::vector<int> vec(1'000'000, 0);
                             vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
-                            auto response = client.request<std::vector<int>>(1, vec);
+                            auto response = client.request<1, std::vector<int>>(vec);
                             gbassert(response.value() == vec);
                         }
                     });

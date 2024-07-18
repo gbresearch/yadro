@@ -84,6 +84,20 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
+    // return either value of std::expected, or exception_t
+    decltype(auto) expected_value(auto&& e) requires(not std::is_void_v<decltype(e.value())>)
+    {
+        if (e.has_value())
+            return move_forward(std::forward<decltype(e)>(e).value());
+        else
+            throw exception_t("unexpected", e.error());
+    }
+    void expected_value(auto&& e) requires(std::is_void_v<decltype(e.value())>)
+    {
+        if (not e.has_value()) 
+            throw exception_t("unexpected", e.error());
+    }
+    //-------------------------------------------------------------------------
     // creating overload set through inheritance
     // e.g. auto v = overloaded([](int i, double j){ return i+j;}, [](int, float) { return 0; })(123, 1.);
     template<class...T>

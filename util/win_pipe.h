@@ -242,6 +242,7 @@ namespace gb::yadro::util
         }
 
         template<class T>
+        [[nodiscard]]
         auto request(unsigned fn_id, auto&& ...params) const
         {
             log(_client_name, ": sending request");
@@ -249,6 +250,13 @@ namespace gb::yadro::util
             if constexpr(sizeof ...(params))
                 send(std::tuple{ params... });
             return receive<std::expected<T, std::string>>();
+        }
+
+        template<auto Index, class T>
+        [[nodiscard]]
+        auto request(auto&& ...params) const
+        {
+            return request<T>(Index, std::forward<decltype(params)>(params)...);
         }
 
         void disconnect()
