@@ -345,7 +345,8 @@ namespace gb::yadro::archive
     template<class Archive, class T>
     auto serialize(Archive&& a, T&& t) requires(is_tuple_v<std::remove_cvref_t<T>>)
     {
-        std::apply(std::forward<Archive>(a), std::forward<T>(t));
+        if constexpr(std::tuple_size_v<std::remove_cvref_t<T>>)
+            std::apply(std::forward<Archive>(a), std::forward<T>(t));
     }
 
     //---------------------------------------------------------------------

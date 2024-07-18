@@ -173,6 +173,9 @@ namespace gb::yadro::util
             receive(t);
             return t;
         }
+        
+        template<class T> requires(std::is_void_v<T>)
+        auto receive() const { return std::tuple{}; }
 
         template<class T> requires(archive::is_serializable_v<owinpipe_archive, std::remove_cvref_t<T>>)
         void send(const T& t) const
@@ -243,7 +246,8 @@ namespace gb::yadro::util
         {
             log(_client_name, ": sending request");
             send(fn_id);
-            send(std::tuple{ params... });
+            if constexpr(sizeof ...(params))
+                send(std::tuple{ params... });
             return receive<std::expected<T, std::string>>();
         }
 

@@ -341,13 +341,17 @@ unset multiplot)*";
                     start_server(L"\\\\.\\pipe\\yadro\\pipe", nullptr,
                         [](int) {},
                         [](const std::vector<int>& v) { return v; }, // echo vector
-                        [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; }
+                        [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; },
+                        []{},
+                        [] { return 1; }
                         );
                 });
             {   // first client
                 winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
                 gbassert(client.request<void>(0, 1));
                 gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
+                gbassert(client.request<void>(3));
+                gbassert(client.request<int>(4) == 1);
                 client.disconnect();
             }
             {   // second client
