@@ -52,7 +52,7 @@ namespace gb::yadro::container
 #else
     using index_t = std::size_t;
 #endif
-    constexpr index_t invalid_index = -1;
+    inline constexpr index_t invalid_index = -1;
 
     namespace detail
     {

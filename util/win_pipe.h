@@ -66,9 +66,9 @@ namespace gb::yadro::util
     concept server_function_c = std::convertible_to< T, std::tuple<std::string, Functions>>;
 
     // constants
-    constexpr auto pipe_chunk_size = 1024;
-    constexpr unsigned server_disconnect = -1;
-    constexpr unsigned server_shutdown = -2;
+    inline constexpr auto pipe_chunk_size = 1024;
+    inline constexpr unsigned server_disconnect = -1;
+    inline constexpr unsigned server_shutdown = -2;
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
