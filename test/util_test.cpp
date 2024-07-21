@@ -165,6 +165,21 @@ namespace
             gbassert(std::visit(print, transform(fun, variant_type{ std::in_place_index<0>, 1 })) == "void_type");
             gbassert(std::visit(print, transform(fun, variant_type{ std::tuple(1,2) })) == "wrong_arg_type");
         }
+        {
+            std::visit([](auto&& t) {
+                if constexpr(std::convertible_to<decltype(t), std::string>)
+                    gbassert(t == "three");
+                }, tuple_to_variant(std::tuple{ 1,2.,"three" }, [](auto v)
+                    requires(std::convertible_to<decltype(v), std::string>) { return v == "three"; }));
+        }
+        {
+            tuple_visit(std::tuple{ std::tuple{"first", 1}, std::tuple{"second", 2.0}, std::tuple{"third", "three"} },
+                [](auto&& v) { return std::get<0>(v) == "third"; }, []( auto&& v)
+                requires(std::convertible_to<decltype(std::get<1>(v)), std::string>)
+                {
+                    gbassert(std::get<1>(v) == std::string("three"));
+                });
+        }
     }
 
     GB_TEST(util, misc)

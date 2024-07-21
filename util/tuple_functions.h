@@ -109,9 +109,7 @@ namespace gb::yadro::util
             constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
 
             if constexpr (N >= size)
-            {
                 throw util::exception_t{ "bad tuple index", index };
-            }
             else
             {
                 if (N == index)
@@ -122,6 +120,60 @@ namespace gb::yadro::util
         };
 
         return get_n(std::forward<decltype(t)>(t), index, std::index_sequence<0>{});
+    }
+
+    //-------------------------------------------------------------------------
+    // convert tuple to variant assigning value of the first satisfied predicate
+    constexpr auto tuple_to_variant(tuple_like auto&& t, auto&& predicate)
+        requires (not std::convertible_to<decltype(predicate), std::size_t>)
+    {
+        using variant_type = decltype(std::apply([](auto&&... v) {
+            return std::variant<std::remove_cvref_t<decltype(v)>...>{};
+            }, t));
+
+        constexpr auto get_n = []<auto N>(this auto && self, auto && t, auto && predicate, std::index_sequence<N>)
+            -> variant_type
+        {
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+
+            if constexpr (N >= size)
+                throw util::exception_t{ "bad tuple index" };
+            else
+            {
+                if constexpr (requires{{predicate(std::get<N>(t))}->std::convertible_to<bool>; })
+                    if (predicate(std::get<N>(t)))
+                        return variant_type(std::in_place_index<N>, std::get<N>(t));
+                return self(t, predicate, std::index_sequence<N + 1>{});
+            }
+        };
+
+        return get_n(std::forward<decltype(t)>(t), predicate, std::index_sequence<0>{});
+    }
+
+    //-------------------------------------------------------------------------
+    // visit tuple value by predicate
+    constexpr void tuple_visit(tuple_like auto&& t, auto&& predicate, auto&& visitor_function)
+    {
+        auto get_n = [&]<auto N>(this auto && self, std::index_sequence<N>)
+        {
+            constexpr auto size = std::tuple_size_v<std::remove_cvref_t<decltype(t)>>;
+
+            if constexpr (N >= size)
+                throw util::exception_t{ "bad tuple index" };
+            else
+            {
+                if constexpr (requires{{predicate(std::get<N>(t))}->std::convertible_to<bool>; }
+                    && requires{visitor_function(std::get<N>(t)); })
+                    if (predicate(std::get<N>(t)))
+                    {
+                        visitor_function(std::get<N>(t));
+                        return;
+                    }
+                self(std::index_sequence<N + 1>{});
+            }
+        };
+
+        get_n(std::index_sequence<0>{});
     }
 
     //-------------------------------------------------------------------------
