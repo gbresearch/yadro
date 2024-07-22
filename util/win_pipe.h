@@ -55,7 +55,7 @@ namespace gb::yadro::util
     // single-instance server
     struct winpipe_server_t;
     struct winpipe_client_t;
-    
+
     // multi-instance server
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
@@ -243,6 +243,18 @@ namespace gb::yadro::util
 
         template<class T>
         [[nodiscard]]
+        auto request(const std::string& name, auto&& ...params) const
+        {
+            log(_client_name, ": sending request for function: ", name);
+            send(0u);
+            send(name);
+            if constexpr (sizeof ...(params))
+                send(std::tuple{ params... });
+            return receive<std::expected<T, std::string>>();
+        }
+
+        template<class T>
+        [[nodiscard]]
         auto request(unsigned fn_id, auto&& ...params) const
         {
             log(_client_name, ": sending request");
@@ -306,6 +318,7 @@ namespace gb::yadro::util
 
         void run(async::threadpool<>&);
 
+        // functions are invoked by index
         template<class ...Fn>
         int run(Fn... functions)
         {
@@ -380,6 +393,80 @@ namespace gb::yadro::util
                         }
 
                     }, util::tuple_to_variant(fun_tuple, fun_index));
+            }
+        }
+
+        // functions are invoked by name
+        template<class ...Fn>
+        int run(std::tuple<const char*, Fn> ... functions)
+        {
+            if (_pipe == INVALID_HANDLE_VALUE)
+                throw util::exception_t("can't run unconnected server");
+
+            static_assert(sizeof...(Fn) != 0, "server must have at least one function");
+            auto tuple_functions{ std::tuple{functions...} };
+
+            for (;;)
+            {
+                auto call_id = receive<unsigned>();
+
+                if (call_id == server_shutdown)
+                {
+                    log("client requested shutdown");
+                    return server_shutdown;
+                }
+
+                if (call_id == server_disconnect)
+                {
+                    log("client requested disconnect");
+                    return 0;
+                }
+
+                auto fun_name = receive<std::string>();
+                log("client requested function: ", fun_name);
+
+                try
+                {
+                    std::visit([&](auto&& fn_tuple)
+                        {
+                            auto&& fn = std::get<1>(fn_tuple);
+                            using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
+                            auto params = receive<lambda_pure_args<lambda_type>>();
+                            log("received parameters for function: ", fun_name);
+                            using sent_t = std::expected< lambda_ret<lambda_type>, std::string>;
+
+                            if constexpr (std::is_void_v<lambda_ret<lambda_type>>)
+                            {
+                                std::apply([&](auto&& ...args)
+                                    {
+                                        fn(std::move(args)...); // no response required
+                                    }, params);
+                                send(sent_t{});
+                            }
+                            else
+                                send(sent_t{ std::apply([&](auto&& ...args)
+                                {
+                                    return fn(std::move(args)...);
+                                }, params) });
+                            log("sent response from function: ", fun_name);
+
+                        }, util::tuple_to_variant(tuple_functions, [&](auto&& fun_tup) { return std::get<0>(fun_tup) == fun_name; }));
+                }
+                catch (util::exception_t<>& e)
+                {
+                    log("exception: ", e.what());
+                    send(std::expected<void, std::string>{ std::unexpected{e.what()} });
+                }
+                catch (std::exception& e)
+                {
+                    log("exception: ", e.what());
+                    send(std::expected<void, std::string>{ std::unexpected{e.what()} });
+                }
+                catch (...)
+                {
+                    log("unknown exception");
+                    send(std::expected<void, std::string>{ std::unexpected{ "unknown exception" }});
+                }
             }
         }
     };

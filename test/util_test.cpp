@@ -384,7 +384,7 @@ unset multiplot)*";
                 gbassert(client1.request<void>(0, 1));
                 gbassert(client1.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
             }
-            {
+            {   // three clients async access
                 auto f1 = std::async(std::launch::async, []
                     {
                         winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
@@ -420,6 +420,78 @@ unset multiplot)*";
                     });
             }
             
+            shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 5);
+        }
+        {   // test named functions
+            auto f = std::async(std::launch::async, []
+                {
+                    start_server(L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                        std::tuple{ "zero", [](int) {} },
+                        std::tuple{ "one", [](const std::vector<int>& v) { return v; } }, // echo vector
+                        std::tuple{ "two", [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; } },
+                        std::tuple{ "three", [] {} },
+                        std::tuple{ "four", [] { return 1; } }
+                        );
+                });
+            {   // first client
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+                gbassert(client.request<void>("zero", 1));
+                gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{1,2,3});
+                gbassert(client.request<void>("three"));
+                gbassert(client.request<int>("four") == 1);
+                client.disconnect();
+            }
+            {   // second client
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+                gbassert(client.request<void>("zero", 1));
+                gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{1,2,3});
+                client.disconnect();
+            }
+            {   // two clients, overlaping requests
+                winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+                gbassert(client.request<void>("zero", 1));
+                winpipe_client_t client1(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+                gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{1,2,3});
+                client.disconnect();
+                gbassert(client1.request<void>("zero", 1));
+                gbassert(client1.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{1,2,3});
+            }
+            {   // three clients async access
+                auto f1 = std::async(std::launch::async, []
+                    {
+                        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+                        for (auto i = 0; i < 5; ++i)
+                        {
+                            std::vector<int> vec(1'000'000, 0);
+                            vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
+                            auto response = client.request<std::vector<int>>("one", vec);
+                            gbassert(response.value() == vec);
+                        }
+                    });
+                auto f2 = std::async(std::launch::async, []
+                    {
+                        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+                        for (auto i = 0; i < 5; ++i)
+                        {
+                            std::vector<int> vec(1'000'000, 0);
+                            vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
+                            auto response = client.request<std::vector<int>>("one", vec);
+                            gbassert(response.value() == vec);
+                        }
+                    });
+                auto f3 = std::async(std::launch::async, []
+                    {
+                        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "third client", 5);
+                        for (auto i = 0; i < 5; ++i)
+                        {
+                            std::vector<int> vec(1'000'000, 0);
+                            vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
+                            auto response = client.request<std::vector<int>>("one", vec);
+                            gbassert(response.value() == vec);
+                        }
+                    });
+            }
+
             shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 5);
         }
 #endif
