@@ -209,12 +209,16 @@ namespace gb::yadro::util
         {
             using namespace std::chrono_literals;
             auto attempt = 0u;
-            for(; _pipe == INVALID_HANDLE_VALUE && attempt < connection_attempts; ++attempt)
+            for (; _pipe == INVALID_HANDLE_VALUE && attempt < connection_attempts; ++attempt)
             {
                 if (attempt != 0)
                     std::this_thread::sleep_for(10ms);
 
-                _pipe = CreateFile(
+                // wait upto 10ms for pipe instance to become available, exits immediately if no active server
+                if (WaitNamedPipe(pipename.c_str(), 10))
+                {
+                    // try to grab a pipe, other client can frontrun, so CreateFile can fail
+                    _pipe = CreateFile(
                         pipename.c_str(),
                         GENERIC_READ |  // read and write access 
                         GENERIC_WRITE,
@@ -223,21 +227,22 @@ namespace gb::yadro::util
                         OPEN_EXISTING,  // opens existing pipe 
                         0,              // default attributes 
                         nullptr);       // no template file 
+                }
             }
 
-            if(_pipe == INVALID_HANDLE_VALUE)
+            if (_pipe == INVALID_HANDLE_VALUE)
             {
                 std::string str_name(pipename.size(), 0);
                 std::transform(pipename.begin(), pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
-                auto error_string = util::to_string(_client_name, ": failed to open pipe: ", str_name, ": ", GetLastError());
+                auto error_string = util::to_string("\"", _client_name, "\": failed to open pipe: ", str_name, ": ", GetLastError());
                 log(error_string);
                 throw util::exception_t(error_string);
             }
-            log(_client_name, ": opened pipe after ", attempt, " attempts");
+            log("\"", _client_name, "\": opened pipe after ", attempt, " attempts");
         }
         ~winpipe_client_t()
         {
-            log(_client_name, ": destructor");
+            log("\"", _client_name, "\": destructor");
             disconnect();
         }
 
@@ -245,7 +250,7 @@ namespace gb::yadro::util
         [[nodiscard]]
         auto request(const std::string& name, auto&& ...params) const
         {
-            log(_client_name, ": sending request for function: ", name);
+            log("\"", _client_name, "\": sending request for function: ", name);
             send(0u);
             send(name);
             if constexpr (sizeof ...(params))
@@ -257,7 +262,7 @@ namespace gb::yadro::util
         [[nodiscard]]
         auto request(unsigned fn_id, auto&& ...params) const
         {
-            log(_client_name, ": sending request");
+            log("\"", _client_name, "\": sending request");
             send(fn_id);
             if constexpr(sizeof ...(params))
                 send(std::tuple{ params... });
@@ -405,7 +410,6 @@ namespace gb::yadro::util
 
             static_assert(sizeof...(Fn) != 0, "server must have at least one function");
             auto tuple_functions{ std::tuple{functions...} };
-
             for (;;)
             {
                 auto call_id = receive<unsigned>();
@@ -517,31 +521,26 @@ namespace gb::yadro::util
         if (auto h_mutex = CreateMutex(NULL, TRUE, mutex_name.c_str()); GetLastError() == ERROR_ALREADY_EXISTS) 
         {
             // Another instance is already running
-            log->writeln("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
+            auto message = to_string("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
+            log->writeln(message);
             CloseHandle(h_mutex);
+            throw util::exception_t<>(message);
         }
         else
         {
             using namespace std::chrono_literals;
             std::vector<std::future<int>> v;
             std::atomic_bool shutdown{ false }; // signals client requesting server shutdown
-            std::atomic_bool noshutdown{ false }; // restrics where shutdown could happen
-            // guarantees that there is one instance of server running after shutdown signal
 
             while (!shutdown && v.size() < 1000) // something is wrong if there are 1000 threads pending
             {
-                // shutdown is allowed to be set
-                noshutdown = false;
-                noshutdown.notify_one();
-
                 if (v.size() % 100 == 0) // clean up periodically
                     for (auto&& f : v)
                         std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
 
                 winpipe_server_t server(pipename, log);
+                server.set_send_receive_log(true);
                 std::atomic_bool move_completed{ false };
-                noshutdown = true;
-                // shutdown is not allowed to be set till the end of the loop
 
                 auto f = std::async(std::launch::async,
                     [&] {
@@ -552,7 +551,6 @@ namespace gb::yadro::util
 
                         if (ret == server_shutdown)
                         {
-                            noshutdown.wait(true);
                             shutdown = true;
                         }
 
@@ -580,7 +578,11 @@ namespace gb::yadro::util
             // shutdown sequence
             winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
             // drain remaining instances, may fail if the previous client thread is too slow
-            try { for(;;) winpipe_client_t(pipename, "drain", attempts, log_args...); }
+            try { for (;;) 
+            { 
+                std::this_thread::sleep_for(10ms);
+                winpipe_client_t(pipename, "drain", attempts, log_args...); } 
+            }
             catch (...) {}
 
             if(h_mutex)

@@ -38,7 +38,9 @@ int main()
     tester::set_verbose(true);
     tester::set_logger("yadro-test.log", std::cout);
 #ifndef GBWINDOWS
-    tester::disable_tests("util", "win_pipe");
+    tester::disable_tests("util", "win_pipe1");
+    tester::disable_tests("util", "win_pipe2");
+    tester::disable_tests("util", "win_pipe3");
 #endif
     tester::set_policy(std::launch::deferred);
     auto success = tester::run();

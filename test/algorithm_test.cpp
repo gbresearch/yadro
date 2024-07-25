@@ -42,7 +42,7 @@ namespace
 
     //--------------------------------------------------------------------------------------------
     // test optimization with tuples of fundamental types
-    GB_TEST(algorithm, genetic_optimization_test)
+    GB_TEST(algorithm, genetic_optimization_test, std::launch::async)
     {
         using namespace std::chrono_literals;
 
@@ -72,7 +72,7 @@ namespace
 
     //--------------------------------------------------------------------------------------------
     // test optimization with tuples of ranges
-    GB_TEST(algorithm, genetic_opt_range_test)
+    GB_TEST(algorithm, genetic_opt_range_test, std::launch::async)
     {
         using namespace std::chrono_literals;
 
@@ -102,7 +102,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, genetic_optimization_mt_test)
+    GB_TEST(algorithm, genetic_optimization_mt_test, std::launch::async)
     {
         using namespace std::chrono_literals;
 
@@ -158,7 +158,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, genetic_opt_serialization_test)
+    GB_TEST(algorithm, genetic_opt_serialization_test, std::launch::async)
     {
         using namespace std::chrono_literals;
 
@@ -192,7 +192,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, regression_test)
+    GB_TEST(algorithm, regression_test, std::launch::async)
     {
         using namespace std::chrono_literals;
 

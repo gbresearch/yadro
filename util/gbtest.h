@@ -74,7 +74,12 @@ namespace gb::yadro::util
 
         static void set_policy(std::launch policy)
         {
-            for (auto& rec : get()._tests) for (auto& test : rec.second) test->_policy = policy;
+            // allow async tests to be run async or deferred
+            // tests created defferred always run deferred
+            for (auto& rec : get()._tests) 
+                for (auto& test : rec.second)
+                    if(test->_policy == std::launch::async)
+                        test->_policy = policy;
         }
         
         static void disable_suites(auto&& ... names)
@@ -116,12 +121,12 @@ namespace gb::yadro::util
                 for (auto& test : rec.second)
                 {
                     gbassert( test );
-                    auto ts = time_stamp() + " ";
 
                     if (test->_enabled)
                     {
                         auto test_run = [&] {
                             auto t = std::chrono::system_clock::now();
+                            auto ts = time_stamp() + " ";
 
                             try
                             {
@@ -167,7 +172,8 @@ namespace gb::yadro::util
                     }
                     else
                     {
-                        _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(tab_size), "DISABLED");
+                        auto ts = time_stamp() + " ";
+                        _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "DISABLED");
                     }
                 }
             }
