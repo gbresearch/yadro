@@ -238,6 +238,20 @@ namespace gb::yadro::util
                 log(error_string);
                 throw util::exception_t(error_string);
             }
+
+            // The pipe connected; change to message-read mode. 
+            if(DWORD mode = PIPE_READMODE_MESSAGE; not SetNamedPipeHandleState(
+                _pipe,    // pipe handle 
+                &mode,  // new pipe mode 
+                nullptr,     // don't set maximum bytes 
+                nullptr))    // don't set maximum time 
+            {
+                std::string str_name(pipename.size(), 0);
+                auto error_string = util::to_string("\"", _client_name, "\":  pipe: ", str_name, ": SetNamedPipeHandleState failed: ", GetLastError());
+                log(error_string);
+                throw util::exception_t(error_string);
+            }
+
             log("\"", _client_name, "\": opened pipe after ", attempt, " attempts");
         }
         ~winpipe_client_t()
