@@ -231,6 +231,22 @@ namespace gb::yadro::util
             return WaitForSingleObject(h_mutex, 0) == WAIT_OBJECT_0;
         }
 
+        template< class Rep, class Period >
+        bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration)
+        {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(timeout_duration);
+            return WaitForSingleObject(h_mutex, (DWORD)ms.count()) == WAIT_OBJECT_0;
+        }
+        
+        template< class Clock, class Duration >
+        bool try_lock_until(const std::chrono::time_point<Clock, Duration>& timeout_time)
+        {
+            if (timeout_time <= Clock::now())
+                return try_lock();
+            else
+                return try_lock_for(timeout_time - Clock::now());
+        }
+        
         // Deleted copy constructor and assignment operator to prevent copying
         global_mutex(const global_mutex&) = delete;
         global_mutex& operator=(const global_mutex&) = delete;

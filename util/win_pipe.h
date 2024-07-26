@@ -542,14 +542,12 @@ namespace gb::yadro::util
             std::vector<std::future<int>> v;
             std::atomic_bool shutdown{ false }; // signals client requesting server shutdown
 
-            while (!shutdown && v.size() < 1000) // something is wrong if there are 1000 threads pending
+            while (!shutdown && v.size() < 256) // something is wrong if there are 256 threads pending
             {
-                if (v.size() % 100 == 0) // clean up periodically
-                    for (auto&& f : v)
-                        std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
+                if (v.size() % 10 == 0) // clean up periodically
+                    std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
 
                 winpipe_server_t server(pipename, log);
-                server.set_send_receive_log(true);
                 std::atomic_bool move_completed{ false };
 
                 auto f = std::async(std::launch::async,
@@ -558,11 +556,7 @@ namespace gb::yadro::util
                         move_completed = true;
                         move_completed.notify_one();
                         auto ret = s.run(std::forward<decltype(fn)>(fn)...);
-
-                        if (ret == server_shutdown)
-                        {
-                            shutdown = true;
-                        }
+                        shutdown = ret == server_shutdown;
 
                         return ret;
                     });
@@ -588,22 +582,13 @@ namespace gb::yadro::util
         global_mutex mtx{ mutex_name };
         std::unique_lock l(mtx, std::defer_lock);
 
-        if (l.try_lock())
-            return false;
-
-        // shutdown sequence
-        winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
-        // drain remaining instances, may fail if the previous client thread is too slow
-        try {
-            for (;;)
-            {
-                std::this_thread::sleep_for(10ms);
-                winpipe_client_t(pipename, "drain", attempts, log_args...);
-            }
+        auto i = 0;
+        for (; not l.try_lock_for(10ms) && i < 10; ++i)
+        {
+            winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
         }
-        catch (...) {}
-
-        return true;
+        
+        return i > 0 && i < 10;
     }
 }
 #endif
