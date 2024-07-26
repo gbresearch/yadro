@@ -78,17 +78,19 @@ namespace gb::yadro::util
         const char* what() const noexcept { return _error_str.c_str(); }
         auto&& what_str() const noexcept { return _error_str; }
         auto&& location() const noexcept { return _loc; }
-        auto location_str() const {
-            return to_string(_loc.file_name(), '(',
-                _loc.line(), ":", _loc.column(), ") \"", _loc.function_name(), "\"");
+        auto location_str(bool include_function_name = false) const {
+            return include_function_name ? to_string(_loc.file_name(), '(',
+                _loc.line(), ":", _loc.column(), ") \"", _loc.function_name(), "\"")
+                : to_string(_loc.file_name(), '(',
+                    _loc.line(), ":", _loc.column(), ")");
         }
         auto&& stacktrace() const noexcept { return _trace; }
         auto stacktrace_str() const { return std::to_string(_trace); }
-        
-        auto message(bool include_stacktrace = false) const 
+
+        auto message(bool include_function_name = false, bool include_stacktrace = false) const
         {
-            return include_stacktrace ? _error_str + "\n" + location_str() + "\n"
-                : _error_str + "\n" + location_str() + "\n" + stacktrace_str() + "\n";
+            return include_stacktrace ? _error_str + "\n" + location_str(include_function_name) + "\n" + stacktrace_str() + "\n"
+                : _error_str + "\n" + location_str(include_function_name) + "\n";
         }
 
         void serialize(this auto&& self, auto&& archive)
@@ -165,7 +167,7 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     template<class ErrorType = generic_error>
-    [[noreturn]] inline void failed_condition(const std::string& msg = "failed condition", std::source_location location = std::source_location::current())
+    [[noreturn]] inline void throw_error(const std::string& msg = "failed condition", std::source_location location = std::source_location::current())
     {
         throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
     }
@@ -175,6 +177,15 @@ namespace gb::yadro::util
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
         test_condition<failed_assertion>(std::forward<decltype(cond)>(cond), "assertion failed", location);
+    }
+
+    //-------------------------------------------------------------------------
+    inline void must_throw(auto&& fun, std::source_location location = std::source_location::current())
+    {
+        auto thrown = false;
+        try { std::invoke(fun); }
+        catch (...) { thrown = true; }
+        gbassert(thrown, location);
     }
 
     //-------------------------------------------------------------------------

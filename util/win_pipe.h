@@ -33,6 +33,7 @@
 #include "misc.h"
 #include "time_util.h"
 #include "string_util.h"
+#include "file_mutex.h"
 #include "../archive/archive.h"
 #include "../async/threadpool.h"
 
@@ -59,7 +60,7 @@ namespace gb::yadro::util
     // multi-instance server
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
-    void shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args);
+    bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args);
 
     // server function concept
     template<class T, class Functions>
@@ -504,8 +505,8 @@ namespace gb::yadro::util
             PIPE_UNLIMITED_INSTANCES, // max. instances (255)
             buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
             buf_size,                  // input buffer size 
-            500,                        // client time-out 
-            nullptr);                    // default security attribute             
+            NMPWAIT_WAIT_FOREVER,      // client time-out in ms
+            nullptr);                  // default security attribute             
 
             _pipe == INVALID_HANDLE_VALUE)
         {
@@ -532,15 +533,10 @@ namespace gb::yadro::util
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
         auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
-        if (auto h_mutex = CreateMutex(NULL, TRUE, mutex_name.c_str()); GetLastError() == ERROR_ALREADY_EXISTS) 
-        {
-            // Another instance is already running
-            auto message = to_string("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
-            log->writeln(message);
-            CloseHandle(h_mutex);
-            throw util::exception_t<>(message);
-        }
-        else
+        global_mutex mtx{ mutex_name };
+        std::unique_lock l(mtx, std::defer_lock);
+
+        if (l.try_lock())
         {
             using namespace std::chrono_literals;
             std::vector<std::future<int>> v;
@@ -570,39 +566,44 @@ namespace gb::yadro::util
 
                         return ret;
                     });
-                
+
                 move_completed.wait(false);
 
                 v.push_back(std::move(f));
             }
-
-            if(h_mutex)
-                CloseHandle(h_mutex);
+        }
+        else
+        {
+            auto message = to_string("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
+            throw_error(message);
         }
     }
 
     //----------------------------------------------------------------------------------------------
-    inline void shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args)
+    inline bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args)
     {
         using namespace std::chrono_literals;
         auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
 
-        if (auto h_mutex = CreateMutex(NULL, TRUE, mutex_name.c_str()); GetLastError() == ERROR_ALREADY_EXISTS)
-        {
-            // shutdown sequence
-            winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
-            // drain remaining instances, may fail if the previous client thread is too slow
-            try { for (;;) 
-            { 
-                std::this_thread::sleep_for(10ms);
-                winpipe_client_t(pipename, "drain", attempts, log_args...); } 
-            }
-            catch (...) {}
+        global_mutex mtx{ mutex_name };
+        std::unique_lock l(mtx, std::defer_lock);
 
-            if(h_mutex)
-                CloseHandle(h_mutex);
+        if (l.try_lock())
+            return false;
+
+        // shutdown sequence
+        winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
+        // drain remaining instances, may fail if the previous client thread is too slow
+        try {
+            for (;;)
+            {
+                std::this_thread::sleep_for(10ms);
+                winpipe_client_t(pipename, "drain", attempts, log_args...);
+            }
         }
+        catch (...) {}
+
+        return true;
     }
 }
-
 #endif

@@ -33,7 +33,7 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
-    file_mutex::file_mutex(const char* file_name)
+    global_mutex::global_mutex(const char* file_name)
     {
         _handle = ::open(file_name, O_RDWR);
         if (_handle == invalid_handle)
@@ -43,7 +43,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    file_mutex::~file_mutex()
+    global_mutex::~global_mutex()
     {
         if (_handle != invalid_handle)
         {
@@ -52,7 +52,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    void file_mutex::lock()
+    void global_mutex::lock()
     {
         // acquire file lock
         struct flock lock;
@@ -65,7 +65,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    bool file_mutex::try_lock()
+    bool global_mutex::try_lock()
     {
         struct flock lock;
         lock.l_type = F_WRLCK;
@@ -80,7 +80,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    void file_mutex::unlock()
+    void global_mutex::unlock()
     {
         struct flock lock;
         lock.l_type = F_UNLCK;
@@ -91,7 +91,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    void file_mutex::lock_shared()
+    void global_mutex::lock_shared()
     {
         struct flock lock;
         lock.l_type = F_RDLCK;
@@ -102,7 +102,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    bool file_mutex::try_lock_shared()
+    bool global_mutex::try_lock_shared()
     {
         struct flock lock;
         lock.l_type = F_RDLCK;
@@ -115,7 +115,7 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    void file_mutex::unlock_shared()
+    void global_mutex::unlock_shared()
     {
         struct flock lock;
         lock.l_type = F_UNLCK;

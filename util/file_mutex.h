@@ -30,7 +30,11 @@
 
 #include <thread>
 #include <chrono>
+#include <concepts>
+#include <string>
 #include "gberror.h"
+#include "string_util.h"
+#include "gbwin.h"
 
 #ifdef POSIX
 namespace gb::yadro::util
@@ -58,16 +62,16 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // global mutex for threads and processes
     //-------------------------------------------------------------------------
-    struct file_mutex
+    struct global_mutex
     {
         // constructors
-        file_mutex() = default;
+        global_mutex() = default;
 
-        file_mutex(const char* file_name);
+        global_mutex(const char* file_name);
 
-        file_mutex(const file_mutex& other) = delete;
+        global_mutex(const global_mutex& other) = delete;
 
-        ~file_mutex();
+        ~global_mutex();
 
         // lock operations
         void lock();
@@ -166,5 +170,74 @@ namespace gb::yadro::util
         unsigned long long unique_tid = syscall(SYS_gettid);
     };
 
+}
+#endif
+
+#ifdef GBWINDOWS
+namespace gb::yadro::util
+{
+    struct global_mutex 
+    {
+        explicit global_mutex(const std::string& name)
+            : h_mutex
+            { CreateMutexA(
+                nullptr,           // Default security attributes
+                false,          // Initially not owned
+                name.c_str())    // Name of the mutex
+            },
+            _name(name)
+        {
+            if (!h_mutex)
+                throw_error(to_string("Failed to create mutex: ", _name, ", error: ", GetLastError()));
+        }
+
+        explicit global_mutex(const std::wstring& name)
+            : h_mutex
+            { CreateMutexW(
+                nullptr,           // Default security attributes
+                false,          // Initially not owned
+                name.c_str())    // Name of the mutex
+            },
+            _name(from_wstring(name))
+        {
+            if (!h_mutex)
+                throw_error(to_string("Failed to create mutex: ", _name, ", error: ", GetLastError()));
+        }
+
+        // Destructor that closes the mutex handle
+        ~global_mutex() 
+        {
+            if (h_mutex) 
+                CloseHandle(h_mutex);
+        }
+
+        // Lock the mutex, blocking until it is available
+        void lock() 
+        {
+            if (WaitForSingleObject(h_mutex, INFINITE) != WAIT_OBJECT_0)
+                throw_error(to_string("Failed to lock mutex: ", _name, ", error: ", GetLastError()));
+        }
+
+        // Unlock the mutex
+        void unlock() 
+        {
+            if (!ReleaseMutex(h_mutex))
+                throw_error(to_string("Failed to unlock mutex: ", _name, ", error: ", GetLastError()));
+        }
+
+        // Try to lock the mutex, returning immediately
+        bool try_lock() 
+        {
+            return WaitForSingleObject(h_mutex, 0) == WAIT_OBJECT_0;
+        }
+
+        // Deleted copy constructor and assignment operator to prevent copying
+        global_mutex(const global_mutex&) = delete;
+        global_mutex& operator=(const global_mutex&) = delete;
+
+    private:
+        HANDLE h_mutex; // Handle to the mutex
+        std::string _name;
+    };
 }
 #endif

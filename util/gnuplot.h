@@ -532,7 +532,7 @@ namespace gb::yadro::util
         }
         else
         {
-            failed_condition<gnuplot_error>("Path is not set");
+            throw_error<gnuplot_error>("Path is not set");
         }
      
         _exe_pipe = std::shared_ptr<FILE>(exe_pipe, [](auto&& p) { _pclose(p); });

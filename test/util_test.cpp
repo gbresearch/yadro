@@ -503,8 +503,12 @@ unset multiplot)*";
                     }
                 });
         }
-
-        shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10);
+        
+        // the server is running, starting another one must fail
+        must_throw([&] { start_server(L"\\\\.\\pipe\\yadro\\pipe", std::make_unique<logger>(std::cout), [] {}); });
+        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
+        // shutting down server the second time should fail
+        gbassert(not shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
 #endif
     }
 }
