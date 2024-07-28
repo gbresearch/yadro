@@ -43,6 +43,7 @@
 #include <memory>
 #include <atomic>
 #include <type_traits>
+#include <cstdint>
 
 #ifdef GBWINDOWS
 
@@ -68,8 +69,8 @@ namespace gb::yadro::util
 
     // constants
     inline constexpr auto pipe_chunk_size = 1024;
-    inline constexpr unsigned server_disconnect = -1;
-    inline constexpr unsigned server_shutdown = -2;
+    inline constexpr std::uint32_t server_disconnect = -1;
+    inline constexpr std::uint32_t server_shutdown = -2;
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
@@ -275,7 +276,7 @@ namespace gb::yadro::util
 
         template<class T>
         [[nodiscard]]
-        auto request(unsigned fn_id, auto&& ...params) const
+        auto request(std::uint32_t fn_id, auto&& ...params) const
         {
             log("\"", _client_name, "\": sending request");
             send(fn_id);
@@ -295,7 +296,7 @@ namespace gb::yadro::util
         {
             if (_pipe != INVALID_HANDLE_VALUE)
             {
-                send<unsigned>(server_disconnect);
+                send<std::uint32_t>(server_disconnect);
                 CloseHandle(_pipe);
                 _pipe = INVALID_HANDLE_VALUE;
             }
@@ -305,7 +306,7 @@ namespace gb::yadro::util
         {
             if (_pipe != INVALID_HANDLE_VALUE)
             {
-                send<unsigned>(server_shutdown);
+                send<std::uint32_t>(server_shutdown);
                 CloseHandle(_pipe);
                 _pipe = INVALID_HANDLE_VALUE;
             }
@@ -350,7 +351,7 @@ namespace gb::yadro::util
 
             for (;;)
             {
-                auto fun_index = receive<unsigned>();
+                auto fun_index = receive<std::uint32_t>();
 
                 if (fun_index == server_shutdown)
                 {
@@ -427,7 +428,7 @@ namespace gb::yadro::util
             auto tuple_functions{ std::tuple{functions...} };
             for (;;)
             {
-                auto call_id = receive<unsigned>();
+                auto call_id = receive<std::uint32_t>();
 
                 if (call_id == server_shutdown)
                 {
@@ -494,7 +495,7 @@ namespace gb::yadro::util
     inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, auto&& ...log_args)
         : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...)
     {
-        const DWORD buf_size = 4096; // unsigned long (Windows doesn't have t honor it)
+        const DWORD buf_size = 4096; // unsigned long (Windows doesn't have to honor it)
 
         if (_pipe = CreateNamedPipe(
             pipename.c_str(),             // pipe name 
