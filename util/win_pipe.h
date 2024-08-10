@@ -82,7 +82,7 @@ namespace gb::yadro::util
         {
             // write in chunks
             char next_chunk[] = "next\0";
-
+            
             for (std::streamsize sent_bytes = 0; sent_bytes < size;)
             {
                 // read request for the next chunk
@@ -96,7 +96,8 @@ namespace gb::yadro::util
                 if (DWORD bytes_written{};
                     not WriteFile(_pipe, &c[sent_bytes], (DWORD)bytes_to_send, &bytes_written, nullptr)
                     || bytes_written != bytes_to_send)
-                    throw util::exception_t("owinpipe_stream failed to write chunk to pipe: ", GetLastError());
+                    throw util::exception_t(std::format("owinpipe_stream failed to write chunk to pipe, error: {}, bytes requested: {}, sent bytes: {}, bytes written: {}", 
+                        GetLastError(), size, sent_bytes, bytes_written));
                 else
                     sent_bytes += bytes_written;
             }
@@ -126,9 +127,12 @@ namespace gb::yadro::util
                     || bytes_written != (DWORD)sizeof(next_chunk))
                     throw util::exception_t("iwinpipe_stream failed to request next chunk: ", GetLastError());
 
+                auto bytes_to_read = std::min<std::streamsize>(size - received_bytes, pipe_chunk_size);
+
                 if (DWORD bytes_read{};
-                    not ReadFile(_pipe, &c[received_bytes], pipe_chunk_size, &bytes_read, nullptr) || bytes_read == 0)
-                    throw util::exception_t("iwinpipe_stream failed to read chunk from pipe: ", GetLastError());
+                    not ReadFile(_pipe, &c[received_bytes], (DWORD)bytes_to_read, &bytes_read, nullptr) || bytes_read == 0)
+                    throw util::exception_t(std::format("iwinpipe_stream failed to read chunk from pipe, error: {}, bytes requested: {}, received bytes: {}, bytes read: {}, buffer location: {}",
+                        GetLastError(), size, received_bytes, bytes_read, (void*)(c)));
                 else
                     received_bytes += bytes_read;
             }

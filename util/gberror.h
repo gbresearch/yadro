@@ -70,7 +70,7 @@ namespace gb::yadro::util
     {
         exception_t(std::string error_str,
             const std::source_location& loc = std::source_location::current(),
-            std::stacktrace trace = std::stacktrace::current()) //requires(std::same_as<Data, void>)
+            std::stacktrace trace = std::stacktrace::current())
             : _error_str{ std::move(error_str) },
             _loc{ loc }, _trace{ trace }
         {}
