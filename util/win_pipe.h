@@ -80,17 +80,8 @@ namespace gb::yadro::util
 
         void write(const char_type* c, std::streamsize size)
         {
-            // write in chunks
-            char next_chunk[] = "next\0";
-            
             for (std::streamsize sent_bytes = 0; sent_bytes < size;)
             {
-                // read request for the next chunk
-                if (DWORD bytes_read{};
-                    not ReadFile(_pipe, next_chunk, (DWORD)sizeof(next_chunk), &bytes_read, nullptr)
-                    || bytes_read != (DWORD)sizeof(next_chunk))
-                    throw util::exception_t("owinpipe_stream failed to receive next chunk request: ", GetLastError());
-
                 auto bytes_to_send = size - sent_bytes > pipe_chunk_size ? pipe_chunk_size : size - sent_bytes;
 
                 if (DWORD bytes_written{};
@@ -116,17 +107,8 @@ namespace gb::yadro::util
 
         void read(char_type* c, std::streamsize size)
         {
-            // read in chunks
-            char next_chunk[] = "next\0";
-
             for (std::streamsize received_bytes = 0; received_bytes < size; gbassert(received_bytes <= size))
             {
-                // request the next chunk
-                if (DWORD bytes_written{};
-                    not WriteFile(_pipe, next_chunk, (DWORD)sizeof(next_chunk), &bytes_written, nullptr)
-                    || bytes_written != (DWORD)sizeof(next_chunk))
-                    throw util::exception_t("iwinpipe_stream failed to request next chunk: ", GetLastError());
-
                 auto bytes_to_read = std::min<std::streamsize>(size - received_bytes, pipe_chunk_size);
 
                 if (DWORD bytes_read{};
