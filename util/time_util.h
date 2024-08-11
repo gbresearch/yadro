@@ -62,4 +62,10 @@ namespace gb::yadro::util
             + std::chrono::seconds(secs);
     }
 
+    //-------------------------------------------------------------------------
+    inline std::tm unpack_time(std::chrono::time_point<std::chrono::system_clock> tp = std::chrono::system_clock::now())
+    {
+        std::time_t tp_c = std::chrono::system_clock::to_time_t(tp);
+        return *std::localtime(&tp_c);
+    }
 }

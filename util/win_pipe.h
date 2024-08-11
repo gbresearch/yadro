@@ -516,16 +516,38 @@ namespace gb::yadro::util
     }
 
     //----------------------------------------------------------------------------------------------
+    inline auto is_server_running(const std::wstring& pipename)
+    {
+        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+        global_mutex mtx{ mutex_name };
+        return !std::unique_lock(mtx, std::defer_lock).try_lock();
+    }
+
+    //----------------------------------------------------------------------------------------------
+    template< class Rep, class Period >
+    inline auto is_server_running(const std::wstring& pipename, const std::chrono::duration<Rep, Period>& timeout_duration)
+    {
+        using namespace std::chrono_literals;
+        const auto sleep_duration = 100ms;
+        
+        for(auto start = std::chrono::high_resolution_clock::now(); !is_server_running(pipename)
+            && std::chrono::high_resolution_clock::now() - start < timeout_duration;)
+            std::this_thread::sleep_for(sleep_duration);
+
+        return is_server_running(pipename);
+    }
+
+    //----------------------------------------------------------------------------------------------
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
         auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
         global_mutex mtx{ mutex_name };
         std::unique_lock l(mtx, std::defer_lock);
+        using namespace std::chrono_literals;
 
-        if (l.try_lock())
+        if (l.try_lock_for(100ms))
         {
-            using namespace std::chrono_literals;
             std::vector<std::future<int>> v;
             std::atomic_bool shutdown{ false }; // signals client requesting server shutdown
 
@@ -564,18 +586,16 @@ namespace gb::yadro::util
     inline bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args)
     {
         using namespace std::chrono_literals;
-        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
-
-        global_mutex mtx{ mutex_name };
-        std::unique_lock l(mtx, std::defer_lock);
-
-        auto i = 0;
-        for (; not l.try_lock_for(10ms) && i < 10; ++i)
-        {
-            winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
+        try {
+            // make at most 10 attemps to shutdown server
+            for (auto i = 0; is_server_running(pipename, 100ms) && i < 10; ++i)
+            {
+                winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
+            }
         }
-        
-        return i > 0 && i < 10;
+        catch (...) {}
+
+        return !is_server_running(pipename);
     }
 }
 #endif
