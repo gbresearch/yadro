@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <utility>
 #include <optional>
+#include <filesystem>
 
 #include "../util/gbutil.h"
 #include "../async/threadpool.h"
@@ -83,7 +84,7 @@ namespace gb::yadro::algorithm
         //------------------------------------------------------------------------------------------
         // constructor takes comparison function and loads optimizer state from specified archive file
         //------------------------------------------------------------------------------------------
-        genetic_optimization_t(const std::string& archive_file, Fn target_fn, CompareFn compare,
+        genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn, CompareFn compare,
             std::tuple<Types, Types> ... min_max)
             requires ((std::invocable<Fn, Types...>
         && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
@@ -95,7 +96,7 @@ namespace gb::yadro::algorithm
         //------------------------------------------------------------------------------------------
         // constructor uses std::less<> as comparison and loads optimizer state from specified archive file
         //------------------------------------------------------------------------------------------
-        genetic_optimization_t(const std::string& archive_file, Fn target_fn,
+        genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn,
             std::tuple<Types, Types> ... min_max)
             requires (std::invocable<Fn, Types...>)
         : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(std::less<>{})
@@ -106,7 +107,7 @@ namespace gb::yadro::algorithm
         //------------------------------------------------------------------------------------------
         // save optimizer state to archive file
         //------------------------------------------------------------------------------------------
-        void save(const std::string& archive_file) const
+        void save(const std::filesystem::path& archive_file) const
         {
             std::ofstream ofs(archive_file, std::ios::binary);
             serialize(gb::yadro::archive::bin_archive(ofs));
@@ -115,7 +116,7 @@ namespace gb::yadro::algorithm
         //------------------------------------------------------------------------------------------
         // load optimizer state from archive file
         //------------------------------------------------------------------------------------------
-        void load(const std::string& archive_file)
+        void load(const std::filesystem::path& archive_file)
         {
             std::ifstream ifs(archive_file, std::ios::binary);
             serialize(gb::yadro::archive::bin_archive(ifs));
