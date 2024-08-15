@@ -44,6 +44,7 @@
 #include <atomic>
 #include <type_traits>
 #include <cstdint>
+#include <semaphore>
 
 #ifdef GBWINDOWS
 
@@ -557,20 +558,19 @@ namespace gb::yadro::util
                     std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
 
                 winpipe_server_t server(pipename, log);
-                std::atomic_bool move_completed{ false };
+                std::binary_semaphore move_completed(0);
 
                 auto f = std::async(std::launch::async,
                     [&] {
                         auto s{ std::move(server) };
-                        move_completed = true;
-                        move_completed.notify_one();
+                        move_completed.release();
                         auto ret = s.run(std::forward<decltype(fn)>(fn)...);
                         shutdown = ret == server_shutdown;
 
                         return ret;
                     });
 
-                move_completed.wait(false);
+                move_completed.acquire();
 
                 v.push_back(std::move(f));
             }
