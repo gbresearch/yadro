@@ -68,7 +68,7 @@ namespace gb::yadro::algorithm
         genetic_optimization_t(Fn target_fn, CompareFn compare, std::tuple<Types, Types> ... min_max)
             requires ((std::invocable<Fn, Types...>
         && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
-            : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(compare)
+            : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(compare)
         {
         }
 
@@ -77,7 +77,7 @@ namespace gb::yadro::algorithm
         //------------------------------------------------------------------------------------------
         genetic_optimization_t(Fn target_fn, std::tuple<Types, Types> ... min_max)
             requires (std::invocable<Fn, Types...>)
-        : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(std::less<>{})
+        : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(std::less<>{})
         {
         }
 
@@ -88,7 +88,7 @@ namespace gb::yadro::algorithm
             std::tuple<Types, Types> ... min_max)
             requires ((std::invocable<Fn, Types...>
         && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
-            : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(compare)
+            : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(compare)
         {
             load(archive_file);
         }
@@ -99,7 +99,7 @@ namespace gb::yadro::algorithm
         genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn,
             std::tuple<Types, Types> ... min_max)
             requires (std::invocable<Fn, Types...>)
-        : _target_fn(target_fn), _min_max_params(min_max...), _opt_map(std::less<>{})
+        : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(std::less<>{})
         {
             load(archive_file);
         }
