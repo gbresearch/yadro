@@ -252,7 +252,7 @@ namespace gb::yadro::archive
         void write(const char_type* c, std::streamsize size)
         {
             auto prev_size = _buf.size();
-            _buf.resize(static_cast<std::size_t>(prev_size + size));
+            _buf.resize(static_cast<decltype(prev_size)>(prev_size + size));
             std::copy_n(c, size, _buf.begin() + prev_size);
         }
     private:
@@ -281,11 +281,12 @@ namespace gb::yadro::archive
         {
             assert(_read_pos + size <= _buf.size());
             std::copy_n(_buf.begin() + _read_pos, size, c);
-            _read_pos += static_cast<std::size_t>(size);
+            _read_pos += static_cast<size_type>(size);
         }
     private:
         container_t _buf;
-        std::size_t _read_pos{};
+        using size_type = typename container_t::size_type;
+        size_type _read_pos{};
     };
 
 

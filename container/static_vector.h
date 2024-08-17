@@ -34,25 +34,24 @@
 #include <cstddef>
 #include <iterator>
 #include <span>
+#include <ranges>
+#include <cstdint>
 #include "../util/gberror.h"
 #include "../util/misc.h"
 #include "../util/string_util.h"
 
 namespace gb::yadro::container
 {
-    //*****************************************
-    template<class T, size_t N>
-    class static_vector
+    //----------------------------------------------------------------------------------------------
+    // requires default-initializable types
+    template<class T, auto N>
+    struct static_vector
     {
-        size_t _size = 0;
-        std::array<T, N> _buffer;
-
-    public:
         //----------------------------
         // typedefs
         //----------------------------
         using value_type = T;
-        using size_type = std::size_t;
+        using size_type = decltype(N);
         using difference_type = std::ptrdiff_t;
         using reference = value_type&;
         using const_reference = const value_type&;
@@ -63,7 +62,7 @@ namespace gb::yadro::container
         using reverse_iterator = typename std::array<T, N>::reverse_iterator;
         using const_reverse_iterator = typename std::array<T, N>::const_reverse_iterator;
 
-        //----------------------------
+        //----------------------------------------------------------------------------------------------
         template<class Archive>
         void serialize(Archive&& a)
         {
@@ -71,79 +70,80 @@ namespace gb::yadro::container
             a(std::span(begin(), end()));
         }
 
-        //----------------------------
+        //----------------------------------------------------------------------------------------------
         static_vector() = default;
 
-        //----------------------------
-        explicit static_vector(size_type count, const T& value = T())
+        //----------------------------------------------------------------------------------------------
+        constexpr explicit static_vector(size_type count, const T& value = T())
             : _size(count)
         {
             util::gbassert(count <= N);
-            std::uninitialized_fill_n(_buffer.begin(), _size, value);
+            std::ranges::uninitialized_fill_n(_buffer.begin(), _size, value);
         }
 
-        //----------------------------
-        template<std::forward_iterator It1, std::forward_iterator It2>
-        static_vector(It1 first, It2 last)  requires(std::equality_comparable_with<It1, It2>)
+        //----------------------------------------------------------------------------------------------
+        template<std::forward_iterator It1, std::sentinel_for<It1> It2>
+        constexpr static_vector(It1 first, It2 last)  requires(std::equality_comparable_with<It1, It2>)
         {
-            util::gbassert(std::distance(first, last) <= N);
-            auto i = std::uninitialized_copy(first, last, _buffer.begin());
-            _size = std::distance(_buffer.begin(), i);
+            auto [from_it, to_it] = std::ranges::uninitialized_copy(first, last, _buffer.begin(), _buffer.end());
+            _size = static_cast<size_type>(std::distance(_buffer.begin(), to_it));
+            util::gbassert(from_it == last); // whole input range copied
         }
 
-        //----------------------------
-        template<class T1, size_t N1>
-        explicit static_vector(const static_vector<T1, N1>& p) : static_vector(p.begin(), p.end())
+        //----------------------------------------------------------------------------------------------
+        template<class T1, size_type N1>
+        constexpr explicit static_vector(const static_vector<T1, N1>& p) : static_vector(p.begin(), p.end())
         {
         }
 
-        //----------------------------
-        template<class T1, size_t N1>
+        //----------------------------------------------------------------------------------------------
+        template<class T1, size_type N1>
         static_vector& operator = (const static_vector<T1, N1>& p)
         {
             assign(p.begin(), p.end());
             return *this;
         }
-        //----------------------------
-        iterator        begin() { return _buffer.begin(); }
-        //----------------------------
-        const_iterator  begin() const { return _buffer.begin(); }
-        //----------------------------
-        iterator        end() { return _buffer.begin() + _size; }
-        //----------------------------
-        const_iterator  end() const { return _buffer.begin() + _size; }
-        //----------------------------
-        reference operator[](size_type n)
+        //----------------------------------------------------------------------------------------------
+        constexpr iterator begin() { return _buffer.begin(); }
+        //----------------------------------------------------------------------------------------------
+        constexpr const_iterator begin() const { return _buffer.begin(); }
+        //----------------------------------------------------------------------------------------------
+        constexpr iterator end() { return _buffer.begin() + _size; }
+        //----------------------------------------------------------------------------------------------
+        constexpr const_iterator end() const { return _buffer.begin() + _size; }
+        //----------------------------------------------------------------------------------------------
+        constexpr reference operator[](size_type n)
         {
-            util::gbassert(n < _size);
+            assert(n < _size);
             return _buffer[n];
         }
-        //----------------------------
-        const_reference operator[](size_type n) const
+        //----------------------------------------------------------------------------------------------
+        constexpr const_reference operator[](size_type n) const
         {
-            util::gbassert(n < _size);
+            assert(n < _size);
             return _buffer[n];
         }
-        //----------------------------
-        reference at(size_type n)
+        //----------------------------------------------------------------------------------------------
+        constexpr reference at(size_type n)
         {
             return _buffer.at(n);
         }
-        //----------------------------
-        const_reference at(size_type n) const
+        //----------------------------------------------------------------------------------------------
+        constexpr const_reference at(size_type n) const
         {
             return _buffer.at(n);
         }
-        //----------------------------
-        size_type size() const { return _size; }
-        //----------------------------
-        void swap(static_vector& p)
+        //----------------------------------------------------------------------------------------------
+        constexpr size_type size() const { return _size; }
+        //----------------------------------------------------------------------------------------------
+        constexpr void swap(static_vector& p)
         {
             _buffer.swap(p._buffer);
             std::swap(_size, p._size);
         }
-        //----------------------------
-        void assign(size_type count, const T& value)
+        //----------------------------------------------------------------------------------------------
+        template<class U>
+        constexpr void assign(size_type count, const U& value)
         {
             util::gbassert(count <= N);
             size_type i = 0;
@@ -154,11 +154,10 @@ namespace gb::yadro::container
             for (; i < count; ++i)
                 push_back(value);
         }
-        //----------------------------
-        template<std::forward_iterator Iterator>
-        void assign(Iterator first, Iterator last)
+        //----------------------------------------------------------------------------------------------
+        template<std::forward_iterator Iterator, std::sentinel_for<Iterator> S>
+        constexpr void assign(Iterator first, S last)
         {
-            util::gbassert(std::distance(first, last) <= N);
             size_type count = 0;
             for (; first != last && count < _size; ++count, ++first)
                 _buffer[count] = *first;
@@ -167,48 +166,48 @@ namespace gb::yadro::container
             for (; first != last; ++first)
                 push_back(*first);
         }
-        //----------------------------
-        reference       back() { return _buffer[_size - 1]; }
-        //----------------------------
-        const_reference back() const { return _buffer[_size - 1]; }
-        //----------------------------
-        reference       front() { return _buffer[0]; }
-        //----------------------------
-        const_reference front() const { return _buffer[0]; }
-        //----------------------------
+        //----------------------------------------------------------------------------------------------
+        constexpr reference back() { return _buffer[_size - 1]; }
+        //----------------------------------------------------------------------------------------------
+        constexpr const_reference back() const { return _buffer[_size - 1]; }
+        //----------------------------------------------------------------------------------------------
+        constexpr reference front() { return _buffer[0]; }
+        //----------------------------------------------------------------------------------------------
+        constexpr const_reference front() const { return _buffer[0]; }
+        //----------------------------------------------------------------------------------------------
         template<class U>
-        void push_back(U&& value)
+        constexpr void push_back(U&& value)
         {
-            util::gbassert(_size < N);
-            ::new (static_cast<void*>(std::addressof(_buffer[_size]))) value_type(std::forward<U>(value));
+            util::gbassert(!full());
+            std::construct_at(std::addressof(_buffer[_size]), std::forward<U>(value));
             ++_size;
         }
-        //----------------------------
+        //----------------------------------------------------------------------------------------------
         template<class ...U>
-        void emplace_back(U&&... value)
+        constexpr void emplace_back(U&&... value)
         {
             util::gbassert(_size < N);
-            ::new (static_cast<void*>(std::addressof(_buffer[_size]))) value_type(std::forward<U>(value)...);
+            std::construct_at(std::addressof(_buffer[_size]), std::forward<U>(value)...);
             ++_size;
         }
-        //----------------------------
-        void pop_back()
+        //----------------------------------------------------------------------------------------------
+        constexpr void pop_back()
         {
             util::gbassert(_size > 0);
-            back().~T();
+            std::destroy_at(std::addressof(back()));
             --_size;
         }
-        //----------------------------
+        //----------------------------------------------------------------------------------------------
         template<class U>
-        iterator insert(iterator position, U&& value)
+        constexpr iterator insert(iterator position, U&& value)
         {
             push_back(std::forward<U>(value));
             for (auto i = end() - 1; i != position; --i)
                 std::swap(*i, *(i - 1));
             return position;
         }
-        //----------------------------
-        iterator insert(iterator position, size_type count, const T& value)
+        //----------------------------------------------------------------------------------------------
+        constexpr iterator insert(iterator position, size_type count, const T& value)
         {
             static_vector<T, N> tmp(begin(), position);
             for (; count; --count)
@@ -219,9 +218,9 @@ namespace gb::yadro::container
             *this = std::move(tmp);
             return position;
         }
-        //----------------------------
-        template<std::forward_iterator It>
-        auto insert(iterator position, It first, It last)
+        //----------------------------------------------------------------------------------------------
+        template<std::forward_iterator It, std::sentinel_for<It> S>
+        constexpr auto insert(iterator position, It first, S last)
         {
             static_vector<T, N> tmp(begin(), position);
             for (; first != last; ++first)
@@ -232,24 +231,24 @@ namespace gb::yadro::container
             *this = std::move(tmp);
             return position;
         }
-        //----------------------------
-        void clear() { while (!empty()) pop_back(); }
-        //----------------------------
-        size_type capacity() const { return N; }
-        //----------------------------
-        bool empty() const { return _size == 0; }
-        //----------------------------
-        bool full() const { return _size == N; }
-        //----------------------------
-        iterator erase(iterator position)
+        //----------------------------------------------------------------------------------------------
+        constexpr void clear() { while (!empty()) pop_back(); }
+        //----------------------------------------------------------------------------------------------
+        constexpr size_type capacity() const { return N; }
+        //----------------------------------------------------------------------------------------------
+        constexpr bool empty() const { return _size == 0; }
+        //----------------------------------------------------------------------------------------------
+        constexpr bool full() const { return _size == N; }
+        //----------------------------------------------------------------------------------------------
+        constexpr iterator erase(iterator position)
         {
             util::gbassert(_size > 0);
             std::move(position + 1, end(), position);
             pop_back();
             return position;
         }
-        //----------------------------
-        iterator erase(iterator first, iterator last)
+        //----------------------------------------------------------------------------------------------
+        constexpr iterator erase(iterator first, iterator last)
         {
             util::gbassert(_size > 0);
             std::move(last, end(), first);
@@ -257,8 +256,8 @@ namespace gb::yadro::container
                 pop_back();
             return first;
         }
-        //----------------------------
-        void resize(size_type size, const T& value = T())
+        //----------------------------------------------------------------------------------------------
+        constexpr void resize(size_type size, const T& value = T())
         {
             util::gbassert(size <= N);
             while (size < _size)
@@ -266,10 +265,13 @@ namespace gb::yadro::container
             while (size > _size)
                 push_back(value);
         }
+    private:
+        size_type _size = 0;
+        [[no_unique_address]] std::array<T, N> _buffer;
 
-        //---------------------
+        //----------------------------------------------------------------------------------------------
         template<class Other>
-        friend auto operator<=> (const static_vector& v1, const Other& v2) requires(std::three_way_comparable_with<T, typename Other::value_type>)
+        friend constexpr auto operator<=> (const static_vector& v1, const Other& v2) requires(std::three_way_comparable_with<T, typename Other::value_type>)
             && requires(const Other& v)
         {
             v.begin();
@@ -279,12 +281,12 @@ namespace gb::yadro::container
             return util::compare(std::span(v1.begin(), v1.size()), std::span(v2.begin(), v2.size()));
         }
 
-        //---------------------
+        //----------------------------------------------------------------------------------------------
         template<class Other>
-        friend auto operator== (const static_vector& v1, const Other& v2) { return std::is_eq(v1 <=> v2); }
+        friend constexpr auto operator== (const static_vector& v1, const Other& v2) { return std::is_eq(v1 <=> v2); }
 
-        //---------------------
+        //----------------------------------------------------------------------------------------------
         template<class Other>
-        friend auto operator!= (const static_vector& v1, const Other& v2) { return std::is_neq(v1 <=> v2); }
+        friend constexpr auto operator!= (const static_vector& v1, const Other& v2) { return std::is_neq(v1 <=> v2); }
     };
 } // namespaces
