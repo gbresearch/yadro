@@ -50,6 +50,11 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------------------------------
+    // minor view usually holds a reference to matrix unless it's a prvalue
+    template<matrix_c Matrix>
+    struct minor_view;
+
+    //---------------------------------------------------------------------------------------------
     template<class T, std::size_t ...RowsColumns>
         requires (sizeof... (RowsColumns) == 0 || sizeof... (RowsColumns) == 2)
     struct matrix : tensor<T, RowsColumns...>
@@ -65,7 +70,8 @@ namespace gb::yadro::container
         constexpr auto rows() const { return indexer().dimension(0); }
         constexpr auto columns() const { return indexer().dimension(1); }
 
-        auto& operator= (matrix_c auto&& other)
+        template<matrix_c M>
+        auto& operator= (const minor_view<M>& other)
         {
             gb::yadro::util::gbassert(rows() == other.rows());
             gb::yadro::util::gbassert(columns() == other.columns());

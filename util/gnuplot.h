@@ -114,10 +114,10 @@ namespace gb::yadro::util
         inline auto write_data_file(auto&& write_fn, auto&& ... args)
         {
             auto path = get_temp_file_path(".gnuplot");
-            test_condition<gnuplot_error>(!path.empty(), "Failed to obtain temp file path");
+            gbassert<gnuplot_error>(!path.empty(), "Failed to obtain temp file path");
 
             std::ofstream tmp(path);
-            test_condition<gnuplot_error>(tmp, "Failed to create temp file: " + path.string());
+            gbassert<gnuplot_error>(tmp, "Failed to create temp file: " + path.string());
 
             write_fn(tmp, std::forward<decltype(args)>(args)...);
 
@@ -420,7 +420,7 @@ namespace gb::yadro::util
             auto posix_path = detail::write_data_file([&](auto&& tmp)
                 {
                     auto size = std::min({ std::distance(std::begin(data), std::end(data))... });
-                    test_condition<gnuplot_error>(size != 0, "empty data range");
+                    gbassert<gnuplot_error>(size != 0, "empty data range");
 
                     for (auto i = 0; i < size; ++i)
                     {
@@ -451,7 +451,7 @@ namespace gb::yadro::util
         // plot bitmap image
         static auto plot_cmd(const std::string& title, const unsigned char* bitmap_buffer, unsigned width, unsigned height)
         {
-            test_condition<gnuplot_error>(width != 0 && height != 0, "Bitmap must have non-zero width and height");
+            gbassert<gnuplot_error>(width != 0 && height != 0, "Bitmap must have non-zero width and height");
 
             auto posix_path = detail::write_data_file([=](auto&& tmp)
                 {
@@ -516,7 +516,7 @@ namespace gb::yadro::util
         if (std::filesystem::exists(gnuplot_exe_path))
         {
             exe_pipe = _popen(('"' + gnuplot_exe_path + "\" " + options).c_str(), "w");
-            test_condition<gnuplot_error>(exe_pipe, "Failed to open: " + gnuplot_exe_path);
+            gbassert<gnuplot_error>(exe_pipe, "Failed to open: " + gnuplot_exe_path);
         }
         else if (auto path = std::getenv("PATH"); path)
         {
@@ -524,11 +524,11 @@ namespace gb::yadro::util
                 if (auto exe = s + "\\gnuplot.exe"; std::filesystem::exists(exe))
                 {
                     exe_pipe = _popen(('"' + exe + "\" " + options).c_str(), "w");
-                    test_condition<gnuplot_error>(exe_pipe, "Failed to open: " + exe);
+                    gbassert<gnuplot_error>(exe_pipe, "Failed to open: " + exe);
                     break;
                 }
 
-            test_condition<gnuplot_error>(exe_pipe, "Path doesn't contain gnuplot.exe. path = " + std::string(path));
+            gbassert<gnuplot_error>(exe_pipe, "Path doesn't contain gnuplot.exe. path = " + std::string(path));
         }
         else
         {

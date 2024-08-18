@@ -150,7 +150,14 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     template<class ErrorType = generic_error>
-    inline void test_condition(const auto& cond, const std::string& msg = "", std::source_location location = std::source_location::current())
+    [[noreturn]] inline void throw_error(const std::string& msg = "failed condition", std::source_location location = std::source_location::current())
+    {
+        throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
+    }
+
+    //-------------------------------------------------------------------------
+    template<class ErrorType = generic_error>
+    inline void gbassert(const auto& cond, const std::string& msg, std::source_location location = std::source_location::current())
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
         if constexpr (std::invocable<decltype(cond)>)
@@ -166,17 +173,10 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
-    template<class ErrorType = generic_error>
-    [[noreturn]] inline void throw_error(const std::string& msg = "failed condition", std::source_location location = std::source_location::current())
-    {
-        throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
-    }
-
-    //-------------------------------------------------------------------------
     inline void gbassert(const auto& cond, std::source_location location = std::source_location::current())
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
-        test_condition<failed_assertion>(std::forward<decltype(cond)>(cond), "assertion failed", location);
+        gbassert<failed_assertion>(std::forward<decltype(cond)>(cond), "assertion failed", location);
     }
 
     //-------------------------------------------------------------------------
