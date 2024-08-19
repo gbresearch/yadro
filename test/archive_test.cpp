@@ -69,10 +69,10 @@ namespace
         B b{ 999, -1.99 };
         A aa;
         B bb;
-        int i{123};
-        double d{3.14};
-        std::string s{"hello"};
-        enum class enum_type { one = 1, two, three } e { enum_type::one };
+        int i{ 123 };
+        double d{ 3.14 };
+        std::string s{ "hello" };
+        enum class enum_type { one = 1, two, three } e{ enum_type::one };
         std::tuple t{ 10, 20.2, std::string("tuple") };
         std::vector v{ 10, 11, 12, 13, 14, 15 };
         std::array<int, 5> iarr{ 5,4,3,2,1 };
@@ -80,19 +80,24 @@ namespace
         q.push(100);
         q.push(200);
         q.push(300);
+        std::stack<int> stk;
+        stk.push(100);
+        stk.push(200);
+        stk.push(300);
+        stk.push(400);
         std::map<int, std::string> m{ {1, "one"}, {2, "two"}, {3, "three"} };
         std::unordered_map<int, std::string> um{ {1, "one"}, {2, "two"}, {3, "three"} };
         std::optional<int> opt1;
-        std::optional<int> opt2{111};
+        std::optional<int> opt2{ 111 };
         std::variant<int, char, std::string> v1;
-        std::variant<int, char, std::string> v2{888};
-        std::variant<int, char, std::string> v3{ 'A'};
-        std::variant<int, char, std::string> v4{ "variant"};
+        std::variant<int, char, std::string> v2{ 888 };
+        std::variant<int, char, std::string> v3{ 'A' };
+        std::variant<int, char, std::string> v4{ "variant" };
         auto compare_arrays = [](const auto& arr1, const auto& arr2) { return std::equal(arr1.begin(), arr1.end(), arr2.begin(), arr2.end()); };
 
         // text_archive tests
         text_archive<std::ostringstream> oarch;
-        oarch(123, a, b, std::string("hello"), 3.14, serialize_as<int>(e), t, std::array<int, 5>{ 5,4,3,2,1 });
+        oarch(123, a, b, std::string("hello"), 3.14, serialize_as<int>(e), t, std::array<int, 5>{ 5, 4, 3, 2, 1 });
         //std::cout << oarch.get_stream().str() << "\n";
         gbassert(oarch.get_stream().str() == "123\n555\n1.23\n999\n-1.99\n5\nhello\n3.14\n1\n10\n20.2\n5\ntuple\n5\n4\n3\n2\n1\n");
 
@@ -109,11 +114,12 @@ namespace
 
         // memory archives tests
         omem_archive<> ma;
-        ma(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::two), std::tuple{ 20, 40.4, std::string("tuple2") }, v, q, m, um, 
+        ma(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::two), std::tuple{ 20, 40.4, std::string("tuple2") }, v, q, stk, m, um,
             opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
         imem_archive<> ia(ma);
         std::queue<int> qq;
-        ia(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
+        std::stack<int> stkk;
+        ia(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, stkk, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
         gbassert(i == 123);
         gbassert(std::tie(aa.i, aa.d) == std::tie(a.i, a.d));
         gbassert(std::tie(bb.i, bb.d) == std::tie(b.i, b.d));
@@ -125,7 +131,11 @@ namespace
         gbassert(qq.front() == 100); qq.pop();
         gbassert(qq.front() == 200); qq.pop();
         gbassert(qq.front() == 300); qq.pop();
-        gbassert(m == std::map<int, std::string>{ {1, "one"}, {2, "two"}, {3, "three"} });
+        gbassert(stkk.top() == 400); stkk.pop();
+        gbassert(stkk.top() == 300); stkk.pop();
+        gbassert(stkk.top() == 200); stkk.pop();
+        gbassert(stkk.top() == 100); stkk.pop();
+        gbassert(m == std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(um == std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(opt1 == std::optional<int>{});
         gbassert(opt2 == std::optional<int>{111});
@@ -137,10 +147,10 @@ namespace
 
         // test archive reset
         ma.reset();
-        ma(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::two), std::tuple{ 20, 40.4, std::string("tuple2") }, v, q, m, um,
+        ma(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::two), std::tuple{ 20, 40.4, std::string("tuple2") }, v, q, stk, m, um,
             opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
         ia.reset(ma);
-        ia(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
+        ia(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, stkk, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
         gbassert(i == 123);
         gbassert(std::tie(aa.i, aa.d) == std::tie(a.i, a.d));
         gbassert(std::tie(bb.i, bb.d) == std::tie(b.i, b.d));
@@ -152,6 +162,10 @@ namespace
         gbassert(qq.front() == 100); qq.pop();
         gbassert(qq.front() == 200); qq.pop();
         gbassert(qq.front() == 300); qq.pop();
+        gbassert(stkk.top() == 400); stkk.pop();
+        gbassert(stkk.top() == 300); stkk.pop();
+        gbassert(stkk.top() == 200); stkk.pop();
+        gbassert(stkk.top() == 100); stkk.pop();
         gbassert(m == std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(um == std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(opt1 == std::optional<int>{});
@@ -164,11 +178,11 @@ namespace
 
         // binary file archive test
         bin_archive<std::ofstream> ofs("archive_test.eraseme", std::ios::binary);
-        ofs(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::three), std::tuple{ 30, 50.55, std::string("tuple three") }, 
-            std::vector{ 20, 21, 22, 23, 24, 25 }, q, m, um, opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
+        ofs(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::three), std::tuple{ 30, 50.55, std::string("tuple three") },
+            std::vector{ 20, 21, 22, 23, 24, 25 }, q, stk, m, um, opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
         ofs.get_stream().close();
         bin_archive<std::ifstream> ifs("archive_test.eraseme", std::ios::binary);
-        ifs(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
+        ifs(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, stkk, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
         ifs.get_stream().close();
         gbassert(i == 123);
         gbassert(std::tie(aa.i, aa.d) == std::tie(a.i, a.d));
@@ -181,6 +195,10 @@ namespace
         gbassert(qq.front() == 100); qq.pop();
         gbassert(qq.front() == 200); qq.pop();
         gbassert(qq.front() == 300); qq.pop();
+        gbassert(stkk.top() == 400); stkk.pop();
+        gbassert(stkk.top() == 300); stkk.pop();
+        gbassert(stkk.top() == 200); stkk.pop();
+        gbassert(stkk.top() == 100); stkk.pop();
         gbassert(m == std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(um == std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } });
         gbassert(opt1 == std::optional<int>{});
@@ -193,9 +211,10 @@ namespace
         std::remove("archive_test.eraseme");
 
         // test serialization size and md5
-        if constexpr (sizeof(std::size_t) == 4)
-        {
-            gbassert(serialization_size(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+        // should be identical for 32-bit and 64-bit targets
+        gbassert(
+            serialization_size(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                q, stk,
                 std::variant<int, char, std::string>{"variant"},
                 std::vector{ 20, 21, 22, 23, 24, 25 },
                 std::optional<int>{111},
@@ -205,8 +224,10 @@ namespace
                 std::tuple{ 30, 50.55, std::string("tuple three") },
                 enum_type::three,
                 std::string("Hello World"),
-                123, 3.14, 2.7f) == 209);
-            gbassert(serialization_md5(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                123, 3.14, 2.7f) == 313);
+        gbassert(
+            serialization_md5(std::array<int, 5>{ 5, 4, 3, 2, 1 },
+                q, stk,
                 std::variant<int, char, std::string>{"variant"},
                 std::vector{ 20, 21, 22, 23, 24, 25 },
                 std::optional<int>{111},
@@ -216,33 +237,6 @@ namespace
                 std::tuple{ 30, 50.55, std::string("tuple three") },
                 enum_type::three,
                 std::string("Hello World"),
-                123, 3.14, 2.7f) == "373df5c5f196bc79cb19f435900de457");
-        }
-        if constexpr (sizeof(std::size_t) == 8)
-        {
-            gbassert(serialization_size(std::array<int, 5>{ 5, 4, 3, 2, 1 },
-                std::variant<int, char, std::string>{"variant"},
-                std::vector{ 20, 21, 22, 23, 24, 25 },
-                std::optional<int>{111},
-                std::optional<int>{},
-                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
-                std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
-                std::tuple{ 30, 50.55, std::string("tuple three") },
-                enum_type::three,
-                std::string("Hello World"),
-                123, 3.14, 2.7f) == 261);
-            gbassert(serialization_md5(std::array<int, 5>{ 5, 4, 3, 2, 1 },
-                std::variant<int, char, std::string>{"variant"},
-                std::vector{ 20, 21, 22, 23, 24, 25 },
-                std::optional<int>{111},
-                std::optional<int>{},
-                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
-                std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
-                std::tuple{ 30, 50.55, std::string("tuple three") },
-                enum_type::three,
-                std::string("Hello World"),
-                123, 3.14, 2.7f) == "79c7976557c1fe711c3a1bf86e3187fa");
-        }
+                123, 3.14, 2.7f) == "2e44ca1b103d900c0d7d9c08b58e9194");
     }
-
 }

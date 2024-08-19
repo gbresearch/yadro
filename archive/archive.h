@@ -361,10 +361,10 @@ namespace gb::yadro::archive
         if constexpr (is_iarchive_v<Archive>)
         {
             static_assert(!std::is_const_v<std::remove_reference_t<T>>);
-
+            
             using size_type = decltype(std::size(t));
             size_type size{ 0 };
-            a(size);
+            a(serialize_as<std::uint64_t>(size));
             t.resize(size);
 
             if (size)
@@ -373,7 +373,7 @@ namespace gb::yadro::archive
         else
         {
             auto size = std::size(t);
-            a(size);
+            a(serialize_as<std::uint64_t>(size));
             if (size)
                 a.write(*std::begin(t), size);
         }
@@ -395,12 +395,12 @@ namespace gb::yadro::archive
 
                 using size_type = decltype(std::size(t));
                 size_type size{ 0 };
-                a(size);
-                t.resize(size); // must be default constructibel to resize
+                a(serialize_as<std::uint64_t>(size));
+                t.resize(size); // must be default constructible to resize
             }
             else
             {
-                a(std::size(t));
+                a(serialize_as<std::uint64_t>(std::size(t)));
             }
         }
         for (auto&& v : t)
@@ -427,7 +427,7 @@ namespace gb::yadro::archive
 
             using size_type = decltype(std::size(t));
             size_type size{ 0 };
-            a(size);
+            a(serialize_as<std::uint64_t>(size));
 
             for (size_type i = 0; i < size; ++i)
             {
@@ -440,7 +440,7 @@ namespace gb::yadro::archive
         {
             if constexpr (is_queue_v<T>)
             {
-                a(std::size(t));
+                a(serialize_as<std::uint64_t>(std::size(t)));
 
                 // must preserve the original queue
                 std::remove_cvref_t<T> tmp;
@@ -485,7 +485,7 @@ namespace gb::yadro::archive
     //---------------------------------------------------------------------
     // serialization of ordered associative containers
     template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_ordered_associative_v<T>)
+    auto serialize(Archive&& a, T&& t) requires(is_ordered_associative_v<T> && not is_unordered_associative_v<T>)
     {
         static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
         using key_type = typename std::remove_cvref_t<T>::key_type;
@@ -497,9 +497,9 @@ namespace gb::yadro::archive
             t.clear();
             using size_type = decltype(std::size(t));
             size_type size{ 0 };
-            a(size);
+            a(serialize_as<std::uint64_t>(size));
 
-            for (size_type i = 0; i < size; ++i)
+            for (std::uint64_t i = 0; i < size; ++i)
             {
                 if constexpr (std::is_same_v<key_type, value_type>)
                 {
@@ -519,7 +519,7 @@ namespace gb::yadro::archive
         }
         else
         {
-            a(std::size(t));
+            a(serialize_as<std::uint64_t>(std::size(t)));
 
             for (auto&& v : t)
             {
@@ -543,11 +543,11 @@ namespace gb::yadro::archive
             t.clear();
 
             std::size_t size{ 0 };
-            a(size);
+            a(serialize_as<std::uint64_t>(size));
             t.reserve(size);
 
             std::size_t bucket_count{ 0 };
-            a(bucket_count);
+            a(serialize_as<std::uint64_t>(bucket_count));
             t.rehash(bucket_count);
 
             for (std::size_t i = 0; i < size; ++i)
@@ -570,8 +570,8 @@ namespace gb::yadro::archive
         }
         else
         {
-            a(std::size(t));
-            a(t.bucket_count());
+            a(serialize_as<std::uint64_t>(std::size(t)));
+            a(serialize_as<std::uint64_t>(t.bucket_count()));
 
             for (auto&& v : t)
             {
@@ -649,7 +649,7 @@ namespace gb::yadro::archive
         if constexpr (is_iarchive_v<Archive>)
         {
             std::size_t index{};
-            a(index);
+            a(serialize_as<std::uint64_t>(index));
 
             if (index != std::variant_npos)
             {
@@ -658,7 +658,7 @@ namespace gb::yadro::archive
         }
         else
         {
-            a(t.index());
+            a(serialize_as<std::uint64_t>(t.index()));
             std::visit([&](auto&& val) { a(val); }, t);
         }
     }

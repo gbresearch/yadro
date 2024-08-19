@@ -63,14 +63,6 @@ namespace gb::yadro::container
         using const_reverse_iterator = typename std::array<T, N>::const_reverse_iterator;
 
         //----------------------------------------------------------------------------------------------
-        template<class Archive>
-        void serialize(Archive&& a)
-        {
-            a(_size);
-            a(std::span(begin(), end()));
-        }
-
-        //----------------------------------------------------------------------------------------------
         static_vector() = default;
 
         //----------------------------------------------------------------------------------------------

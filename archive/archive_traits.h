@@ -86,7 +86,7 @@ namespace gb::yadro::archive
 
         template<class T>
         using unordered_associative_fn = decltype(std::begin(std::declval<T>()), std::end(std::declval<T>()),
-            std::size(std::declval<T>()), std::declval<T>().bucket_count(), std::declval<T>().rehash(),
+            std::size(std::declval<T>()), std::declval<T>().bucket_count(), std::declval<T>().rehash(std::size_t{}),
             std::declval<T>().reserve(0));
 
         template<class To, class From>
