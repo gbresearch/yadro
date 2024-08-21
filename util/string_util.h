@@ -172,7 +172,7 @@ namespace gb::yadro::util
     //---------------------
     // span 3-way comparison
     template<class T1, std::size_t Extent1, class T2, std::size_t Extent2>
-    auto compare(const std::span<T1, Extent1>& s1, const std::span<T2, Extent2>& s2) requires(std::three_way_comparable_with<T1, T2>)
+    constexpr auto compare(const std::span<T1, Extent1>& s1, const std::span<T2, Extent2>& s2) requires(std::three_way_comparable_with<T1, T2>)
     {
         using ordering_t = std::compare_three_way_result_t<T1, T2>;
         if (s1.size() < s2.size())
@@ -190,7 +190,7 @@ namespace gb::yadro::util
 
     //---------------------
     template<class CharT, class Traits>
-    auto compare(const CharT* s1, const CharT* s2, std::size_t size1, std::size_t size2)
+    constexpr auto compare(const CharT* s1, const CharT* s2, std::size_t size1, std::size_t size2)
     {
         auto comp = Traits::compare(s1, s2, std::min(size1, size2));
         return comp < 0 ? std::weak_ordering::less
