@@ -355,7 +355,10 @@ namespace gb::yadro::util
     {
         auto get_n = [&]<std::size_t N>(std::index_sequence<N>)
         {
-            return transform_fn(std::get<N>(std::forward<decltype(t)>(t)), std::get<N>(std::forward<decltype(ts)>(ts))...);
+            if constexpr(std::same_as<decltype(transform_fn(std::get<N>(std::forward<decltype(t)>(t)), std::get<N>(std::forward<decltype(ts)>(ts))...)), void>)
+                return transform_fn(std::get<N>(std::forward<decltype(t)>(t)), std::get<N>(std::forward<decltype(ts)>(ts))...), void_type{};
+            else
+                return transform_fn(std::get<N>(std::forward<decltype(t)>(t)), std::get<N>(std::forward<decltype(ts)>(ts))...);
         };
 
         auto get_tup = [&]<std::size_t ...N>(std::index_sequence<N...>)
@@ -364,7 +367,6 @@ namespace gb::yadro::util
         };
         
         constexpr auto size = std::tuple_size<std::remove_cvref_t<decltype(t)>>{};
-
         return get_tup(std::make_index_sequence<size>{});
     }
 
