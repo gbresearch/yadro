@@ -49,7 +49,7 @@ namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
     // create_unique - make_unique missing overloads
-    // 
+    // clang bug: https://github.com/llvm/llvm-project/issues/106182
     // create a unique_ptr of template type S, derived from Base, returning unique_ptr<Base>
     template<class Base, template<class...> class S>
     inline auto create_unique(auto&&... args) -> std::unique_ptr<Base>
