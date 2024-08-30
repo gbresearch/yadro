@@ -151,8 +151,10 @@ namespace gb::yadro::async
             _finish = false;
             auto t = std::make_unique<detail::function_wrapper<std::decay_t<F>, std::decay_t<Args>...>>(std::forward<F>(f), std::forward<Args>(args)...);
             auto ftr = t->get_future();
-            std::lock_guard<std::mutex> _(_m_task);
-            _tasks.enqueue(std::move(t));
+            {
+                std::lock_guard<std::mutex> _(_m_task);
+                _tasks.enqueue(std::move(t));
+            }
             inc_threads();
             return ftr;
         }
@@ -162,18 +164,20 @@ namespace gb::yadro::async
         auto then(auto&& task, auto&&... futures)
             requires requires { (futures.get(), ...); }
         {
-            using namespace std::chrono_literals;
-            if (((futures.wait_for(1us) == std::future_status::ready) && ... && true)) // all futures ready
-                return (*this)(std::forward<decltype(task)>(task), futures.get()...);
-            else
-                return (*this)([this](auto&& task, auto&&... futures)
-                    { 
-                        if constexpr (std::is_same_v<std::invoke_result_t<decltype(task), decltype(futures.get())...>, void>)
-                            std::invoke(std::forward<decltype(task)>(task), futures.get()...);
-                        else
-                            return std::invoke(std::forward<decltype(task)>(task), futures.get()...); 
-                    },
-                    std::forward<decltype(task)>(task), std::forward<decltype(futures)>(futures)...);
+            {
+                std::unique_lock _(_m_con);
+
+                if (!_continuations)
+                    _continuations = std::make_unique<threadpool<>>(std::max(_max_threads / 2, std::size_t(1)));
+            }
+            return (*_continuations)([](auto&& task, auto&&... futures)
+                {
+                    if constexpr (std::is_same_v<std::invoke_result_t<decltype(task), decltype(futures.get())...>, void>)
+                        std::invoke(std::forward<decltype(task)>(task), futures.get()...);
+                    else
+                        return std::invoke(std::forward<decltype(task)>(task), futures.get()...);
+                },
+                std::forward<decltype(task)>(task), std::forward<decltype(futures)>(futures)...);
         }
         
         //-----------------------------------------------------------------
@@ -188,6 +192,8 @@ namespace gb::yadro::async
         std::atomic_bool _finish{ false };
         std::size_t _max_threads;
         std::function<void()> _on_empty;
+        std::unique_ptr < threadpool<>> _continuations; // secondary threadpool for continuations
+        std::mutex _m_con; // protects continuations
 
         //-----------------------------------------------------------------
         auto dequeue()
