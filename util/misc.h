@@ -48,6 +48,11 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
+    // casting xvalue to lvalue
+    template<class T>
+    constexpr T& as_lvalue(T&& t) { return { t }; }
+
+    //-------------------------------------------------------------------------
     // create_unique - make_unique missing overloads
     // clang bug: https://github.com/llvm/llvm-project/issues/106182
     // create a unique_ptr of template type S, derived from Base, returning unique_ptr<Base>
