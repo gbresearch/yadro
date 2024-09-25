@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -26,11 +26,16 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-#pragma once
+#include "scheduler.h"
+#include "../util/gbwin.h"
 
-#include "../algorithm/gbalgorithm.h"
-#include "../archive/archive.h"
-#include "../async/threadpool.h"
-#include "../container/gbcontainer.h"
-#include "../util/gbutil.h"
-#include "../simulator/simulator.h"
+#ifdef GBWINDOWS
+gb::sim::fibers::scheduler_t::scheduler_t() : _main_fiber{ ::ConvertThreadToFiber(0) }
+{
+}
+
+gb::sim::fibers::scheduler_t::~scheduler_t() 
+{ 
+    ::ConvertFiberToThread(); 
+}
+#endif

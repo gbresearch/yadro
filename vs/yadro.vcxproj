@@ -132,6 +132,12 @@
     <ClInclude Include="..\container\tensor.h" />
     <ClInclude Include="..\container\tree.h" />
     <ClInclude Include="..\include\yadro.h" />
+    <ClInclude Include="..\simulator\event.h" />
+    <ClInclude Include="..\simulator\fiber.h" />
+    <ClInclude Include="..\simulator\scheduler.h" />
+    <ClInclude Include="..\simulator\signal.h" />
+    <ClInclude Include="..\simulator\simulator.h" />
+    <ClInclude Include="..\simulator\task.h" />
     <ClInclude Include="..\util\file_mutex.h" />
     <ClInclude Include="..\util\gberror.h" />
     <ClInclude Include="..\util\gblog.h" />
@@ -154,6 +160,8 @@
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp" />
     <ClCompile Include="..\container\tree.cpp" />
+    <ClCompile Include="..\simulator\fiber.cpp" />
+    <ClCompile Include="..\simulator\scheduler.cpp" />
     <ClCompile Include="..\util\file_mutex.cpp" />
     <ClCompile Include="..\util\string_util.cpp" />
     <ClCompile Include="..\util\win_service.cpp" />

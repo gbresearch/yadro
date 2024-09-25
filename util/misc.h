@@ -125,6 +125,14 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
+    // creating a tuple with lvalue reference types preserved and rvalue reference types moved
+    template<class... T>
+    auto move_forward_tuple(T&&... t)
+    {
+        return std::tuple<T...>{std::forward<T>(t)...};
+    }
+    
+    //-------------------------------------------------------------------------
     // return either value of std::expected, or exception_t
     decltype(auto) expected_value(auto&& e) requires(not std::is_void_v<decltype(e.value())>)
     {

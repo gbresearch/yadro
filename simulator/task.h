@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -27,10 +27,44 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include <coroutine>
+#include <exception>
 
-#include "../algorithm/gbalgorithm.h"
-#include "../archive/archive.h"
-#include "../async/threadpool.h"
-#include "../container/gbcontainer.h"
-#include "../util/gbutil.h"
-#include "../simulator/simulator.h"
+namespace gb::sim::coroutines
+{
+    //---------------------------------------------------------------------------------------------
+    template<class Coroutine, class initial_suspend_t, class final_suspend_t>
+    struct promise_base {
+        auto get_return_object() noexcept { return Coroutine{}; }
+        static initial_suspend_t initial_suspend() noexcept { return {}; }
+        static final_suspend_t final_suspend() noexcept { return {}; }
+        void unhandled_exception() noexcept { _current_exception = std::current_exception(); }
+        auto get_exception() const { return _current_exception; }
+    private:
+        std::exception_ptr _current_exception{};
+    };
+
+    //---------------------------------------------------------------------------------------------
+    template<class T = void>
+    struct task;
+
+    template<>
+    struct task<void> {
+        struct promise_type : promise_base<task, std::suspend_never, std::suspend_never> {
+            void return_void() {}
+        };
+    };
+
+    template<class T>
+    struct task {
+        task(auto&& v) : value(v) {}
+        struct promise_type : promise_base<task, std::suspend_never, std::suspend_never> {
+            auto get_return_object() noexcept { return task{ value }; }
+            void return_value(auto&& v) { value = decltype(v)(v); }
+            T value;
+        };
+        operator T() const { return value; }
+    private:
+        T value;
+    };
+}

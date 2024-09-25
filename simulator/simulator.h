@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -28,9 +28,8 @@
 
 #pragma once
 
-#include "../algorithm/gbalgorithm.h"
-#include "../archive/archive.h"
-#include "../async/threadpool.h"
-#include "../container/gbcontainer.h"
-#include "../util/gbutil.h"
-#include "../simulator/simulator.h"
+#include "event.h"
+#include "fiber.h"
+#include "signal.h"
+#include "scheduler.h"
+#include "task.h"

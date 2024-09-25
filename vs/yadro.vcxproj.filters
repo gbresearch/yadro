@@ -20,6 +20,9 @@
     <Filter Include="algorithm">
       <UniqueIdentifier>{bac28a69-fbfb-4926-86d4-9b7844daf1e6}</UniqueIdentifier>
     </Filter>
+    <Filter Include="simulator">
+      <UniqueIdentifier>{64b9ddb0-e8c6-4f65-8805-87fb3754f1c5}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\archive\archive.h">
@@ -122,6 +125,24 @@
     <ClInclude Include="..\util\win_service.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\simulator\signal.h">
+      <Filter>simulator</Filter>
+    </ClInclude>
+    <ClInclude Include="..\simulator\scheduler.h">
+      <Filter>simulator</Filter>
+    </ClInclude>
+    <ClInclude Include="..\simulator\simulator.h">
+      <Filter>simulator</Filter>
+    </ClInclude>
+    <ClInclude Include="..\simulator\event.h">
+      <Filter>simulator</Filter>
+    </ClInclude>
+    <ClInclude Include="..\simulator\task.h">
+      <Filter>simulator</Filter>
+    </ClInclude>
+    <ClInclude Include="..\simulator\fiber.h">
+      <Filter>simulator</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">
@@ -138,6 +159,12 @@
     </ClCompile>
     <ClCompile Include="..\util\win_service.cpp">
       <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\simulator\fiber.cpp">
+      <Filter>simulator</Filter>
+    </ClCompile>
+    <ClCompile Include="..\simulator\scheduler.cpp">
+      <Filter>simulator</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

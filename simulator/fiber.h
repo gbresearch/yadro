@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -27,10 +27,39 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include <functional>
 
-#include "../algorithm/gbalgorithm.h"
-#include "../archive/archive.h"
-#include "../async/threadpool.h"
-#include "../container/gbcontainer.h"
-#include "../util/gbutil.h"
-#include "../simulator/simulator.h"
+namespace gb::sim::fibers
+{
+    struct scheduler_t;
+    struct event;
+    using sim_time_t = std::uint64_t;
+
+    struct fiber {
+        fiber(const fiber&) = delete;
+        auto& operator= (const fiber&) = delete;
+        fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size = 4096);
+        ~fiber();
+        void suspend();
+        void resume();
+        void finish();
+        void execute();
+        void wait(event&);
+        void wait(sim_time_t = 0);
+        auto get_sim_time() const -> sim_time_t;
+    private:
+        scheduler_t& _scheduler;
+        std::function<void()> _call_back;
+        bool _finished{ false };
+        void* _win_fiber;
+    };
+
+    //---------------------------------------------------------------------------------------------
+    // global functions
+    fiber* this_fiber();
+    inline void wait(sim_time_t t = 0) { this_fiber()->wait(t); }
+    inline void wait(event& e) { this_fiber()->wait(e); }
+    inline void wait(auto&&...w) { (this_fiber()->wait(decltype(w)(w)), ...); }
+    inline sim_time_t get_sim_time() { return this_fiber()->get_sim_time(); }
+    inline void finish() { this_fiber()->finish(); }
+}
