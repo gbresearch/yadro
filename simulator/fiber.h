@@ -36,6 +36,7 @@ namespace gb::sim::fibers
     using sim_time_t = std::uint64_t;
 
     struct fiber {
+        // fibers are neither copiable nor movable
         fiber(const fiber&) = delete;
         auto& operator= (const fiber&) = delete;
         fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size = 4096);

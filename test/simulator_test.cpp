@@ -46,8 +46,9 @@ namespace
 
     GB_TEST(simulator, fiber_test, std::launch::async)
     {
-        using namespace gb::sim;
         using namespace gb::sim::fibers;
+        using namespace std::chrono_literals;
+
         std::stringstream ss;
         scheduler_t sch;
 
@@ -62,7 +63,7 @@ namespace
         // test fiber waiting on event
         event e1;
         printer(e1, "e1");
-        sch.forever([&] { ss << get_sim_time() << ": enter fiber #1\n"; wait(e1); ss << get_sim_time() << ": fiber #1 resumed after wait\n"; finish(); });
+        sch.once([&] { ss << get_sim_time() << ": enter fiber #1\n"; wait(e1); ss << get_sim_time() << ": fiber #1 resumed after wait\n"; });
         sch.schedule(e1, 1);
         sch.run();
         gbassert(ss.str() == "0: enter fiber #1\n1: e1 triggered\n1: fiber #1 resumed after wait\n");
@@ -77,7 +78,7 @@ namespace
                 wait(in);
                 out(1) = in.read() == 0 ? 1 : 0;
             };
-        auto f = sch.forever([&] { inv(s1, s2); });
+        sch.forever([&] { inv(s1, s2); });
         s1 = 1;
         s1(1) = 0;
         s1(2) = 1;
