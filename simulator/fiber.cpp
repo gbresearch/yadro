@@ -87,13 +87,6 @@ namespace gb::sim::fibers
     void fiber::finish() { _finished = true; }
 
     //---------------------------------------------------------------------------------------------
-    void fiber::wait(event& e) 
-    {
-        e.bind_once([this] { resume(); });
-        suspend();
-    }
-
-    //---------------------------------------------------------------------------------------------
     void fiber::wait(sim_time_t t) 
     {
         _scheduler.schedule([this] { resume(); }, t);

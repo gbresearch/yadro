@@ -45,7 +45,6 @@ namespace gb::sim::fibers
         void resume();
         void finish();
         void execute();
-        void wait(event&);
         void wait(sim_time_t = 0);
         auto get_sim_time() const -> sim_time_t;
     private:
@@ -58,9 +57,19 @@ namespace gb::sim::fibers
     //---------------------------------------------------------------------------------------------
     // global functions
     fiber* this_fiber();
-    inline void wait(sim_time_t t = 0) { this_fiber()->wait(t); }
-    inline void wait(event& e) { this_fiber()->wait(e); }
-    inline void wait(auto&&...w) { (this_fiber()->wait(decltype(w)(w)), ...); }
     inline sim_time_t get_sim_time() { return this_fiber()->get_sim_time(); }
     inline void finish() { this_fiber()->finish(); }
+
+    // wait functions
+    inline void wait(sim_time_t t = 0) { this_fiber()->wait(t); }
+
+    // wait on event-like type
+    inline void wait(auto&& e) requires requires{ e.bind_once(nullptr); } 
+    {
+        e.bind_once([f = this_fiber()] { f->resume(); });
+        this_fiber()->suspend();
+    }
+
+    // wait on multiple events or time periods in specified order
+    inline void wait(auto&&...w) { (wait(decltype(w)(w)), ...); }
 }

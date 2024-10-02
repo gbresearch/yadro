@@ -53,7 +53,7 @@ namespace
         scheduler_t sch;
 
         // print signals/events
-        auto printer = [&](auto& s, const std::string& name) {
+        auto printer = [&](auto&& s, const std::string& name) {
             if constexpr (requires{ s.read(); })
                 always([&, name] { ss << sch.current_time() << ": " << name << "=" << s.read() << "\n"; }, s);
             else
@@ -69,10 +69,10 @@ namespace
         gbassert(ss.str() == "0: enter fiber #1\n1: e1 triggered\n1: fiber #1 resumed after wait\n");
         ss = std::stringstream{};
 
-        // test fiber modigying signal
+        // test waitable signal
         signal<int> s1(0, sch), s2(1, sch);
-        printer(s1, "s1"); printer(s1.pos_edge(), "s1.pos_edge"); printer(s1.neg_edge(), "s1.neg_edge");
-        printer(s2, "s2"); printer(s2.pos_edge(), "s2.pos_edge"); printer(s2.neg_edge(), "s2.neg_edge");
+        printer(s1, "s1"); printer(pos_edge(s1), "s1.pos_edge"); printer(neg_edge(s1), "s1.neg_edge");
+        printer(s2, "s2"); printer(pos_edge(s2), "s2.pos_edge"); printer(neg_edge(s2), "s2.neg_edge");
         auto inv = [](auto& in, auto& out)
             {
                 wait(in);
@@ -181,6 +181,20 @@ namespace
         generator(in2, 0, 4);
         generator(in3, 1, 6);
         generator(in4, 1, 8);
+        auto printit = [&](auto&& sig, std::string_view name)
+            {
+                if constexpr (requires{ sig.read(); })
+                    always([&, name] { std::cout << sch.current_time() << ": " << name << "=" << sig.read() << "\n"; }, sig);
+                else
+                    always([&, name] { std::cout << sch.current_time() << ": " << name << " triggered\n"; }, decltype(sig)(sig));
+            };
+        printit(in1, "in1");
+        printit(pos_edge{ in1 }, "pos_edge_in1");
+        sch.forever([&]
+            { 
+                wait(pos_edge(in1));
+                std::cout << sch.current_time() << ": resumed on pos_edge(in1)\n";
+            });
         ss = std::stringstream{};
         sch.run(10);
         gbassert(ss.str() == R"*(0: in2=1

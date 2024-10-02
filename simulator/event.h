@@ -215,13 +215,6 @@ namespace gb::sim::fibers
         std::tuple<E...> _events;
     };
 
-    template<class ...E>
-    inline void wait(any_event<E...>&& ae) 
-    {
-        ae.bind_once([f = this_fiber()] { f->resume(); });
-        this_fiber()->suspend();
-    }
-
     inline void wait_any(auto&& ... e)
     {
         wait(any_event{ decltype(e)(e)... });
@@ -282,13 +275,6 @@ namespace gb::sim::fibers
     };
 
     template<class ...E>
-    inline void wait(and_event<E...>&& ae) 
-    { 
-        ae.bind_once([f = this_fiber()] { f->resume(); });
-        this_fiber()->suspend();
-    }
-
-    template<class ...E>
     inline void wait_all(E&& ...e)
     {
         wait(and_event{ decltype(e)(e)... });
@@ -302,10 +288,14 @@ namespace gb::sim::fibers
     auto operator& (E1&& e1, E2&& e2) { return and_event(std::forward<E1>(e1), std::forward<E2>(e2)); }
 
     //---------------------------------------------------------------------------------------------
+    // empty non-signalling event, providing expected interface
     struct empty_event
     {
         void trigger() {}
-        void schedule(auto& scheduler, auto sim_time = 0) {}
-        void bind(auto&& ... call_backs) {}
+        void schedule(auto&&...) {}
+        void bind(auto&& ...) {}
+        void bind_once(auto&& ...) {}
+        void bind_cancellable(auto&&...) {}
+        void cancel_wait(auto&&...) {}
     };
 }

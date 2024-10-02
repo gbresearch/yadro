@@ -100,9 +100,9 @@ namespace gb::sim
         sim_time_t _current_time{};
         std::uint64_t _counter{}; // insertion counter to stabilize priority queue
 
-        void emplace(auto&& e, auto&& d)
+        void emplace(sim_time_t t, auto&& call_back)
         {
-            _pq.emplace(std::tuple{ decltype(e)(e), ++_counter }, decltype(d)(d));
+            _pq.emplace(std::tuple{t, ++_counter }, decltype(call_back)(call_back));
         }
 
         sim_time_t get_current_time() const

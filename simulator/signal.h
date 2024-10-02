@@ -150,36 +150,32 @@ namespace gb::sim::coroutines
 namespace gb::sim::fibers
 {
     //---------------------------------------------------------------------------------------------
+    // constant signal that doesn't change value doesn't trigger events
     template<class T>
-    struct const_signal
+    struct const_signal : empty_event
     {
-        const_signal() = default;
+        const_signal() requires(std::default_initializable) : _value{} {}
         const_signal(std::convertible_to<T> auto&& initial) : _value(decltype(initial)(initial)) {}
         auto&& read() const { return _value; }
-        auto& changed() { return _e; }
-        auto& pos_edge() { return _e; }
-        auto& neg_edge() { return _e; }
     private:
-        T _value{};
-        [[no_unique_address]] empty_event _e;
+        T _value;
     };
 
     template<class T>
     const_signal(T) -> const_signal<T>;
 
     //---------------------------------------------------------------------------------------------
+    // signal_base only used as a base class, wraps type T, triggers event when Compare is true
     template<class T, class Compare>
     struct signal_base : event
     {
-        signal_base() = default;
+        using type = T;
+
+        signal_base() requires(std::default_initializable) : _value{} {}
         signal_base(std::convertible_to<T> auto&& initial) : _value(decltype(initial)(initial)) {}
-        signal_base(std::convertible_to<T> auto&& initial, Compare compare) : _value(decltype(initial)(initial)), _compare(std::move(compare)) {}
         auto&& read() const { return _value; }
         operator const T& () const { return read(); }
 
-        //auto& changed() { return _changed; }
-        auto& pos_edge() { return _pos_edge; }
-        auto& neg_edge() { return _neg_edge; }
     protected:
         void trigger() { event::trigger(); } // hide access to event::trigger
         auto set_value(std::convertible_to<T> auto&& value)
@@ -188,24 +184,15 @@ namespace gb::sim::fibers
             {
                 _value = decltype(value)(value);
                 trigger();
-                pos_edge().trigger();
-            }
-            else if (Compare{}(value, _value))
-            {
-                _value = decltype(value)(value);
-                trigger();
-                neg_edge().trigger();
             }
         }
     private:
-        T _value{};
-        [[no_unique_address]] Compare _compare;
-        event _pos_edge;
-        event _neg_edge;
+        T _value;
     };
 
     //---------------------------------------------------------------------------------------------
-    template<class T, class Compare = std::less<>>
+    // wire wraps type T, triggers event when Compare is true, writing values immediately without scheduling
+    template<class T, class Compare = std::not_equal_to<>>
     struct wire : signal_base<T, Compare>
     {
         using base = signal_base<T, Compare>;
@@ -221,10 +208,11 @@ namespace gb::sim::fibers
     };
 
     template<class T>
-    wire(T) -> wire<T, std::less<>>;
+    wire(T) -> wire<T, std::not_equal_to<>>;
 
     //---------------------------------------------------------------------------------------------
-    template<class T, class Compare = std::less<>>
+    // signal wraps type T, triggers event when Compare is true, schedules writing values with specified delay
+    template<class T, class Compare = std::not_equal_to<>>
     struct signal : signal_base<T, Compare>
     {
         using base = signal_base<T, Compare>;
@@ -246,6 +234,7 @@ namespace gb::sim::fibers
 
     private:
         scheduler_t& _scheduler;
+
         struct delayed_writer
         {
             delayed_writer(signal& s, sim_time_t delay) : s(s), delay(delay) {}
@@ -260,7 +249,59 @@ namespace gb::sim::fibers
     };
 
     template<class T>
-    signal(T, scheduler_t&) -> signal<T, std::less<>>;
+    signal(T, scheduler_t&) -> signal<T, std::not_equal_to<>>;
+
+    //---------------------------------------------------------------------------------------------
+    // conditional event is always an rvalue
+    template<class Signal, class Compare>
+    struct conditional_event
+    {
+        conditional_event(conditional_event&& other) : _s(other._s), _old_value(std::move(_old_value)){}
+        conditional_event(Signal& s, Compare comp = {}) : _s(s), _old_value(s.read()) {}
+        void bind(auto fun) { _s.bind(always_callback(std::move(fun))); }
+        void bind_once(auto fun) { _s.bind_once(wait_callback(std::move(fun))); }
+        void bind_cancellable(auto fun) { _s.bind_cancellable(wait_callback(std::move(fun))); }
+        void cancel_wait(void* p) { _s.cancel_wait(p); }
+        void cancel_wait() { _s.cancel_wait(); }
+
+    private:
+        Signal& _s;
+        typename Signal::type _old_value{};
+
+        auto wait_callback(auto fun)
+        {
+            return [this, fun]
+                {
+                    auto&& vref = _s.read();
+                    auto comp = Compare{}(vref, _old_value);
+                    _old_value = decltype(vref)(vref);
+
+                    if (comp)
+                        std::invoke(fun);
+                    else
+                        this->bind_once(fun);
+                };
+        }
+
+        auto always_callback(auto fun)
+        {
+            return [this, fun]
+                {
+                    auto&& vref = _s.read();
+                    auto comp = Compare{}(vref, _old_value);
+                    _old_value = decltype(vref)(vref);
+
+                    if (comp)
+                        std::invoke(fun);
+                };
+        }
+    };
+
+    template<class Signal>
+    using pos_edge = conditional_event<Signal, std::greater<>>;
+
+    template<class Signal>
+    using neg_edge = conditional_event<Signal, std::less<>>;
 
     //---------------------------------------------------------------------------------------------
     // sig_wrapper wraps either an lvalue reference signal or an rvalue delayed_writer
