@@ -181,24 +181,21 @@ namespace
         generator(in2, 0, 4);
         generator(in3, 1, 6);
         generator(in4, 1, 8);
-        auto printit = [&](auto&& sig, std::string_view name)
-            {
-                if constexpr (requires{ sig.read(); })
-                    always([&, name] { std::cout << sch.current_time() << ": " << name << "=" << sig.read() << "\n"; }, sig);
-                else
-                    always([&, name] { std::cout << sch.current_time() << ": " << name << " triggered\n"; }, decltype(sig)(sig));
-            };
-        printit(in1, "in1");
-        printit(pos_edge{ in1 }, "pos_edge_in1");
+
+        printer(pos_edge{ in1 }, "pos_edge_in1");
+        
         sch.forever([&]
             { 
                 wait(pos_edge(in1));
-                std::cout << sch.current_time() << ": resumed on pos_edge(in1)\n";
+                ss << sch.current_time() << ": resumed on pos_edge(in1)\n";
             });
+        
         ss = std::stringstream{};
         sch.run(10);
         gbassert(ss.str() == R"*(0: in2=1
 1: in1=1
+1: pos_edge_in1 triggered
+1: resumed on pos_edge(in1)
 1: in3=1
 1: in4=1
 1: or2r_out=1
@@ -225,6 +222,8 @@ namespace
 5: in4=0
 5: and4r_out=0
 5: in1=1
+5: pos_edge_in1 triggered
+5: resumed on pos_edge(in1)
 5: or3_out=0
 5: or2r_out=1
 5: or2_out=1
@@ -245,6 +244,8 @@ namespace
 8: or2_out=0
 9: in4=1
 9: in1=1
+9: pos_edge_in1 triggered
+9: resumed on pos_edge(in1)
 9: or2r_out=1
 9: or2_out=1
 10: in3=0
