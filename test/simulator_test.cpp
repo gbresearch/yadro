@@ -25,10 +25,8 @@
 //  ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
-
+#include "../util/gbutil.h"
 #include "../simulator/simulator.h"
-#include "../util/gbtest.h"
-#include "../util/misc.h"
 #include <sstream>
 #include <iostream>
 #include <thread>
@@ -60,7 +58,7 @@ namespace
         // test coroutine waiting on event
         event e1;
         printer(e1, "e1");
-        
+
         auto test_task = [&]()->sim_task {
             ss << sch.current_time() << ": enter sim_task #1\n";
             co_await(e1);
@@ -68,12 +66,12 @@ namespace
             };
 
         test_task();
-        
+
         sch.schedule(e1, 1);
         sch.run();
         gbassert(ss.str() == "0: enter sim_task #1\n1: e1 triggered\n1: sim_task #1 resumed after wait\n");
         ss = std::stringstream{};
-        
+
         // test waitable signal
         signal<int> s1(0, sch), s2(1, sch);
         printer(s1, "s1"); printer(pos_edge(s1), "s1.pos_edge"); printer(neg_edge(s1), "s1.neg_edge");
@@ -104,7 +102,7 @@ namespace
 3: s2=0
 3: s2.neg_edge triggered
 )*");
-        
+
         // test clock generator coroutine
         signal clk(false, sch);
         printer(clk, "clk");
@@ -125,7 +123,7 @@ namespace
 9: clk=0
 10: clk=1
 )*");
-        
+
         // test generator
         auto generator = [](auto& clk, auto&& initial_delay, auto&& period) {
             clk(initial_delay) = !clk;
@@ -237,7 +235,7 @@ namespace
         generate_inputs();
 
         printer(pos_edge{ in1 }, "pos_edge_in1");
-        
+
         auto pos_edge_waiter = [&]()->sim_task
             {
                 for (;;)
@@ -246,7 +244,7 @@ namespace
                     ss << sch.current_time() << ": resumed on pos_edge(in1)\n";
                 }
             };
-        
+
         pos_edge_waiter();
         ss = std::stringstream{};
         sch.run(20);
@@ -393,7 +391,7 @@ namespace
         // test generator
         auto generator = [](auto& clk, auto&& initial_delay, auto&& period) {
             clk(initial_delay) = !clk;
-            always([&clk,period] { clk(period / 2) = !clk; }, clk);
+            always([&clk, period] { clk(period / 2) = !clk; }, clk);
             };
         clk.cancel_wait();
         generator(clk, 3, 2);
@@ -503,13 +501,13 @@ namespace
         generate_inputs();
 
         printer(pos_edge{ in1 }, "pos_edge_in1");
-        
+
         sch.forever([&]
-            { 
+            {
                 wait(pos_edge(in1));
                 ss << sch.current_time() << ": resumed on pos_edge(in1)\n";
             });
-        
+
         ss = std::stringstream{};
         sch.run(20);
         gbassert(ss.str() == R"*(0: in2=1
