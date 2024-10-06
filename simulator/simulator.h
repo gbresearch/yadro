@@ -30,6 +30,6 @@
 
 #include "event.h"
 #include "fiber.h"
-#include "signal.h"
 #include "scheduler.h"
+#include "signal.h"
 #include "task.h"

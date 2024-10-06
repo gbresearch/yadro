@@ -32,7 +32,6 @@
 namespace gb::sim::fibers
 {
     struct scheduler_t;
-    struct event;
     using sim_time_t = std::uint64_t;
 
     struct fiber {

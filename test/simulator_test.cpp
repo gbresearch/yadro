@@ -36,14 +36,298 @@
 namespace
 {
     using namespace gb::yadro::util;
+    using namespace gb::sim;
 
+    void print_signal(auto&& s, const std::string& name, auto& scheduler, std::ostream& os)
+    {
+        if constexpr (requires{ s.read(); })
+            always([&, name] { os << scheduler.current_time() << ": " << name << "=" << s.read() << "\n"; }, s);
+        else
+            always([&, name] { os << scheduler.current_time() << ": " << name << " triggered\n"; }, s);
+    }
 
-    //--------------------------------------------------------------------------------------------
+    //---------------------------------------------------------------------------------------------
     GB_TEST(simulator, coroutine_test, std::launch::async)
     {
         using namespace gb::sim::coroutines;
+        using namespace std::chrono_literals;
+
+        std::stringstream ss;
+        scheduler_t sch;
+        // print signals/events
+        auto printer = [&](auto&& s, const std::string& name) { print_signal(decltype(s)(s), name, sch, ss); };
+
+        // test coroutine waiting on event
+        event e1;
+        printer(e1, "e1");
+        
+        auto test_task = [&]()->sim_task {
+            ss << sch.current_time() << ": enter sim_task #1\n";
+            co_await(e1);
+            ss << sch.current_time() << ": sim_task #1 resumed after wait\n";
+            };
+
+        test_task();
+        
+        sch.schedule(e1, 1);
+        sch.run();
+        gbassert(ss.str() == "0: enter sim_task #1\n1: e1 triggered\n1: sim_task #1 resumed after wait\n");
+        ss = std::stringstream{};
+        
+        // test waitable signal
+        signal<int> s1(0, sch), s2(1, sch);
+        printer(s1, "s1"); printer(pos_edge(s1), "s1.pos_edge"); printer(neg_edge(s1), "s1.neg_edge");
+        printer(s2, "s2"); printer(pos_edge(s2), "s2.pos_edge"); printer(neg_edge(s2), "s2.neg_edge");
+        auto inv = [](auto& in, auto& out)->sim_task
+            {
+                for (;;)
+                {
+                    co_await in;
+                    out(1) = in.read() == 0 ? 1 : 0;
+                }
+            };
+        inv(s1, s2);
+        s1 = 1;
+        s1(1) = 0;
+        s1(2) = 1;
+        sch.run();
+        gbassert(ss.str() == R"*(0: s1=1
+0: s1.pos_edge triggered
+1: s1=0
+1: s1.neg_edge triggered
+1: s2=0
+1: s2.neg_edge triggered
+2: s1=1
+2: s1.pos_edge triggered
+2: s2=1
+2: s2.pos_edge triggered
+3: s2=0
+3: s2.neg_edge triggered
+)*");
+        
+        // test clock generator coroutine
+        signal clk(false, sch);
+        printer(clk, "clk");
+        auto clk_gen = [](auto& clk, auto period) mutable -> sim_task { for (;;) { co_await clk; clk(period / 2) = !clk; }};
+        clk_gen(clk, 2);
+        clk(0) = true;
+        ss = std::stringstream{};
+        sch.run(10);
+        gbassert(ss.str() == R"*(0: clk=1
+1: clk=0
+2: clk=1
+3: clk=0
+4: clk=1
+5: clk=0
+6: clk=1
+7: clk=0
+8: clk=1
+9: clk=0
+10: clk=1
+)*");
+        
+        // test generator
+        auto generator = [](auto& clk, auto&& initial_delay, auto&& period) {
+            clk(initial_delay) = !clk;
+            always([&clk, period] { clk(period / 2) = !clk; }, clk);
+            };
+        clk.cancel_wait();
+        generator(clk, 3, 2);
+        ss = std::stringstream{};
+        sch.run(10);
+        gbassert(ss.str() == R"*(3: clk=0
+4: clk=1
+5: clk=0
+6: clk=1
+7: clk=0
+8: clk=1
+9: clk=0
+10: clk=1
+)*");
+        // test waiters and callbacks
+        signal<bool> in1(false, sch), in2(false, sch), in3(false, sch), in4(false, sch);
+        signal and2_out(false, sch), or2_out(false, sch), and3_out(false, sch), or3_out(false, sch), and4_out(false, sch), or4_out(false, sch);
+        signal and2r_out(false, sch), or2r_out(false, sch), and3r_out(false, sch), or3r_out(false, sch), and4r_out(false, sch), or4r_out(false, sch);
+        printer(in1, "in1"); printer(in2, "in2"); printer(in3, "in3"); printer(in4, "in4");
+        printer(and2_out, "and2_out"); printer(and3_out, "and3_out"); printer(and4_out, "and4_out");
+        printer(and2r_out, "and2r_out"); printer(and3r_out, "and3r_out"); printer(and4r_out, "and4r_out");
+        printer(or2_out, "or2_out"); printer(or3_out, "or3_out"); printer(or4_out, "or4_out");
+        printer(or2r_out, "or2r_out"); printer(or3r_out, "or3r_out"); printer(or4r_out, "or4r_out");
+
+        // direct callbacks
+        auto and_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in && ...); }, in...); };
+        and_some(and2r_out(1), in1, in2);
+        and_some(and3r_out(2), in1, in2, in3);
+        and_some(and4r_out(3), in1, in2, in3, in4);
+        auto or_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in || ...); }, in...); };
+        or_some(or2r_out(1), in1, in2);
+        or_some(or3r_out(2), in1, in2, in3);
+        or_some(or4r_out(3), in1, in2, in3, in4);
+
+        auto generate_inputs = [&]
+            {
+                generator(in1, 1, 4);
+                generator(in2, 0, 4);
+                generator(in3, 1, 6);
+                generator(in4, 1, 8);
+            };
+
+        generate_inputs();
+        ss = std::stringstream{};
+        sch.run(10);
+        gbassert(ss.str() == R"*(0: in2=1
+1: in1=1
+1: in3=1
+1: in4=1
+1: or2r_out=1
+2: or3r_out=1
+2: in2=0
+2: and2r_out=1
+3: or4r_out=1
+3: in1=0
+3: and3r_out=1
+3: and2r_out=0
+4: in3=0
+4: and4r_out=1
+4: and3r_out=0
+4: in2=1
+4: or2r_out=0
+5: in4=0
+5: and4r_out=0
+5: in1=1
+5: or2r_out=1
+6: or3r_out=0
+6: or3r_out=1
+6: in2=0
+6: and2r_out=1
+7: in3=1
+7: in1=0
+7: and2r_out=0
+8: in2=1
+8: or2r_out=0
+9: in4=1
+9: in1=1
+9: or2r_out=1
+10: in3=0
+10: in2=0
+10: and2r_out=1
+)*");
+        clear_events(and2r_out, and3r_out, and4r_out, or2r_out, or3r_out, or4r_out);
+
+        // coroutine functions
+        auto and_fn = [](auto& out, auto& ...in)->sim_task
+            {
+                for (;;)
+                {
+                    co_await all_of(pos_edge(in) ...);
+                    out(1) = (in && ...);
+                }
+            };
+
+        auto or_fn = [](auto& out, auto& ...in)->sim_task
+            {
+                for (;;)
+                {
+                    co_await any_of(neg_edge(in) ...);
+                    out = (in || ...);
+                }
+            };
+
+        and_fn(and2_out, in1, in2);
+        and_fn(and3_out, in1, in2, in3);
+        and_fn(and4_out, in1, in2, in3, in4);
+        or_fn(or2_out, in1, in2);
+        or_fn(or3_out, in1, in2, in3);
+        or_fn(or4_out, in1, in2, in3, in4);
+
+        generate_inputs();
+
+        printer(pos_edge{ in1 }, "pos_edge_in1");
+        
+        auto pos_edge_waiter = [&]()->sim_task
+            {
+                for (;;)
+                {
+                    co_await pos_edge(in1);
+                    ss << sch.current_time() << ": resumed on pos_edge(in1)\n";
+                }
+            };
+        
+        pos_edge_waiter();
+        ss = std::stringstream{};
+        sch.run(20);
+        gbassert(ss.str() == R"*(0: in2=1
+0: or2_out=1
+0: or3_out=1
+0: or4_out=1
+1: in1=0
+1: in3=1
+1: in4=0
+2: in2=0
+2: or2_out=0
+3: in1=1
+3: pos_edge_in1 triggered
+3: resumed on pos_edge(in1)
+3: or2_out=1
+4: in3=0
+4: in2=1
+5: in4=1
+5: in1=0
+6: in2=0
+6: or2_out=0
+6: or3_out=0
+7: in3=1
+7: in1=1
+7: pos_edge_in1 triggered
+7: resumed on pos_edge(in1)
+7: or3_out=1
+7: or2_out=1
+8: in2=1
+9: in4=0
+9: in1=0
+10: in3=0
+10: in2=0
+10: or2_out=0
+10: or3_out=0
+10: or4_out=0
+11: in1=1
+11: pos_edge_in1 triggered
+11: resumed on pos_edge(in1)
+11: or2_out=1
+11: or3_out=1
+11: or4_out=1
+12: in2=1
+13: in4=1
+13: in3=1
+13: in1=0
+14: in2=0
+14: and3_out=1
+14: or2_out=0
+15: in1=1
+15: pos_edge_in1 triggered
+15: resumed on pos_edge(in1)
+15: or2_out=1
+16: in3=0
+16: in2=1
+17: in4=0
+17: in1=0
+17: and3_out=0
+18: in2=0
+18: or2_out=0
+18: or3_out=0
+18: or4_out=0
+19: in3=1
+19: in1=1
+19: pos_edge_in1 triggered
+19: resumed on pos_edge(in1)
+19: or3_out=1
+19: or4_out=1
+19: or2_out=1
+20: in2=1
+)*");
     }
 
+    //---------------------------------------------------------------------------------------------
     GB_TEST(simulator, fiber_test, std::launch::async)
     {
         using namespace gb::sim::fibers;
@@ -53,12 +337,7 @@ namespace
         scheduler_t sch;
 
         // print signals/events
-        auto printer = [&](auto&& s, const std::string& name) {
-            if constexpr (requires{ s.read(); })
-                always([&, name] { ss << sch.current_time() << ": " << name << "=" << s.read() << "\n"; }, s);
-            else
-                always([&, name] { ss << sch.current_time() << ": " << name << " triggered\n"; }, s);
-            };
+        auto printer = [&](auto&& s, const std::string& name) { print_signal(decltype(s)(s), name, sch, ss); };
 
         // test fiber waiting on event
         event e1;
@@ -126,7 +405,6 @@ namespace
         generator(clk, 3, 2);
         ss = std::stringstream{};
         sch.run(10);
-        //std::cout << ss.str();
         gbassert(ss.str() == R"*(3: clk=0
 4: clk=1
 5: clk=0
@@ -147,6 +425,14 @@ namespace
         printer(or2_out, "or2_out"); printer(or3_out, "or3_out"); printer(or4_out, "or4_out");
         printer(or2r_out, "or2r_out"); printer(or3r_out, "or3r_out"); printer(or4r_out, "or4r_out");
 
+        auto generate_inputs = [&]
+            {
+                generator(in1, 1, 4);
+                generator(in2, 0, 4);
+                generator(in3, 1, 6);
+                generator(in4, 1, 8);
+            };
+
         // direct callbacks
         auto and_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in && ...); }, in...); };
         and_some(and2r_out(1), in1, in2);
@@ -157,30 +443,70 @@ namespace
         or_some(or3r_out(2), in1, in2, in3);
         or_some(or4r_out(3), in1, in2, in3, in4);
 
+        generate_inputs();
+        ss = std::stringstream{};
+        sch.run(10);
+        gbassert(ss.str() == R"*(0: in2=1
+1: in1=1
+1: in3=1
+1: in4=1
+1: or2r_out=1
+2: or3r_out=1
+2: in2=0
+2: and2r_out=1
+3: or4r_out=1
+3: in1=0
+3: and3r_out=1
+3: and2r_out=0
+4: in3=0
+4: and4r_out=1
+4: and3r_out=0
+4: in2=1
+4: or2r_out=0
+5: in4=0
+5: and4r_out=0
+5: in1=1
+5: or2r_out=1
+6: or3r_out=0
+6: or3r_out=1
+6: in2=0
+6: and2r_out=1
+7: in3=1
+7: in1=0
+7: and2r_out=0
+8: in2=1
+8: or2r_out=0
+9: in4=1
+9: in1=1
+9: or2r_out=1
+10: in3=0
+10: in2=0
+10: and2r_out=1
+)*");
+        // don't print the previous "always" events
+        clear_events(and2r_out, and3r_out, and4r_out, or2r_out, or3r_out, or4r_out);
+
         // fiber functions
-        auto and_fn = [](auto&& out, auto& ...in)
+        auto and_fn = [](auto& out, auto& ...in)
             {
-                wait_all(in ...);
+                wait_all(pos_edge(in) ...);
                 out(1) = (in && ...);
             };
 
-        auto or_fn = [](auto&& out, auto& ...in)
+        auto or_fn = [](auto& out, auto& ...in)
             {
-                wait_any(in ...);
+                wait_any(neg_edge(in) ...);
                 out = (in || ...);
             };
 
         sch.forever([&] { and_fn(and2_out, in1, in2); });
-        sch.forever([&] { and_fn(and3_out(1), in1, in2, in3); });
-        sch.forever([&] { and_fn(and4_out(2), in1, in2, in3, in4); });
-        sch.forever([&] { or_fn(or2_out(1), in1, in2); });
-        sch.forever([&] { or_fn(or3_out(1), in1, in2, in3); });
-        sch.forever([&] { or_fn(or4_out(1), in1, in2, in3, in4); });
+        sch.forever([&] { and_fn(and3_out, in1, in2, in3); });
+        sch.forever([&] { and_fn(and4_out, in1, in2, in3, in4); });
+        sch.forever([&] { or_fn(or2_out, in1, in2); });
+        sch.forever([&] { or_fn(or3_out, in1, in2, in3); });
+        sch.forever([&] { or_fn(or4_out, in1, in2, in3, in4); });
 
-        generator(in1, 1, 4);
-        generator(in2, 0, 4);
-        generator(in3, 1, 6);
-        generator(in4, 1, 8);
+        generate_inputs();
 
         printer(pos_edge{ in1 }, "pos_edge_in1");
         
@@ -191,67 +517,71 @@ namespace
             });
         
         ss = std::stringstream{};
-        sch.run(10);
+        sch.run(20);
         gbassert(ss.str() == R"*(0: in2=1
-1: in1=1
-1: pos_edge_in1 triggered
-1: resumed on pos_edge(in1)
+0: or2_out=1
+0: or3_out=1
+0: or4_out=1
+1: in1=0
 1: in3=1
-1: in4=1
-1: or2r_out=1
-1: or2_out=1
-1: or3_out=1
-1: or4_out=1
-2: or3r_out=1
+1: in4=0
 2: in2=0
-2: and2r_out=1
-2: and2_out=1
-3: or4r_out=1
-3: in1=0
-3: and3r_out=1
-3: and3_out=1
-3: and2r_out=0
+2: or2_out=0
+3: in1=1
+3: pos_edge_in1 triggered
+3: resumed on pos_edge(in1)
+3: or2_out=1
 4: in3=0
-4: and4r_out=1
-4: and4_out=1
-4: and3r_out=0
 4: in2=1
-4: or2r_out=0
-4: and2_out=0
-4: or2_out=0
-5: in4=0
-5: and4r_out=0
-5: in1=1
-5: pos_edge_in1 triggered
-5: resumed on pos_edge(in1)
-5: or3_out=0
-5: or2r_out=1
-5: or2_out=1
-6: or3r_out=0
-6: and3_out=0
-6: or3r_out=1
+5: in4=1
+5: in1=0
 6: in2=0
-6: and2r_out=1
-6: and2_out=1
-6: or3_out=1
+6: or3_out=0
+6: or2_out=0
 7: in3=1
-7: in1=0
-7: and2r_out=0
-8: and4_out=0
+7: in1=1
+7: pos_edge_in1 triggered
+7: resumed on pos_edge(in1)
+7: or3_out=1
+7: or2_out=1
 8: in2=1
-8: or2r_out=0
-8: and2_out=0
-8: or2_out=0
-9: in4=1
-9: in1=1
-9: pos_edge_in1 triggered
-9: resumed on pos_edge(in1)
-9: or2r_out=1
-9: or2_out=1
+9: in4=0
+9: in1=0
 10: in3=0
 10: in2=0
-10: and2r_out=1
-10: and2_out=1
+10: or2_out=0
+11: in1=1
+11: pos_edge_in1 triggered
+11: resumed on pos_edge(in1)
+11: or2_out=1
+12: in2=1
+13: in4=1
+13: in3=1
+13: in1=0
+14: in2=0
+14: and3_out=1
+14: or2_out=0
+15: in1=1
+15: pos_edge_in1 triggered
+15: resumed on pos_edge(in1)
+15: or2_out=1
+16: in3=0
+16: in2=1
+17: in4=0
+17: in1=0
+17: and3_out=0
+18: in2=0
+18: or4_out=0
+18: or3_out=0
+18: or2_out=0
+19: in3=1
+19: in1=1
+19: pos_edge_in1 triggered
+19: resumed on pos_edge(in1)
+19: or4_out=1
+19: or3_out=1
+19: or2_out=1
+20: in2=1
 )*");
     }
 }

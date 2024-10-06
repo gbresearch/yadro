@@ -124,7 +124,7 @@ namespace gb::sim
 namespace gb::sim::coroutines
 {
     using namespace gb::sim;
-    
+
     //---------------------------------------------------------------------------------------------
     using scheduler_t = scheduler_base_t;
 }

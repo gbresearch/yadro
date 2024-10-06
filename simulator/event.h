@@ -40,124 +40,15 @@
 #include "task.h"
 #include "fiber.h"
 
-namespace gb::sim::coroutines
+namespace gb::sim
 {
-    //---------------------------------------------------------------------------------------------
-    struct event
-    {
-        void trigger()
-        {
-            for (auto cancellable = std::move(_cancellable); auto && [_, f] : cancellable) { std::invoke(f); }
-            for (auto&& cb : _call_backs) std::invoke(cb);
-            for (auto handles = std::move(_handles); auto h : handles) { h.resume(); }
-        }
-
-        void schedule(auto& scheduler, auto sim_time = 0)
-        {
-            scheduler([this] { this->trigger(); }, sim_time);
-        }
-
-        void bind(auto&& ... functions) { (_call_backs.push_back(decltype(functions)(functions)), ...); }
-        void bind_cancellable(void* p, auto&& f) { _cancellable[p] = decltype(f)(f); }
-        void cancel_wait(void* p) { _cancellable.erase(p); }
-
-        void await_suspend(auto h) { _handles.push_back(h); }
-        void await_resume() {}
-        auto await_ready() { return false; }
-
-    private:
-        std::map<void*, std::function<void()>> _cancellable;
-        std::vector<std::function<void()>> _call_backs;
-        std::vector<std::coroutine_handle<>> _handles;
-    };
-
-    //---------------------------------------------------------------------------------------------
-    template<class E1, class E2>
-    struct any_event
-    {
-        any_event(E1&& e1, E2&& e2) : _e1(std::forward<E1>(e1)), _e2(std::forward<E2>(e2))
-        {
-        }
-        void trigger() { }
-        void await_suspend(auto h)
-        {
-            _handle = h;
-            // the first call back resumes coroutine and cancells the other
-            _e1.bind_cancellable(this, [this] { if (_handle) { _e2.cancel_wait(this);  _handle.resume(); } });
-            _e2.bind_cancellable(this, [this] { if (_handle) { _e1.cancel_wait(this); _handle.resume(); } });
-        }
-        void await_resume() { _handle = nullptr; }
-        auto await_ready() { return _e1.await_ready() && _e2.await_ready(); }
-
-    private:
-        E1 _e1;
-        E2 _e2;
-        std::coroutine_handle<> _handle;
-    };
-
-    template<class E1, class E2>
-    any_event(E1&&, E2&&) -> any_event<E1, E2>;
-
-    template<class E1, class E2>
-        requires requires { std::declval<E1>().trigger(); std::declval<E2>().trigger(); }
-    auto operator| (E1&& e1, E2&& e2) { return any_event(std::forward<E1>(e1), std::forward<E2>(e2)); }
-
-    //---------------------------------------------------------------------------------------------
-    template<class E1, class E2>
-    struct and_event
-    {
-        and_event(E1&& e1, E2&& e2) : _e1(std::forward<E1>(e1)), _e2(std::forward<E2>(e2)) {}
-        void trigger() { }
-        void await_suspend(auto h)
-        {
-            suspender(h);
-        }
-        void await_resume() { }
-        auto await_ready() { return _e1.await_ready() && _e2.await_ready(); }
-        task<> suspender(auto h)
-        {
-            co_await _e1;
-            co_await _e2;
-            h.resume();
-        }
-
-    private:
-        E1 _e1;
-        E2 _e2;
-    };
-
-    template<class E1, class E2>
-    and_event(E1&&, E2&&) -> and_event<E1, E2>;
-
-    template<class E1, class E2>
-        requires requires { std::declval<E1>().trigger(); std::declval<E2>().trigger(); }
-    auto operator& (E1&& e1, E2&& e2) { return and_event(std::forward<E1>(e1), std::forward<E2>(e2)); }
-
-    //---------------------------------------------------------------------------------------------
-    struct empty_event
-    {
-        void trigger() {}
-        void schedule(auto& scheduler, auto sim_time = 0) {}
-        void bind(auto&& ... call_backs) {}
-        void await_suspend(auto h) {}
-        void await_resume() {}
-        auto await_ready() { return true; }
-    };
-}
-
-//-------------------------------------------------------------------------------------------------
-namespace gb::sim::fibers
-{
-    //---------------------------------------------------------------------------------------------
-    struct event
+    struct event_base
     {
         void trigger()
         {
             for (auto&& cb : _call_backs) std::invoke(cb);
-            while (!_cancellable.empty()) { 
-                std::invoke(_cancellable.extract(std::get<0>(*_cancellable.begin())).mapped(), *this); 
-            }
-            for (auto c_once = std::move(_call_once); auto && f : c_once) { std::invoke(f); }
+            for (auto cancellable = std::move(_cancellable); auto && [_, fun] : cancellable) { std::invoke(fun); }
+            for (auto c_once = std::move(_call_once); auto&&  f : c_once) { std::invoke(f); }
         }
 
         void schedule(auto& scheduler, auto sim_time = 0)
@@ -167,23 +58,157 @@ namespace gb::sim::fibers
 
         void bind(auto&& ... functions) { (_call_backs.push_back(decltype(functions)(functions)), ...); }
         void bind_once(auto&& ... functions) { (_call_once.push_back(decltype(functions)(functions)), ...); }
-        void bind_cancellable(void* p, auto&& f) requires requires{std::invoke(f, *this); } { _cancellable[p] = decltype(f)(f); }
-        void bind_cancellable(void* p, auto&& f) requires requires{std::invoke(f); } { _cancellable[p] = [f = decltype(f)(f)](event&) { std::invoke(f); }; }
-        void cancel_wait(void* p) { _cancellable.erase(p); }
+        void bind_cancellable(void* p, auto&& f) requires requires{std::invoke(f); } { _cancellable.emplace_back(p, decltype(f)(f)); }
+        void cancel_wait(void* p) { std::erase_if(_cancellable, [p](auto&& ptr_rec) { return p == ptr_rec.first; }); }
         void cancel_wait() { _cancellable.clear(); _call_once.clear(); }
+        void clear() { _cancellable.clear(); _call_once.clear(); _call_backs.clear(); }
 
     private:
-        std::map<void*, std::function<void(event&)>> _cancellable;
+        std::vector<std::pair<void*, std::function<void()>>> _cancellable;
         std::vector<std::function<void()>> _call_backs;
         std::vector<std::function<void()>> _call_once;
+    };
+
+    inline void clear_events(auto&& ...e) { (e.clear(), ...); }
+}
+
+namespace gb::sim::coroutines
+{
+    //---------------------------------------------------------------------------------------------
+    struct event : event_base
+    {
+        // awaitable interface
+        void await_suspend(auto h) { bind_once([h = std::move(h)] { h.resume(); }); }
+        void await_resume() {}
+        auto await_ready() { return false; }
     };
 
     //---------------------------------------------------------------------------------------------
     // waiter on list of events, resumes on first triggered event and cancells all callbacks
     template<class ...E>
-    struct any_event
+    struct any_of
     {
-        any_event(E&& ...e) : _events(std::forward<E>(e)...)
+        any_of(E&& ...e) : _events(std::forward<E>(e)...)
+        {
+        }
+
+        void bind_cancellable(void* p, auto&& f)
+        {
+            std::apply([=, this](auto& ...e)
+                {
+                    (e.bind_cancellable(p, f), ...);
+                }, _events);
+        }
+
+        void cancel_wait(void* p)
+        {
+            std::apply([p](auto& ...e)
+                {
+                    (e.cancel_wait(p), ...);
+                }, _events);
+        }
+
+        void await_suspend(auto h)
+        {
+            std::apply([this, h](auto& ...e)
+                {
+                    (e.bind_cancellable(this, [h]
+                        {
+                            h.resume();
+                        }), ...);
+                }, _events);
+        }
+
+        void await_resume() { cancel_wait(this); }
+        auto await_ready() { return false; }
+
+    private:
+        std::tuple<E...> _events;
+    };
+
+    template<class ...E>
+    any_of(E&&...) -> any_of<E...>;
+
+    //---------------------------------------------------------------------------------------------
+    // waiter for all events to be triggered in any order
+    template<class ...E>
+    struct all_of
+    {
+        all_of(E&& ...e) : _events(std::tuple{ std::tuple<E, bool>{ std::forward<E>(e), false }... }) { }
+
+        void bind_cancellable(void* p, auto&& f)
+        {
+            std::apply([=, this](auto& ...e)
+                {
+                    (std::get<0>(e).bind_cancellable(p, f), ...);
+                }, _events);
+        }
+
+        void cancel_wait(void* p)
+        {
+            std::apply([=](auto& ...e)
+                {
+                    (std::get<0>(e).cancel_wait(p), ...);
+                }, _events);
+        }
+
+        void await_suspend(auto h)
+        {
+            std::apply([this, h](auto& ...ep)
+                {
+                    (std::get<0>(ep).bind_cancellable(this,
+                        [this, h, &ep]
+                        {
+                            std::get<1>(ep) = true;
+                            if (all_ready())
+                                h.resume();
+                        }), ...);
+                }, _events);
+        }
+
+        void await_resume() { cancel_wait(this); }
+        auto await_ready() { return false; }
+
+    private:
+        std::tuple<std::tuple<E, bool>...> _events;
+
+        bool all_ready()
+        {
+            return std::apply([](auto&& ...ep)
+                {
+                    return (std::get<1>(ep) && ...);
+                }, _events);
+        }
+    };
+
+    template<class ...E>
+    all_of(E&& ...) -> all_of<E...>;
+
+    //---------------------------------------------------------------------------------------------
+    struct empty_event
+    {
+        void trigger() {}
+        void schedule(auto&&...) {}
+        void bind(auto&& ...) {}
+        void bind_once(auto&& ...) {}
+        void bind_cancellable(auto&&...) {}
+        void cancel_wait(auto&&...) {}
+        void await_suspend(auto h) {}
+        void await_resume() {}
+        auto await_ready() { return true; }
+    };
+}
+
+//-------------------------------------------------------------------------------------------------
+namespace gb::sim::fibers
+{
+    using event = event_base;
+    //---------------------------------------------------------------------------------------------
+    // waiter on list of events, resumes on first triggered event and cancells all callbacks
+    template<class ...E>
+    struct any_of
+    {
+        any_of(E&& ...e) : _events(std::forward<E>(e)...)
         {
         }
         
@@ -217,22 +242,22 @@ namespace gb::sim::fibers
 
     inline void wait_any(auto&& ... e)
     {
-        wait(any_event{ decltype(e)(e)... });
+        wait(any_of{ decltype(e)(e)... });
     }
 
     template<class ...E>
-    any_event(E&&...) -> any_event<E...>;
+    any_of(E&&...) -> any_of<E...>;
 
     template<class E1, class E2>
         requires requires { std::declval<E1>().bind_cancellable(0,0); std::declval<E2>().bind_cancellable(0, 0); }
-    auto operator| (E1&& e1, E2&& e2) { return any_event(std::forward<E1>(e1), std::forward<E2>(e2)); }
+    auto operator| (E1&& e1, E2&& e2) { return any_of(std::forward<E1>(e1), std::forward<E2>(e2)); }
 
     //---------------------------------------------------------------------------------------------
     // waiter for all events to be triggered in any order
     template<class ...E>
-    struct and_event
+    struct all_of
     {
-        and_event(E&& ...e) : _events(std::tuple{ std::tuple<E, bool>{ std::forward<E>(e), false }... }) {}
+        all_of(E&& ...e) : _events(std::tuple{ std::tuple<E, bool>{ std::forward<E>(e), false }... }) {}
         void bind_once(auto call_back)
         {
             std::apply([&](auto&& ...ep)
@@ -277,15 +302,15 @@ namespace gb::sim::fibers
     template<class ...E>
     inline void wait_all(E&& ...e)
     {
-        wait(and_event{ decltype(e)(e)... });
+        wait(all_of{ decltype(e)(e)... });
     }
 
     template<class ...E>
-    and_event(E&& ...) -> and_event<E...>;
+    all_of(E&& ...) -> all_of<E...>;
 
     template<class E1, class E2>
         requires requires { std::declval<E1>().bind_cancellable(0, 0); std::declval<E2>().bind_cancellable(0, 0); }
-    auto operator& (E1&& e1, E2&& e2) { return and_event(std::forward<E1>(e1), std::forward<E2>(e2)); }
+    auto operator& (E1&& e1, E2&& e2) { return all_of(std::forward<E1>(e1), std::forward<E2>(e2)); }
 
     //---------------------------------------------------------------------------------------------
     // empty non-signalling event, providing expected interface

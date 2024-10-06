@@ -53,6 +53,25 @@ namespace gb::sim::coroutines
         struct promise_type : promise_base<task, std::suspend_never, std::suspend_never> {
             void return_void() {}
         };
+        using handle_t = std::coroutine_handle<promise_type>;
+
+        task() = default;
+        explicit task(handle_t h) : _handle(h) {}
+
+        ~task() {
+            if (_handle) _handle.destroy();
+        }
+
+        bool resume() {
+            if (!_handle.done()) {
+                _handle.resume();
+                return true;
+            }
+            return false;
+        }
+
+    private:
+        handle_t _handle;
     };
 
     template<class T>
@@ -67,4 +86,6 @@ namespace gb::sim::coroutines
     private:
         T value;
     };
+
+    using sim_task = task<>;
 }
