@@ -217,28 +217,22 @@ namespace
         // coroutine functions
         auto and_fn = [](auto& out, auto& ...in)->sim_task
             {
-                for (;;)
-                {
-                    co_await all_of(pos_edge(in) ...);
-                    out(1) = (in && ...);
-                }
+                co_await all_of(pos_edge(in) ...);
+                out(1) = (in && ...);
             };
 
         auto or_fn = [](auto& out, auto& ...in)->sim_task
             {
-                for (;;)
-                {
-                    co_await any_of(neg_edge(in) ...);
-                    out = (in || ...);
-                }
+                co_await any_of(neg_edge(in) ...);
+                out = (in || ...);
             };
 
-        and_fn(and2_out, in1, in2);
-        and_fn(and3_out, in1, in2, in3);
-        and_fn(and4_out, in1, in2, in3, in4);
-        or_fn(or2_out, in1, in2);
-        or_fn(or3_out, in1, in2, in3);
-        or_fn(or4_out, in1, in2, in3, in4);
+        forever(and_fn, and2_out, in1, in2);
+        forever(and_fn, and3_out, in1, in2, in3);
+        forever(and_fn, and4_out, in1, in2, in3, in4);
+        forever(or_fn, or2_out, in1, in2);
+        forever(or_fn, or3_out, in1, in2, in3);
+        forever(or_fn, or4_out, in1, in2, in3, in4);
 
         generate_inputs();
 
@@ -357,7 +351,7 @@ namespace
                 wait(in);
                 out(1) = in.read() == 0 ? 1 : 0;
             };
-        sch.forever([&] { inv(s1, s2); });
+        sch.forever(inv, s1, s2);
         s1 = 1;
         s1(1) = 0;
         s1(2) = 1;
@@ -380,7 +374,7 @@ namespace
         signal clk(false, sch);
         printer(clk, "clk");
         auto clk_gen = [](auto& clk, auto&& period) mutable { wait(clk); clk(period / 2) = !clk; };
-        sch.forever([&] { clk_gen(clk, 2); });
+        sch.forever(clk_gen, clk, 2);
         clk(0) = true;
         ss = std::stringstream{};
         sch.run(10);
@@ -499,12 +493,12 @@ namespace
                 out = (in || ...);
             };
 
-        sch.forever([&] { and_fn(and2_out, in1, in2); });
-        sch.forever([&] { and_fn(and3_out, in1, in2, in3); });
-        sch.forever([&] { and_fn(and4_out, in1, in2, in3, in4); });
-        sch.forever([&] { or_fn(or2_out, in1, in2); });
-        sch.forever([&] { or_fn(or3_out, in1, in2, in3); });
-        sch.forever([&] { or_fn(or4_out, in1, in2, in3, in4); });
+        sch.forever(and_fn, and2_out, in1, in2);
+        sch.forever(and_fn, and3_out, in1, in2, in3);
+        sch.forever(and_fn, and4_out, in1, in2, in3, in4);
+        sch.forever(or_fn, or2_out, in1, in2);
+        sch.forever(or_fn, or3_out, in1, in2, in3);
+        sch.forever(or_fn, or4_out, in1, in2, in3, in4);
 
         generate_inputs();
 

@@ -32,12 +32,41 @@
 
 namespace gb::sim::coroutines
 {
+    struct sim_task;
+
     //---------------------------------------------------------------------------------------------
-    template<class Coroutine, class initial_suspend_t, class final_suspend_t>
-    struct promise_base {
-        auto get_return_object() noexcept { return Coroutine{}; }
-        static initial_suspend_t initial_suspend() noexcept { return {}; }
-        static final_suspend_t final_suspend() noexcept { return {}; }
+    inline sim_task forever(auto&& coro, auto&&... args)
+    {
+        for (;;)
+            co_await coro(decltype(args)(args)...);
+    }
+
+    //---------------------------------------------------------------------------------------------
+    struct promise
+    {
+        struct {
+            bool done{ false };
+            std::coroutine_handle<> suspended_awaiter{};
+
+            bool await_ready() noexcept {
+                // We always suspend in the final awaiter to avoid the promise being destructed
+                return false;
+            }
+
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept {
+                return suspended_awaiter ? std::move(suspended_awaiter) : std::noop_coroutine();
+            }
+
+            void await_resume() noexcept {}
+        } final_awaiter;
+
+        sim_task get_return_object();
+        std::suspend_never initial_suspend() noexcept { return {}; }
+
+        // return a final awaiter that's responsible for invoking continuation coroutines
+        auto& final_suspend() noexcept { return final_awaiter; }
+
+        void return_void() {}
         void unhandled_exception() noexcept { _current_exception = std::current_exception(); }
         auto get_exception() const { return _current_exception; }
     private:
@@ -45,47 +74,24 @@ namespace gb::sim::coroutines
     };
 
     //---------------------------------------------------------------------------------------------
-    template<class T = void>
-    struct task;
+    struct sim_task
+    {
+        using promise_type = promise;
+        promise_type& promise;
 
-    template<>
-    struct task<void> {
-        struct promise_type : promise_base<task, std::suspend_never, std::suspend_never> {
-            void return_void() {}
-        };
-        using handle_t = std::coroutine_handle<promise_type>;
-
-        task() = default;
-        explicit task(handle_t h) : _handle(h) {}
-
-        ~task() {
-            if (_handle) _handle.destroy();
+        ~sim_task() { 
+            if (await_ready() && promise.final_awaiter.suspended_awaiter)
+                promise.final_awaiter.suspended_awaiter.destroy();
         }
-
-        bool resume() {
-            if (!_handle.done()) {
-                _handle.resume();
-                return true;
-            }
-            return false;
+        bool await_ready() noexcept {
+            return promise.final_awaiter.done;
         }
-
-    private:
-        handle_t _handle;
+        void await_suspend(std::coroutine_handle<promise_type> suspended) {
+            promise.final_awaiter.suspended_awaiter = std::move(suspended);
+        }
+        void await_resume() {}
     };
 
-    template<class T>
-    struct task {
-        task(auto&& v) : value(v) {}
-        struct promise_type : promise_base<task, std::suspend_never, std::suspend_never> {
-            auto get_return_object() noexcept { return task{ value }; }
-            void return_value(auto&& v) { value = decltype(v)(v); }
-            T value;
-        };
-        operator T() const { return value; }
-    private:
-        T value;
-    };
+    inline sim_task promise::get_return_object() { return { *this }; }
 
-    using sim_task = task<>;
 }
