@@ -36,12 +36,29 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <type_traits>
 
 #include "task.h"
 #include "fiber.h"
 
 namespace gb::sim
 {
+    //---------------------------------------------------------------------------------------------
+    inline auto always(auto&& call_back, auto&& first_event, auto&& ... events)
+        requires std::invocable<decltype(call_back)>
+    {
+        (events.bind(call_back), ...); // copies of callback will be stored
+        first_event.bind(decltype(call_back)(call_back)); // forward to the first event
+    }
+    //---------------------------------------------------------------------------------------------
+    inline auto once(auto&& call_back, auto&& first_event, auto&& ... events)
+        requires std::invocable<decltype(call_back)>
+    {
+        (events.bind_once(call_back), ...); // copies of callback will be stored
+        first_event.bind_once(decltype(call_back)(call_back)); // forward to the first event
+    }
+
+    //---------------------------------------------------------------------------------------------
     struct event_base
     {
         void trigger()

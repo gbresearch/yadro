@@ -34,16 +34,51 @@
 namespace gb::sim
 {
     //---------------------------------------------------------------------------------------------
-    inline auto always(auto&& call_back, auto&& first_event, auto&& ... events)
+    // support for callbacks taking signals as parameters
+    inline auto always(auto&& call_back, auto&& first_signal, auto&& ... signals)
+        requires std::invocable<decltype(call_back), decltype(first_signal), decltype(signals)...>
     {
-        (events.bind(call_back), ...); // copies of callback will be stored
-        first_event.bind(decltype(call_back)(call_back)); // forward to the first event
+        (signals.bind([cbw = gb::yadro::util::copy_wrapper{ decltype(call_back)(call_back) }, 
+            sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
+            {
+                std::apply([&](auto&& ... sig)
+                    {
+                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                    }, sigt);
+            }), ...);
+
+        first_signal.bind([cbw = gb::yadro::util::fwd_wrapper{ decltype(call_back)(call_back) },
+            sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
+            {
+                std::apply([&](auto&& ... sig)
+                    {
+                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                    }, sigt);
+            });
     }
+
     //---------------------------------------------------------------------------------------------
-    inline auto once(auto&& call_back, auto&& first_event, auto&& ... events)
+    // support for callbacks taking signals as parameters
+    inline auto once(auto&& call_back, auto&& first_signal, auto&& ... signals)
+        requires std::invocable<decltype(call_back), decltype(first_signal), decltype(signals)...>
     {
-        (events.bind_once(call_back), ...); // copies of callback will be stored
-        first_event.bind_once(decltype(call_back)(call_back)); // forward to the first event
+        (signals.bind_once([cbw = gb::yadro::util::copy_wrapper{ decltype(call_back)(call_back) },
+            sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
+            {
+                std::apply([&](auto&& ... sig)
+                    {
+                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                    }, sigt);
+            }), ...);
+
+        first_signal.bind_once([cbw = gb::yadro::util::fwd_wrapper{ decltype(call_back)(call_back) },
+            sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
+            {
+                std::apply([&](auto&& ... sig)
+                    {
+                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                    }, sigt);
+            });
     }
 
     //---------------------------------------------------------------------------------------------
