@@ -38,6 +38,7 @@ namespace gb::sim
     inline auto always(auto&& call_back, auto&& first_signal, auto&& ... signals)
         requires std::invocable<decltype(call_back), decltype(first_signal), decltype(signals)...>
     {
+        // callback must be copied to multiple signals
         (signals.bind([cbw = gb::yadro::util::copy_wrapper{ decltype(call_back)(call_back) }, 
             sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
             {
@@ -47,6 +48,7 @@ namespace gb::sim
                     }, sigt);
             }), ...);
 
+        // callback can be moved to the first signal
         first_signal.bind([cbw = gb::yadro::util::fwd_wrapper{ decltype(call_back)(call_back) },
             sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
             {
@@ -62,6 +64,7 @@ namespace gb::sim
     inline auto once(auto&& call_back, auto&& first_signal, auto&& ... signals)
         requires std::invocable<decltype(call_back), decltype(first_signal), decltype(signals)...>
     {
+        // callback must be copied to multiple signals
         (signals.bind_once([cbw = gb::yadro::util::copy_wrapper{ decltype(call_back)(call_back) },
             sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
             {
@@ -71,6 +74,7 @@ namespace gb::sim
                     }, sigt);
             }), ...);
 
+        // callback can be moved to the first signal
         first_signal.bind_once([cbw = gb::yadro::util::fwd_wrapper{ decltype(call_back)(call_back) },
             sigt = gb::yadro::util::fwd_tuple(decltype(first_signal)(first_signal), decltype(signals)(signals)...)]
             {
@@ -80,22 +84,6 @@ namespace gb::sim
                     }, sigt);
             });
     }
-
-    //---------------------------------------------------------------------------------------------
-    // sig_wrapper wraps either an lvalue reference signal or an rvalue delayed_writer
-    template<class T>
-    struct sig_wrapper
-    {
-        sig_wrapper(T&& t) : _t(std::forward<T>(t)) {}
-        operator const T& () const { return _t; }
-        decltype(auto) read() const { return _t.read(); }
-        auto& operator= (auto&& value) const { _t = decltype(value)(value); return *this; }
-    private:
-        T _t;
-    };
-
-    template<class T>
-    sig_wrapper(T&&) -> sig_wrapper<T>;
 
     // common implementation for coroutines and fibers
     namespace detail

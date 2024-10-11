@@ -127,7 +127,7 @@ namespace
         // test generator
         auto generator = [](auto& clk, auto&& initial_delay, auto&& period) {
             clk(initial_delay) = !clk;
-            always([&clk, period] { clk(period / 2) = !clk; }, clk);
+            always([period] (auto&& clk) { clk(period / 2) = !clk; }, clk);
             };
         clk.cancel_wait();
         generator(clk, 3, 2);
@@ -153,11 +153,11 @@ namespace
         printer(or2r_out, "or2r_out"); printer(or3r_out, "or3r_out"); printer(or4r_out, "or4r_out");
 
         // direct callbacks
-        auto and_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in && ...); }, in...); };
+        auto and_some = [](auto&& out, auto&... in) { always([&, out = fwd_wrapper(decltype(out)(out))] { out = (in && ...); }, in...); };
         and_some(and2r_out(1), in1, in2);
         and_some(and3r_out(2), in1, in2, in3);
         and_some(and4r_out(3), in1, in2, in3, in4);
-        auto or_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in || ...); }, in...); };
+        auto or_some = [](auto&& out, auto&... in) { always([&, out = fwd_wrapper(decltype(out)(out))] { out = (in || ...); }, in...); };
         or_some(or2r_out(1), in1, in2);
         or_some(or3r_out(2), in1, in2, in3);
         or_some(or4r_out(3), in1, in2, in3, in4);
@@ -391,7 +391,7 @@ namespace
         // test generator
         auto generator = [](auto& clk, auto&& initial_delay, auto&& period) {
             clk(initial_delay) = !clk;
-            always([&clk, period] { clk(period / 2) = !clk; }, clk);
+            always([period](auto& clk) { clk(period / 2) = !clk; }, clk);
             };
         clk.cancel_wait();
         generator(clk, 3, 2);
@@ -426,11 +426,11 @@ namespace
             };
 
         // direct callbacks
-        auto and_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in && ...); }, in...); };
+        auto and_some = [](auto&& out, auto&... in) { always([&, out = fwd_wrapper(decltype(out)(out))] { out = (in && ...); }, in...); };
         and_some(and2r_out(1), in1, in2);
         and_some(and3r_out(2), in1, in2, in3);
         and_some(and4r_out(3), in1, in2, in3, in4);
-        auto or_some = [](auto&& out, auto&... in) { always([&, out = sig_wrapper(decltype(out)(out))] { out = (in || ...); }, in...); };
+        auto or_some = [](auto&& out, auto&... in) { always([&, out = fwd_wrapper(decltype(out)(out))] { out = (in || ...); }, in...); };
         or_some(or2r_out(1), in1, in2);
         or_some(or3r_out(2), in1, in2, in3);
         or_some(or4r_out(3), in1, in2, in3, in4);

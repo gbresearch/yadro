@@ -124,23 +124,17 @@ namespace gb::yadro::util
         return static_cast<T>(std::forward<T>(t));
     }
 
-    namespace v2
+    namespace detail
     {
-        // this implementation is problematic in MSVC, which creates superfluous copies and moves: https://gcc.godbolt.org/z/q5Y8shhq5
-        
         //---------------------------------------------------------------------------------------------
         // fwd_or_copy_wrapper wraps either an lvalue reference or depending on FWD parameter 
         // forwards(moves) rvalue inside or copies it
         template<class T, bool FWD>
         struct fwd_or_copy_wrapper
         {
-#if !defined(fixed_10766523)
-            fwd_or_copy_wrapper(T&& t) : _t(FWD ? std::forward<T>(t) : t) {}
-#else
-            // internal compiler error: https://developercommunity.visualstudio.com/t/fatal-error-C1001:-Internal-compiler-err/10766523
+            // internal compiler error fixed: https://developercommunity.visualstudio.com/t/fatal-error-C1001:-Internal-compiler-err/10766523
             fwd_or_copy_wrapper(T&& t) requires FWD : _t(std::forward<T>(t)) {}
             fwd_or_copy_wrapper(T&& t) requires (!FWD) : _t(t) {}
-#endif
             decltype(auto) get() const { return (_t); }
             operator const T& () const { return _t; }
             auto& operator= (auto&& value) const { _t = decltype(value)(value); return *this; }
@@ -150,53 +144,17 @@ namespace gb::yadro::util
 
         template<class T, bool FWD>
         fwd_or_copy_wrapper(T&& t) -> fwd_or_copy_wrapper<T, FWD>;
-
-        //---------------------------------------------------------------------------------------------
-        // fwd_wrapper wraps either an lvalue reference or moves rvalue inside
-        template<class T>
-        using fwd_wrapper = fwd_or_copy_wrapper<T, true>;
-
-        //---------------------------------------------------------------------------------------------
-        // copy_wrapper wraps either an lvalue reference or copies rvalue inside
-        template<class T>
-        using copy_wrapper = fwd_or_copy_wrapper<T, false>;
     }
 
-    inline namespace v1
-    {
-        //---------------------------------------------------------------------------------------------
-        // fwd_wrapper wraps either an lvalue reference or moves rvalue inside
-        template<class T>
-        struct fwd_wrapper
-        {
-            fwd_wrapper(T&& t) : _t(std::forward<T>(t)) {}
-            decltype(auto) get() const { return (_t); }
-            operator const T& () const { return _t; }
-            auto& operator= (auto&& value) const { _t = decltype(value)(value); return *this; }
-        private:
-            T _t;
-        };
+    //---------------------------------------------------------------------------------------------
+    // fwd_wrapper wraps either an lvalue reference or moves rvalue inside
+    template<class T>
+    using fwd_wrapper = detail::fwd_or_copy_wrapper<T, true>;
 
-        template<class T>
-        fwd_wrapper(T&& t) -> fwd_wrapper<T>;
-
-        //---------------------------------------------------------------------------------------------
-        // copy_wrapper wraps either an lvalue reference or copies rvalue inside
-
-        template<class T>
-        struct copy_wrapper
-        {
-            copy_wrapper(T&& t) : _t(t) {}
-            decltype(auto) get() const { return (_t); }
-            operator const T& () const { return _t; }
-            auto& operator= (auto&& value) const { _t = decltype(value)(value); return *this; }
-        private:
-            T _t;
-        };
-
-        template<class T>
-        copy_wrapper(T&& t) -> copy_wrapper<T>;
-    }
+    //---------------------------------------------------------------------------------------------
+    // copy_wrapper wraps either an lvalue reference or copies rvalue inside
+    template<class T>
+    using copy_wrapper = detail::fwd_or_copy_wrapper<T, false>;
 
     //-------------------------------------------------------------------------
     // creating a tuple with lvalue reference types preserved and rvalue reference types moved
