@@ -36,7 +36,6 @@ namespace gb::sim
     //---------------------------------------------------------------------------------------------
     // support for callbacks taking signals as parameters
     inline auto always(auto&& call_back, auto&& first_signal, auto&& ... signals)
-        requires std::invocable<decltype(call_back), decltype(first_signal), decltype(signals)...>
     {
         // callback must be copied to multiple signals
         (signals.bind([cbw = gb::yadro::util::copy_wrapper{ decltype(call_back)(call_back) }, 
@@ -44,7 +43,13 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        if constexpr(std::invocable<decltype(call_back), decltype(sig)...>)
+                            std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        else
+                        {
+                            static_assert(std::invocable<decltype(call_back)>);
+                            std::invoke(cbw.get());
+                        }
                     }, sigt);
             }), ...);
 
@@ -54,7 +59,13 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        if constexpr (std::invocable<decltype(call_back), decltype(sig)...>)
+                            std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        else
+                        {
+                            static_assert(std::invocable<decltype(call_back)>);
+                            std::invoke(cbw.get());
+                        }
                     }, sigt);
             });
     }
@@ -62,7 +73,6 @@ namespace gb::sim
     //---------------------------------------------------------------------------------------------
     // support for callbacks taking signals as parameters
     inline auto once(auto&& call_back, auto&& first_signal, auto&& ... signals)
-        requires std::invocable<decltype(call_back), decltype(first_signal), decltype(signals)...>
     {
         // callback must be copied to multiple signals
         (signals.bind_once([cbw = gb::yadro::util::copy_wrapper{ decltype(call_back)(call_back) },
@@ -70,7 +80,13 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        if constexpr (std::invocable<decltype(call_back), decltype(sig)...>)
+                            std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        else
+                        {
+                            static_assert(std::invocable<decltype(call_back)>);
+                            std::invoke(cbw.get());
+                        }
                     }, sigt);
             }), ...);
 
@@ -80,7 +96,13 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        if constexpr (std::invocable<decltype(call_back), decltype(sig)...>)
+                            std::invoke(cbw.get(), decltype(sig)(sig)...);
+                        else
+                        {
+                            static_assert(std::invocable<decltype(call_back)>);
+                            std::invoke(cbw.get());
+                        }
                     }, sigt);
             });
     }
