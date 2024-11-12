@@ -79,42 +79,6 @@ namespace gb::yadro::util
     };
 
     //-------------------------------------------------------------------------
-    // create_unique - make_unique missing overloads
-    // clang bug: https://github.com/llvm/llvm-project/issues/106182
-    // create a unique_ptr of template type S, derived from Base, returning unique_ptr<Base>
-    template<class Base, template<class...> class S>
-    inline auto create_unique(auto&&... args) -> std::unique_ptr<Base>
-        requires(std::derived_from<decltype(S{ std::forward<decltype(args)>(args)... }), Base > )
-    {
-        using Type = std::remove_cvref_t<decltype(S{ std::forward<decltype(args)>(args)... }) > ;
-        return std::make_unique<Type>(std::forward<decltype(args)>(args)...);
-    }
-    //---------------------------------------------------------------------------------------------
-    // create uniq_ptr of template type S
-    template<template<class...> class S>
-    inline auto create_unique(auto&&... args)
-    {
-        using Type = std::remove_cvref_t<decltype(S{ std::forward<decltype(args)>(args)... }) > ;
-        return std::make_unique<Type>(std::forward<decltype(args)>(args)...);
-    }
-
-    //---------------------------------------------------------------------------------------------
-    // create unique_ptr of non-template type S, derived from Base
-    template<class Base, std::derived_from<Base> S>
-    inline auto create_unique(auto&&... args) -> std::unique_ptr<Base>
-    {
-        return std::make_unique<S>(std::forward<decltype(args)>(args)...);
-    }
-
-    //---------------------------------------------------------------------------------------------
-    // same as unique_ptr, necessary for generic use of create_unique regardless of type S
-    template<class S>
-    inline auto create_unique(auto&&... args)
-    {
-        return std::make_unique<S>(std::forward<decltype(args)>(args)...);
-    }
-
-    //-------------------------------------------------------------------------
     // lambda function traits, deducing return type and parameters
     template<class Fn> struct lambda_traits;
 
