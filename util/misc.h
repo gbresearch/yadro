@@ -53,6 +53,27 @@ namespace gb::yadro::util
     constexpr T& as_lvalue(T&& t) { return { t }; }
 
     //-------------------------------------------------------------------------
+    // creating comparator for arbitrary types, used in associative containers
+    template<class Key, class ExtractionFn, class Compare = std::less<>>
+    struct field_comparator_t
+    {
+        using is_transparent = void;
+
+        auto operator()(auto&& a1, auto&& a2) const 
+            requires (!std::convertible_to<decltype(a1), Key> && !std::convertible_to<decltype(a2), Key>)
+        { return Compare{}(ExtractionFn{}(a1), ExtractionFn{}(a2)); }
+        
+        auto operator()(auto&& a, const Key& str) const requires (!std::convertible_to<decltype(a), Key>)
+        { return Compare{}(ExtractionFn{}(a), str); }
+        
+        auto operator()(const Key& str, auto&& a) const requires (!std::convertible_to<decltype(a), Key>)
+        { return Compare{}(str, ExtractionFn{}(a)); }
+        
+        auto operator()(const Key& str1, const Key& str2) const
+        { return Compare{}(str1, str2); }
+    };
+
+    //-------------------------------------------------------------------------
     // create_unique - make_unique missing overloads
     // clang bug: https://github.com/llvm/llvm-project/issues/106182
     // create a unique_ptr of template type S, derived from Base, returning unique_ptr<Base>
