@@ -56,6 +56,11 @@
 namespace gb::yadro::archive
 {
     //---------------------------------------------------------------------
+    // constrained type for friend serialize functions
+    template<class T, class ConcreteType>
+    concept serializable_as = std::same_as<std::remove_cvref_t<T>, ConcreteType>;
+
+    //---------------------------------------------------------------------
     // convenience function to deserialize multiple types
     template<class... Ts>
     auto deserialize(auto&& archive) requires requires { (Ts{}, ...); }
