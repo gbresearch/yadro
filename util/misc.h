@@ -47,6 +47,11 @@
 
 namespace gb::yadro::util
 {
+    //---------------------------------------------------------------------
+    // constraining decayed type to be the same as ConcreteType
+    template<class T, class ConcreteType>
+    concept decay_as = std::same_as<std::decay_t<T>, ConcreteType>;
+
     //-------------------------------------------------------------------------
     // casting xvalue to lvalue
     template<class T>
