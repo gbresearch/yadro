@@ -324,8 +324,6 @@ namespace gb::yadro::util
             }
         }
 
-        void run(async::threadpool<>&);
-
         // functions are invoked by index
         template<class ...Fn>
         int run(Fn... functions)
@@ -539,6 +537,7 @@ namespace gb::yadro::util
     }
 
     //----------------------------------------------------------------------------------------------
+    // pipe creates a new thread for every connection
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
@@ -557,22 +556,44 @@ namespace gb::yadro::util
                 if (v.size() % 10 == 0) // clean up periodically
                     std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
 
-                winpipe_server_t server(pipename, log);
-                std::binary_semaphore move_completed(0);
-
                 auto f = std::async(std::launch::async,
-                    [&] {
-                        auto s{ std::move(server) };
-                        move_completed.release();
+                    [&, s = winpipe_server_t{ pipename, log }]() mutable {
                         auto ret = s.run(std::forward<decltype(fn)>(fn)...);
                         shutdown = ret == server_shutdown;
 
                         return ret;
                     });
 
-                move_completed.acquire();
-
                 v.push_back(std::move(f));
+            }
+        }
+        else
+        {
+            auto message = to_string("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
+            throw_error(message);
+        }
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // pipe puts new connections in threadpool
+    template<class ...Fn>
+    void start_server(async::threadpool<>& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
+    {
+        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+        global_mutex mtx{ mutex_name };
+        std::unique_lock l(mtx, std::defer_lock);
+        using namespace std::chrono_literals;
+
+        if (l.try_lock_for(100ms))
+        {
+            for (std::atomic_bool shutdown{ false }; !shutdown;)
+            {
+                tp([&, s = winpipe_server_t{ pipename, log }]() mutable {
+                    auto ret = s.run(std::forward<decltype(fn)>(fn)...);
+                    shutdown = ret == server_shutdown;
+
+                    return ret;
+                    });
             }
         }
         else

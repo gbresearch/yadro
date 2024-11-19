@@ -522,4 +522,67 @@ unset multiplot)*";
         gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
 #endif
     }
+
+    GB_TEST(util, win_pipe_threadpool)
+    {
+        using namespace std::chrono_literals;
+#if defined(GBWINDOWS)
+        // test named functions, using throttling threadpool
+        auto f = std::async(std::launch::async, []
+            {
+                gb::yadro::async::threadpool<> tp(2);
+                start_server(tp, L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                    std::tuple{ "zero", [](int) {} },
+                    std::tuple{ "one", [](const std::vector<int>& v) { return v; } }, // echo vector
+                    std::tuple{ "two", [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; } },
+                    std::tuple{ "three", [] {} },
+                    std::tuple{ "four", [] { return 1; } }
+                    );
+            });
+        {   // first client
+            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            gbassert(client.request<void>("zero", 1));
+            gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
+            gbassert(client.request<void>("three"));
+            gbassert(client.request<int>("four") == 1);
+            client.disconnect();
+        }
+        {   // second client
+            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            gbassert(client.request<void>("zero", 1));
+            gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
+            client.disconnect();
+        }
+        {   // two clients, overlaping requests
+            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+            gbassert(client.request<void>("zero", 1));
+            winpipe_client_t client1(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+            gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
+            client.disconnect();
+            gbassert(client1.request<void>("zero", 1));
+            gbassert(client1.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
+        }
+        {   // multiple clients, async access
+            auto make_client = [](const char* name)
+                {
+                    return std::async(std::launch::async, [name]
+                        {
+                            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", name, 5);
+                            for (auto i = 0; i < 5; ++i)
+                            {
+                                std::vector<int> vec(1'000'000, 0);
+                                vec[0] = i; vec[1] = i + 1; vec[3] = i + 2; vec[4] = i + 3; vec[5] = i + 4; vec.back() = 12345;
+                                auto response = client.request<std::vector<int>>("one", vec);
+                                gbassert(response.value() == vec);
+                            }
+                        }).share();
+                };
+
+            std::vector futures{ make_client("one"), make_client("two"), make_client("three"), make_client("four"), 
+                make_client("five"), make_client("six"), make_client("seven"), make_client("eight") };
+        }
+
+        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
+#endif
+    }
 }
