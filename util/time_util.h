@@ -34,19 +34,20 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
-    inline auto time_stamp()
+    // get time stamp for specified time zone (current zone by default)
+    // e.g. time_stamp("UTC"), time_stamp("America/New_York")
+    inline auto time_stamp(std::string_view zone = std::chrono::current_zone()->name())
     {
-        using namespace std::chrono_literals;
         using namespace std::chrono;
-        auto now = system_clock::now();
-        auto tstamp{ system_clock::to_time_t(now) };
-        auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-
-        return (std::ostringstream{} << "[" << std::put_time(std::localtime(&tstamp), "%F %T")
-            << '.' << std::setfill('0') << std::setw(3) << ms.count()
-            << "] [pid: " << ::_getpid() << ", tid: " << std::this_thread::get_id() << "]").str();
+        try {
+            return std::format("[{:%F %T}][pid: {}, tid: {}]", zoned_time{ zone, system_clock::now() },
+                ::_getpid(), std::this_thread::get_id());
+        }
+        catch (std::exception&)
+        {
+            return std::format("[invalid time zone: {}][pid: {}, tid: {}]", zone, ::_getpid(), std::this_thread::get_id());
+        }
     }
-
     //-------------------------------------------------------------------------
     // DateTime conversion
     inline auto datetime_to_chrono(double datetime)
