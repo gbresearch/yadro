@@ -71,17 +71,7 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     inline std::chrono::system_clock::time_point to_time_point(int year, int month, int day) {
-        // Create a tm structure representing the specified date
-        std::tm tm = {};
-        tm.tm_year = year - 1900;  // tm_year is years since 1900
-        tm.tm_mon = month - 1;     // tm_mon is 0-based (0 = January)
-        tm.tm_mday = day;          // tm_mday is 1-based
-
-        // Convert the tm structure to time_t, which represents time in seconds since the epoch
-        std::time_t time_t_date = std::mktime(&tm);
-
-        // Convert the time_t to a std::chrono::time_point
-        return std::chrono::system_clock::from_time_t(time_t_date);
+        return std::chrono::sys_days(std::chrono::year(year) / month / day);
     }
 
     //-------------------------------------------------------------------------
