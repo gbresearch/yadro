@@ -214,15 +214,17 @@ namespace
         using namespace std::chrono_literals;
         gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15");
 
-        static_assert(week_of_year(1977, 1, 1) == 53);
-        static_assert(week_of_year(1977, 1, 2) == 53);
-        static_assert(week_of_year(1977, 12, 31) == 52);
-        static_assert(week_of_year(1978, 12, 31) == 52);
-        static_assert(week_of_year(1979, 12, 31) == 1);
-        static_assert(week_of_year(1980, 12, 31) == 1);
-        static_assert(week_of_year(1982, 1, 1) == 53);
-        static_assert(week_of_year(2016, 11, 5) == 44);
-        static_assert(week_of_year(2024, 1, 1) == 1);
+        static_assert(week_of_year(1977, 1, 1) == std::tuple{ 1976, 53, 6 });
+        static_assert(week_of_year(1977, 1, 2) == std::tuple{ 1976, 53, 7 });
+        static_assert(week_of_year(1977, 12, 31) == std::tuple{ 1977, 52, 6 });
+        static_assert(week_of_year(1978, 12, 31) == std::tuple{ 1978, 52, 7 });
+        static_assert(week_of_year(1979, 12, 31) == std::tuple{ 1980, 1, 1 });
+        static_assert(week_of_year(1980, 12, 31) == std::tuple{ 1981, 1, 3 });
+        static_assert(week_of_year(1982, 1, 1) == std::tuple{ 1981, 53, 5 });
+        static_assert(week_of_year(2012, 1, 1) == std::tuple{ 2011, 52, 7 });
+        static_assert(week_of_year(2016, 11, 5) == std::tuple{ 2016, 44, 6 });
+        static_assert(week_of_year(2024, 1, 1) == std::tuple{ 2024, 1, 1 });
+        static_assert(week_of_year(2024, 11, 23) == std::tuple{ 2024, 47, 6 });
 
         gbassert(tokenize<char>("abc,xyz,foo,bar", ',') == std::vector<std::string>{ "abc", "xyz", "foo", "bar" });
         gbassert(!almost_equal(1.55, 1.54, 0.001));

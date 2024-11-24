@@ -77,7 +77,8 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // ISO 8601: https://en.wikipedia.org/wiki/ISO_week_date
-    inline constexpr int week_of_year(int y, int m, int d)
+    // online calendar: https://planetcalc.com/8540/
+    inline constexpr auto week_of_year(int y, int m, int d) -> std::tuple<int, int, int> // {year, week, day-of-week}
     {
         using namespace std::chrono;
         constexpr int common_year[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
@@ -89,12 +90,12 @@ namespace gb::yadro::util
         auto dow = weekday(ymd).iso_encoding();
         auto woy = (10 + doy - dow) / 7;
         if (woy == 0)
-            return week_of_year(y - 1, 12, 31);
+            return { y - 1, std::get<1>(week_of_year(y - 1, 12, 31)), dow };
         if (woy == 53)
         {
             if (weekday(year(y) / 12 / 31) != Thursday && weekday(year(y - 1) / 12 / 31) != Wednesday)
-                return 1;
+                return { y + 1, 1, dow };
         }
-        return woy;
+        return { y, woy, dow };
     }
 }
