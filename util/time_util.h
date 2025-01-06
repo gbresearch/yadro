@@ -84,18 +84,18 @@ namespace gb::yadro::util
         constexpr int common_year[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
         constexpr int leap_year[] = { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 };
         auto normalize = [](year_month_day ymd) {ymd += months{ 0 }; return year_month_day{ sys_days{ymd} }; };
-        auto is_leap = normalize(year(y) / 2 / 29).month() == February;
+        auto is_leap = y % 4 == 0 && y % 100 != 0 || y % 400 == 0;
         auto doy = (is_leap ? leap_year[m - 1] : common_year[m - 1]) + d;
         auto ymd = year(y) / m / d;
         auto dow = weekday(ymd).iso_encoding();
         auto woy = (10 + doy - dow) / 7;
+        
         if (woy == 0)
             return { y - 1, std::get<1>(week_of_year(y - 1, 12, 31)), dow };
-        if (woy == 53)
-        {
-            if (weekday(year(y) / 12 / 31) != Thursday && weekday(year(y - 1) / 12 / 31) != Wednesday)
-                return { y + 1, 1, dow };
-        }
+
+        if (woy == 53 && weekday(year(y) / 12 / 31) != Thursday && weekday(year(y - 1) / 12 / 31) != Wednesday)
+            return { y + 1, 1, dow };
+        
         return { y, woy, dow };
     }
 }
