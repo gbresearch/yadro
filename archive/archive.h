@@ -50,6 +50,7 @@
 #include <ranges>
 #include <expected>
 
+#include "../util/gberror.h"
 #include "../util/string_util.h"
 #include "archive_traits.h"
 
@@ -58,13 +59,17 @@ namespace gb::yadro::archive
     //---------------------------------------------------------------------
     // convenience function to deserialize multiple types
     template<class... Ts>
-    auto deserialize(auto&& archive) requires requires { (Ts{}, ...); }
+    inline auto deserialize(auto&& archive) requires requires { (Ts{}, ...); }
     {
         std::tuple<Ts...> tup;
         std::invoke(std::forward<decltype(archive)>(archive), tup);
         return tup;
     }
-    
+
+    //---------------------------------------------------------------------
+    // returns stream size required for serialization (writing)
+    inline auto serialization_size(auto&&... args);
+
     //---------------------------------------------------------------------
     enum class archive_format_t { binary, text, custom };
     //---------------------------------------------------------------------
@@ -182,6 +187,19 @@ namespace gb::yadro::archive
         void operator()(Ts&&... ts) requires(sizeof...(Ts) > 1)
         {
             ((*this)(std::forward<Ts>(ts)), ...);
+        }
+
+        //-----------------------------------
+        // fixed record size serialization with padding at the end of the record to allow non-destructive expansion
+        void serialize_with_padding(std::size_t record_size, std::uint8_t padding, auto&& ...ts)
+        {
+            (*this)(decltype(ts)(ts)...);
+
+            auto size = serialization_size(decltype(ts)(ts)...);
+            gb::yadro::util::gbassert(size <= record_size);
+
+            for (; size < record_size; ++size)
+                (*this)(padding);
         }
     };
 
