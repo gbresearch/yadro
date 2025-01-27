@@ -49,18 +49,13 @@ namespace gb::yadro::util
         }
     }
     //-------------------------------------------------------------------------
-    // DateTime conversion
-    inline auto datetime_to_chrono(double datetime)
+    // Delphi DateTime conversion
+    inline constexpr auto datetime_to_chrono(double datetime) 
     {
-        using namespace std::chrono_literals;
-        auto days = unsigned(datetime);
-        auto hours = unsigned((datetime - days) * 24);
-        auto mins = unsigned(((datetime - days) * 24 - hours) * 60);
-        auto secs = std::lround((((datetime - days) * 24 - hours) * 60 - mins) * 60);
-        return std::chrono::sys_days{ 1899y / 12 / 30 } + std::chrono::days(days)
-            + std::chrono::hours(hours)
-            + std::chrono::minutes(mins)
-            + std::chrono::seconds(secs);
+        using namespace std::chrono;
+        // Add the duration to the TDateTime epoch to get the system_clock time_point
+        return sys_days{ December / 30 / 1899 } + duration_cast<system_clock::duration>(
+            duration<double, std::ratio<86400>>(datetime));
     }
 
     //-------------------------------------------------------------------------

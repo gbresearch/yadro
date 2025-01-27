@@ -212,7 +212,7 @@ namespace
         }
         gbassert(v == 123);
         using namespace std::chrono_literals;
-        gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15");
+        gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15.0000000");
 
         static_assert(week_of_year(1977, 1, 1) == std::tuple{ 1976, 53, 6 });
         static_assert(week_of_year(1977, 1, 2) == std::tuple{ 1976, 53, 7 });
