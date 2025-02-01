@@ -110,7 +110,7 @@ namespace gb::yadro::util
         lock.l_start = 0;
         lock.l_len = 0;
         auto ret = ::fcntl(_handle, F_SETLK, &lock);
-        gbassert(ret != -1 || errno == = EAGAIN || errno == EACCES);
+        gbassert(ret != -1 || errno == EAGAIN || errno == EACCES);
         return ret != -1;
     }
 
