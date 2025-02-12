@@ -167,7 +167,6 @@ namespace gb::yadro::util
         using file_handle_t = int;
         static constexpr file_handle_t invalid_handle = -1;
         file_handle_t _handle = invalid_handle;
-        unsigned long long unique_tid = syscall(SYS_gettid);
     };
 
 }

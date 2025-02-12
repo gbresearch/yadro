@@ -173,12 +173,24 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
+    template<class ErrorType = failed_assertion>
     inline void gbassert(const auto& cond, std::source_location location = std::source_location::current())
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
-        gbassert<failed_assertion>(std::forward<decltype(cond)>(cond), "assertion failed", location);
+        gbassert<ErrorType>(std::forward<decltype(cond)>(cond), "assertion failed", location);
     }
 
+    //-------------------------------------------------------------------------
+    template<class ExceptionType>
+    inline void must_throw(auto&& fun, std::source_location location = std::source_location::current())
+    {
+        auto thrown = false;
+        try { std::invoke(fun); }
+        catch (const ExceptionType&) { thrown = true; }
+        catch (...) {}
+        gbassert(thrown, location);
+    }
+    
     //-------------------------------------------------------------------------
     inline void must_throw(auto&& fun, std::source_location location = std::source_location::current())
     {

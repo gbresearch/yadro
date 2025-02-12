@@ -29,8 +29,7 @@
 #include "../util/gbtest.h"
 #include "../util/misc.h"
 #include "../archive/archive.h"
-#include "../algorithm/genetic_optimization.h"
-#include "../algorithm/regression_analysis.h"
+#include "../algorithm/gbalgorithm.h"
 #include <iostream>
 #include <thread>
 
@@ -295,5 +294,34 @@ namespace
             gbassert(almost_equal(a, 1., 0.1));
             gbassert(almost_equal(b, 1., 0.1));
         }
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, kolmogorov_smirnov, std::launch::async)
+    {
+        std::mt19937 gen(12345);
+        std::normal_distribution<> norm1(0.0, 1.0);
+        std::uniform_real_distribution<double> uniform1(0.0, 1.0);
+        std::normal_distribution<> norm2(0.0, 1.0);
+        std::uniform_real_distribution<double> uniform2(0.0, 1.0);
+
+        auto ks = [&](auto dist1, auto dist2, auto test_size)
+            {
+                std::vector<double> sample1(test_size);
+                std::vector<double> sample2(test_size);
+                for (int i = 0; i < test_size; ++i) {
+                    sample1[i] = dist1(gen);
+                    sample2[i] = dist2(gen);
+                }
+                auto [_, p_value] = kolmogorov_smirnov_test(sample1, sample2);
+                return p_value;
+            };
+
+        gbassert(ks(norm1, norm2, 1000) > 0.05);
+        gbassert(ks(uniform1, uniform2, 1000) > 0.05);
+        gbassert(ks(norm1, uniform1, 1000) < 0.05);
+        gbassert(ks(uniform1, norm1, 1000) < 0.05);
+        gbassert(ks(norm2, uniform2, 1000) < 0.05);
+        gbassert(ks(uniform2, norm2, 1000) < 0.05);
     }
 }

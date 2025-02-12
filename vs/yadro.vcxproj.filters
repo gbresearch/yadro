@@ -139,6 +139,9 @@
     <ClInclude Include="..\simulator\fiber.h">
       <Filter>simulator</Filter>
     </ClInclude>
+    <ClInclude Include="..\algorithm\statistics.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">
