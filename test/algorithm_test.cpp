@@ -347,7 +347,46 @@ namespace
                 }
                 return sqrt(error / data.size());
             };
+        
+        gbassert(calc_error(data, components) < 0.001);
+    }
 
-        gbassert(calc_error(data, components) < 0.01);
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, bluestein_test, std::launch::async)
+    {
+        // Use an arbitrary length (not a power of 2).
+        size_t N = 1000;
+        std::vector<double> test_data(N);
+
+        // Fill test_data with 10 periods of a sine wave.
+        for (size_t i = 0; i < N; ++i) {
+            test_data[i] = sin(2 * std::numbers::pi * 10 * i / N);
+        }
+
+        // Compute the Bluestein FFT (returns sorted positive frequency components).
+        auto sortedComponents = bluestein(test_data);
+        gbassert(sortedComponents.size() == 501);
+
+        auto [magnitude, frequency, phase] = sortedComponents[0];
+        gbassert(almost_equal(magnitude, 1., 0.01));
+        gbassert(almost_equal(frequency, 0.01, 0.001));
+        gbassert(almost_equal(phase, -1.5708, 0.0001));
+
+        auto calc_error = [](auto&& data, auto&& components)
+            {
+                std::vector<double> reconstructed(data.size());
+                for (const auto& [magnitude, frequency, phase] : components) {
+                    for (size_t i = 0; i < data.size(); ++i) {
+                        reconstructed[i] += magnitude * cos(2 * std::numbers::pi * frequency * i + phase);
+                    }
+                }
+                double error = 0.0;
+                for (size_t i = 0; i < data.size(); ++i) {
+                    error += pow(data[i] - reconstructed[i], 2);
+                }
+                return sqrt(error / data.size());
+            };
+
+        gbassert(calc_error(test_data, sortedComponents) < 1e-10);
     }
 }
