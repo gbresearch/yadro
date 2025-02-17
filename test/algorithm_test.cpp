@@ -324,4 +324,30 @@ namespace
         gbassert(ks(norm2, uniform2, 1000) < 0.05);
         gbassert(ks(uniform2, norm2, 1000) < 0.05);
     }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, fft_decompose_test, std::launch::async)
+    {
+        std::vector<double> data(1024);
+        std::generate(data.begin(), data.end(), [n = 0]() mutable { return std::sin(n++ * 0.1); });
+        auto components = fft_decompose(data);
+        gbassert(components.size() == 513);
+
+        auto calc_error = [](auto&& data, auto&& components)
+            {
+                std::vector<double> reconstructed(data.size());
+                for (const auto& [magnitude, frequency, phase] : components) {
+                    for (size_t i = 0; i < data.size(); ++i) {
+                        reconstructed[i] += magnitude * cos(2 * std::numbers::pi * frequency * i + phase);
+                    }
+                }
+                double error = 0.0;
+                for (size_t i = 0; i < data.size(); ++i) {
+                    error += pow(data[i] - reconstructed[i], 2);
+                }
+                return sqrt(error / data.size());
+            };
+
+        gbassert(calc_error(data, components) < 0.01);
+    }
 }

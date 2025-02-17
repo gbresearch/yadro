@@ -37,6 +37,30 @@
 
 namespace gb::yadro::algorithm
 {
+    // Function to compute mean and standard deviation
+    template <std::ranges::sized_range Sequence>
+        requires requires(typename Sequence::value_type t) { { static_cast<double>(t) }; }
+    std::pair<double, double> mean_stddev(const Sequence& data) 
+    {
+        size_t n = data.size();
+        if (n == 0) return { 0.0, 0.0 };
+
+        auto sum = 0.0;
+        auto sum_sq = 0.0;
+
+        for (const auto& value : data) {
+            double val = static_cast<double>(value);
+            sum += val;
+            sum_sq += val * val;
+        }
+
+        auto mean = sum / n;
+        auto variance = sum_sq / n - mean * mean;
+        auto stddev = std::sqrt(variance);
+
+        return { mean, stddev };
+    }
+
     // Kolmogorov-Smirnov test function return KS statistic and p-value
     template <std::ranges::random_access_range Sequence1, std::ranges::random_access_range Sequence2>
     std::pair<double, double> kolmogorov_smirnov_test(const Sequence1& sample1, const Sequence2& sample2)
