@@ -30,13 +30,19 @@
 #include <algorithm>
 #include <vector>
 #include <cmath>
-#include <iostream>
-#include <random>
 #include <type_traits>
 #include <ranges>
+#include <tuple>
+#include <numeric>
+#include <stdexcept>
+#include <concepts>
+#include <numbers>
+#include <utility>
+#include "../util/gberror.h"
 
 namespace gb::yadro::algorithm
 {
+    //--------------------------------------------------------------------------------------------
     // Function to compute mean and standard deviation
     template <std::ranges::sized_range Sequence>
         requires requires(typename Sequence::value_type t) { { static_cast<double>(t) }; }
@@ -45,14 +51,11 @@ namespace gb::yadro::algorithm
         size_t n = data.size();
         if (n == 0) return { 0.0, 0.0 };
 
-        auto sum = 0.0;
-        auto sum_sq = 0.0;
-
-        for (const auto& value : data) {
-            double val = static_cast<double>(value);
-            sum += val;
-            sum_sq += val * val;
-        }
+        auto [sum, sum_sq] = std::accumulate(data.begin(), data.end(), std::pair{ 0.0, 0.0 },
+            [](auto acc, auto value) {
+                auto val = static_cast<double>(value);
+                return std::pair{ acc.first + val, acc.second + val * val };
+            });
 
         auto mean = sum / n;
         auto variance = sum_sq / n - mean * mean;
@@ -61,6 +64,7 @@ namespace gb::yadro::algorithm
         return { mean, stddev };
     }
 
+    //--------------------------------------------------------------------------------------------
     // Kolmogorov-Smirnov test function return KS statistic and p-value
     template <std::ranges::random_access_range Sequence1, std::ranges::random_access_range Sequence2>
     std::pair<double, double> kolmogorov_smirnov_test(const Sequence1& sample1, const Sequence2& sample2)
@@ -108,4 +112,69 @@ namespace gb::yadro::algorithm
 
         return { d_max, p_value };
     }
+
+    //--------------------------------------------------------------------------------------------
+    namespace detail {
+        // Helper function: approximation of the inverse error function (erfinv)
+        inline auto erfinv(auto x)
+        {
+            const auto a = 0.147; // Approximation constant
+            auto ln_part = std::log(1 - x * x);
+            auto first_part = 2 / (std::numbers::pi * a) + ln_part / 2;
+            auto second_part = ln_part / a;
+
+            return std::copysign(std::sqrt(std::sqrt(first_part * first_part - second_part) - first_part), x);
+        }
+
+        // Helper function: normal quantile function (percent-point function)
+        inline auto normal_quantile(auto p) { return std::sqrt(2) * erfinv(2 * p - 1); }
+    }
+
+    //--------------------------------------------------------------------------------------------
+    // Shapiro-Wilk test function return W statistic and p-value
+    template <std::ranges::sized_range Range>
+        requires std::floating_point<std::ranges::range_value_t<Range>>
+    auto shapiro_wilk_test(const Range& data) -> std::pair<double, double> 
+    {
+        auto n = std::ranges::size(data);
+        util::gbassert(n >= 3, "Sample size must be at least 3.");
+
+        // Sort data into a vector
+        std::vector<double> sorted_data(data.begin(), data.end());
+        std::ranges::sort(sorted_data);
+
+        // Compute expected normal order statistics
+        std::vector<double> m(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            double pi = (i + 1.0 - 0.375) / (n + 0.25);
+            m[i] = detail::normal_quantile(pi);
+        }
+
+        // Compute coefficients (a) using m and normalization
+        auto sum_m2 = std::accumulate(m.begin(), m.end(), 0.0, [](auto sum, auto val) {
+            return sum + val * val;
+            });
+        std::vector<double> a(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            a[i] = m[i] / std::sqrt(sum_m2);
+        }
+
+        // Compute mean of data
+        auto mean = std::accumulate(sorted_data.begin(), sorted_data.end(), 0.0) / n;
+
+        // Calculate W statistic
+        auto numerator = 0.0, denominator = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            numerator += a[i] * (sorted_data[i] - mean);
+            denominator += std::pow(sorted_data[i] - mean, 2);
+        }
+        numerator = std::pow(numerator, 2);
+        auto w = numerator / denominator;
+
+        // Approximate p-value (simple approximation)
+        auto p_value = 1.0 - std::exp(-1.2725 * std::pow(w - 1.0, 2));
+
+        return { w, p_value };
+    }
+
 }

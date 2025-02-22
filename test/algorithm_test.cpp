@@ -389,4 +389,24 @@ namespace
 
         gbassert(calc_error(test_data, sortedComponents) < 1e-10);
     }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, shapiro_wilk_tst, std::launch::async)
+    {
+        std::vector<double> vec_data = { 12.9, 14.6, 15.3, 13.7, 14.1, 14.8 };
+        auto [W1, p_value1] = shapiro_wilk_test(vec_data);
+        gbassert(almost_equal(W1, 0.979, 0.001));
+        gbassert(almost_equal(p_value1, 0.0005, 0.0001));
+
+        std::array<double, 6> arr_data = { 12.9, 14.6, 15.3, 13.7, 14.1, 14.8 };
+        auto [W2, p_value2] = shapiro_wilk_test(arr_data);
+        gbassert(almost_equal(W2, 0.979, 0.001));
+        gbassert(almost_equal(p_value2, 0.0005, 0.0001));
+
+        // Using a transformed range (e.g., square all values)
+        auto transformed_data = vec_data | std::views::transform([](double x) { return x * x; });
+        auto [W3, p_value3] = shapiro_wilk_test(transformed_data);
+        gbassert(almost_equal(W3, 0.985, 0.001));
+        gbassert(almost_equal(p_value3, 0.0003, 0.0001));
+    }
 }
