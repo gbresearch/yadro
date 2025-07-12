@@ -32,3 +32,4 @@
 #include "regression_analysis.h"
 #include "statistics.h"
 #include "discrete_transform.h"
+#include "student.h"

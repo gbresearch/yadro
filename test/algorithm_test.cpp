@@ -409,4 +409,38 @@ namespace
         gbassert(almost_equal(W3, 0.985, 0.001));
         gbassert(almost_equal(p_value3, 0.0003, 0.0001));
     }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, student_test, std::launch::async)
+    {
+        // === Short Sample Test (n = 6) ===
+        // Mean: 10 ± 0.148413
+        //    Standard Deviation : 0.141421 ± 0.258576
+        std::vector<double> short_data = { 10.1, 10.2, 9.9, 10.0, 9.8, 10.0 };
+
+        student_t short_sample(short_data, 0.95);
+        auto [mean_s, err_mean_s] = short_sample.mean_pair();
+        auto [stddev_s, err_stddev_s] = short_sample.stddev_pair();
+        gbassert(almost_equal(mean_s, 10.0, 0.01));
+        gbassert(almost_equal(err_mean_s, 0.148413, 0.0001));
+        gbassert(almost_equal(stddev_s, 0.141421, 0.0001)); 
+        gbassert(almost_equal(err_stddev_s, 0.258576, 0.0001));
+
+        //    === Long Sample Test(n = 100) ===
+        //    Mean : 10 ± 0.0398843
+        //    Standard Deviation : 0.201008 ± 0.0570195
+        std::vector<double> long_data;
+        for (int i = 0; i < 100; ++i) {
+            double val = 10.0 + ((i % 2 == 0) ? 0.2 : -0.2);  // Small oscillating variation
+            long_data.push_back(val);
+        }
+
+        student_t long_sample(long_data, 0.95);
+        auto [mean_l, err_mean_l] = long_sample.mean_pair();
+        auto [stddev_l, err_stddev_l] = long_sample.stddev_pair();
+        gbassert(almost_equal(mean_l, 10.0, 0.01));
+        gbassert(almost_equal(err_mean_l, 0.0398843, 0.0001));
+        gbassert(almost_equal(stddev_l, 0.201008, 0.0001));
+        gbassert(almost_equal(err_stddev_l, 0.0570195, 0.0001));
+    }
 }

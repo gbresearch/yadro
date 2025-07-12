@@ -145,6 +145,9 @@
     <ClInclude Include="..\algorithm\discrete_transform.h">
       <Filter>algorithm</Filter>
     </ClInclude>
+    <ClInclude Include="..\algorithm\student.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

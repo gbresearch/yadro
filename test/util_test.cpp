@@ -532,8 +532,7 @@ unset multiplot)*";
         // test named functions, using throttling threadpool
         auto f = std::async(std::launch::async, []
             {
-                gb::yadro::async::threadpool<> tp(2);
-                start_server(tp, L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                start_server(2, L"\\\\.\\pipe\\yadro\\pipe", nullptr,
                     std::tuple{ "zero", [](int) {} },
                     std::tuple{ "one", [](const std::vector<int>& v) { return v; } }, // echo vector
                     std::tuple{ "two", [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; } },
@@ -582,8 +581,12 @@ unset multiplot)*";
 
             std::vector futures{ make_client("one"), make_client("two"), make_client("three"), make_client("four"), 
                 make_client("five"), make_client("six"), make_client("seven"), make_client("eight") };
+            
+            // shared futures are non-blocking, must be drained
+            for (auto& f : futures)
+                    f.get();
         }
-
+     
         gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
 #endif
     }

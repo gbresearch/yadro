@@ -576,8 +576,8 @@ namespace gb::yadro::util
 
     //----------------------------------------------------------------------------------------------
     // pipe puts new connections in threadpool
-    template<class ...Fn>
-    void start_server(async::threadpool<>& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
+    template<class TreadPool, class ...Fn>
+    void start_server(TreadPool& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
         auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
         global_mutex mtx{ mutex_name };
@@ -602,6 +602,16 @@ namespace gb::yadro::util
             throw_error(message);
         }
     }
+    //----------------------------------------------------------------------------------------------
+    // pipe puts new connections in threadpool
+    template<class ...Fn>
+    void start_server(std::size_t max_threads, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
+    {
+        using namespace std::chrono_literals;
+        gb::yadro::async::threadpool<> tp(max_threads);
+        start_server(tp, pipename, log, std::forward<decltype(fn)>(fn)...);
+        std::this_thread::sleep_for(50ms);
+    }
 
     //----------------------------------------------------------------------------------------------
     inline bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args)
@@ -612,6 +622,7 @@ namespace gb::yadro::util
             for (auto i = 0; is_server_running(pipename, 100ms) && i < 100; ++i)
             {
                 winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
+                std::this_thread::sleep_for(50ms);
             }
         }
         catch (...) {}
