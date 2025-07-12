@@ -203,8 +203,8 @@ namespace gb::yadro::util
                 if (attempt != 0)
                     std::this_thread::sleep_for(10ms);
 
-                // wait upto 10ms for pipe instance to become available, exits immediately if no active server
-                if (WaitNamedPipe(pipename.c_str(), 10))
+                // wait upto 50ms for pipe instance to become available, exits immediately if no active server
+                if (WaitNamedPipe(pipename.c_str(), 50))
                 {
                     // try to grab a pipe, other client can frontrun, so CreateFile can fail
                     _pipe = CreateFile(
@@ -608,8 +608,8 @@ namespace gb::yadro::util
     {
         using namespace std::chrono_literals;
         try {
-            // make at most 10 attemps to shutdown server
-            for (auto i = 0; is_server_running(pipename, 100ms) && i < 10; ++i)
+            // make at most 100 attemps to shutdown server
+            for (auto i = 0; is_server_running(pipename, 100ms) && i < 100; ++i)
             {
                 winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
             }
