@@ -548,7 +548,7 @@ namespace gb::yadro::util
 
         if (l.try_lock_for(100ms))
         {
-            std::vector<std::future<int>> v;
+            std::vector<std::future<void>> v;
             std::atomic_bool shutdown{ false }; // signals client requesting server shutdown
 
             while (!shutdown && v.size() < 256) // something is wrong if there are 256 threads pending
@@ -559,9 +559,8 @@ namespace gb::yadro::util
                 auto f = std::async(std::launch::async,
                     [&, s = winpipe_server_t{ pipename, log }]() mutable {
                         auto ret = s.run(std::forward<decltype(fn)>(fn)...);
-                        shutdown = ret == server_shutdown;
-
-                        return ret;
+                        if (ret == server_shutdown)
+                            shutdown = true;
                     });
 
                 v.push_back(std::move(f));
@@ -586,14 +585,19 @@ namespace gb::yadro::util
 
         if (l.try_lock_for(100ms))
         {
+            std::vector<std::future<void>> v;
+
             for (std::atomic_bool shutdown{ false }; !shutdown;)
             {
-                tp([&, s = winpipe_server_t{ pipename, log }]() mutable {
-                    auto ret = s.run(std::forward<decltype(fn)>(fn)...);
-                    shutdown = ret == server_shutdown;
+                if (v.size() % 10 == 0) // clean up periodically
+                    std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
 
-                    return ret;
+                auto f = tp([&, s = winpipe_server_t{ pipename, log }]() mutable {
+                    auto ret = s.run(std::forward<decltype(fn)>(fn)...);
+                    if(ret == server_shutdown)
+                        shutdown = true;
                     });
+                v.push_back(std::move(f));
             }
         }
         else
@@ -610,7 +614,6 @@ namespace gb::yadro::util
         using namespace std::chrono_literals;
         gb::yadro::async::threadpool<> tp(max_threads);
         start_server(tp, pipename, log, std::forward<decltype(fn)>(fn)...);
-        std::this_thread::sleep_for(50ms);
     }
 
     //----------------------------------------------------------------------------------------------

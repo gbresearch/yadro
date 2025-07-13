@@ -94,6 +94,8 @@ namespace gb::yadro::async
     struct threadpool final
     {
         //-----------------------------------------------------------------
+        threadpool(threadpool&&) = delete;
+        //-----------------------------------------------------------------
         threadpool(std::size_t max_threads, std::function<void()> on_empty)
             : _max_threads(max_threads), _on_empty(on_empty)
         {}
@@ -127,14 +129,6 @@ namespace gb::yadro::async
         }
 
         //-----------------------------------------------------------------
-        void detach()
-        {
-            std::lock_guard<std::mutex> _(_m_thread);
-            for (auto&& t : _threads)
-                t.detach();
-        }
-
-        //-----------------------------------------------------------------
         void clear()
         {
             _finish = true;
@@ -146,7 +140,7 @@ namespace gb::yadro::async
         //-----------------------------------------------------------------
         // enqueue the task and return a future
         template<class F, class...Args>
-        auto operator()(F&& f, Args&&... args)&
+        [[nodiscard]] auto operator()(F&& f, Args&&... args)&
         {
             _finish = false;
             auto t = std::make_unique<detail::function_wrapper<std::decay_t<F>, std::decay_t<Args>...>>(std::forward<F>(f), std::forward<Args>(args)...);
