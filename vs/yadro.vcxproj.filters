@@ -148,6 +148,9 @@
     <ClInclude Include="..\algorithm\student.h">
       <Filter>algorithm</Filter>
     </ClInclude>
+    <ClInclude Include="..\algorithm\chebyshev.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">

@@ -116,6 +116,7 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\algorithm\chebyshev.h" />
     <ClInclude Include="..\algorithm\discrete_transform.h" />
     <ClInclude Include="..\algorithm\gbalgorithm.h" />
     <ClInclude Include="..\algorithm\genetic_optimization.h" />
