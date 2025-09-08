@@ -45,13 +45,13 @@ namespace
     {
         using namespace std::chrono_literals;
 
-        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v) 
+        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
             std::less<>{},
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
 
         auto [stat, opt_map] = optimizer.optimize(100ms, 5);
-        
+
         // only testing in optimized build, debug build can be too slow and tests would fail randomly
 #if defined(NDEBUG)
         gbassert(opt_map.size() == 5);
@@ -137,7 +137,7 @@ namespace
 
         genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
             {
-                auto sum{0.};
+                auto sum{ 0. };
                 for (auto i = 0; i < 1000; ++i)
                     sum += x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v));
                 return sum;
@@ -213,7 +213,7 @@ namespace
         genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
-        
+
         optimizer.optimize(10ms, 5);
         // serialize to memory archive
         gb::yadro::archive::omem_archive<> oma;
@@ -246,7 +246,7 @@ namespace
 
         // test residuals
         auto data = std::vector<std::tuple<double, double>>{ {1., 0.}, { 2.,1. } };
-        gbassert(residuals([](auto x) { return x; }, data) == std::vector{1., 1.});
+        gbassert(residuals([](auto x) { return x; }, data) == std::vector{ 1., 1. });
         gbassert(residuals([](auto x) { return 1 + x; }, data, std::minus<>{}) == std::vector{ 0., 0. });
 
         {
@@ -347,7 +347,7 @@ namespace
                 }
                 return sqrt(error / data.size());
             };
-        
+
         gbassert(calc_error(data, components) < 0.001);
     }
 
@@ -423,7 +423,7 @@ namespace
         auto [stddev_s, err_stddev_s] = short_sample.stddev_pair();
         gbassert(almost_equal(mean_s, 10.0, 0.01));
         gbassert(almost_equal(err_mean_s, 0.148413, 0.0001));
-        gbassert(almost_equal(stddev_s, 0.141421, 0.0001)); 
+        gbassert(almost_equal(stddev_s, 0.141421, 0.0001));
         gbassert(almost_equal(err_stddev_s, 0.258576, 0.0001));
 
         //    === Long Sample Test(n = 100) ===
@@ -442,5 +442,205 @@ namespace
         gbassert(almost_equal(err_mean_l, 0.0398843, 0.0001));
         gbassert(almost_equal(stddev_l, 0.201008, 0.0001));
         gbassert(almost_equal(err_stddev_l, 0.0570195, 0.0001));
+    }
+
+    //--------------------------------------------------------------------------------------------
+    namespace helpers
+    {
+        // Compute RMSE but skip the first N transient samples
+        double compute_rmse(const std::vector<double>& ref,
+            const std::vector<double>& test,
+            std::size_t skip = 0)
+        {
+            if (ref.size() != test.size() || ref.size() <= skip)
+                throw std::runtime_error("Size mismatch or skip too large in RMSE");
+
+            double sum_sq = 0.0;
+            std::size_t count = 0;
+
+            for (std::size_t i = skip; i < ref.size(); ++i) {
+                double err = ref[i] - test[i];
+                sum_sq += err * err;
+                ++count;
+            }
+
+            return std::sqrt(sum_sq / count);
+        }
+
+        template<typename T>
+        T max_abs_err(const std::vector<T>& a, const std::vector<T>& b) {
+            assert(a.size() == b.size());
+            long double m = 0;
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                long double d = std::fabs(static_cast<long double>(a[i]) - static_cast<long double>(b[i]));
+                if (d > m) m = d;
+            }
+            return static_cast<T>(m);
+        }
+
+        // Chebyshev polynomial T_k(x) evaluation (recurrence)
+        template<typename T>
+        T cheb_T(unsigned k, T x) {
+            if (k == 0) return T{ 1 };
+            if (k == 1) return x;
+            T Tkm1 = T{ 1 };
+            T Tk = x;
+            for (unsigned i = 2; i <= k; ++i) {
+                T Tkp1 = T{ 2 } *x * Tk - Tkm1;
+                Tkm1 = Tk;
+                Tk = Tkp1;
+            }
+            return Tk;
+        }
+
+        // Build signal s[n] = sum_{k=0..deg} a_k * T_k(x_n), where x_n = 2*n/(N-1) - 1
+        template<typename T>
+        std::vector<T> build_cheb_signal(std::size_t N, const std::vector<T>& coeffs) {
+            std::vector<T> out;
+            out.resize(N);
+            if (N == 1) {
+                T x = T{ 0 };
+                T s = T{ 0 };
+                for (std::size_t k = 0; k < coeffs.size(); ++k) s += coeffs[k] * cheb_T<T>(static_cast<unsigned>(k), x);
+                out[0] = s;
+                return out;
+            }
+            for (std::size_t n = 0; n < N; ++n) {
+                T x = (T{ 2 } *static_cast<T>(n) / static_cast<T>(N - 1)) - T{ 1 };
+                long double s = 0;
+                for (std::size_t k = 0; k < coeffs.size(); ++k) {
+                    s += static_cast<long double>(coeffs[k]) * static_cast<long double>(cheb_T<T>(static_cast<unsigned>(k), x));
+                }
+                out[n] = static_cast<T>(s);
+            }
+            return out;
+        }
+
+        // Add Gaussian noise with given stddev
+        template<typename T>
+        std::vector<T> add_gaussian_noise(const std::vector<T>& signal, T stddev, std::mt19937& rng) {
+            std::normal_distribution<double> d(0.0, static_cast<double>(stddev));
+            std::vector<T> out(signal.size());
+            for (std::size_t i = 0; i < signal.size(); ++i) out[i] = signal[i] + static_cast<T>(d(rng));
+            return out;
+        }
+
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, chebyshev_test1, std::launch::async)
+    {
+        std::mt19937 rng(123456);
+        using namespace helpers;
+        const std::size_t N1 = 200;
+        const unsigned deg1 = 5;
+        std::vector<double> coeffs1(deg1 + 1);
+        std::uniform_real_distribution<double> ud1(-1.0, 1.0);
+        for (auto& c : coeffs1) 
+            c = ud1(rng);
+
+        auto clean1 = build_cheb_signal<double>(N1, coeffs1);
+        auto filtered1 = cheb::chebyshev_filter(clean1, deg1);
+
+        double maxerr1 = max_abs_err(clean1, filtered1);
+        gbassert(maxerr1 <= 1e-8);
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, chebyshev_test2, std::launch::async)
+    {
+        std::mt19937 rng(123456);
+        using namespace helpers;
+        const std::size_t N2 = 512;
+        const unsigned deg2 = 6;
+        std::vector<double> coeffs2(deg2 + 1);
+        std::uniform_real_distribution<double> ud2(-2.0, 2.0);
+        for (auto& c : coeffs2) 
+            c = ud2(rng);
+
+        auto clean2 = build_cheb_signal<double>(N2, coeffs2);
+        double mean2 = 0;
+        for (auto v : clean2) mean2 += v;
+        mean2 /= static_cast<double>(clean2.size());
+        double var2 = 0;
+        for (auto v : clean2) var2 += (v - mean2) * (v - mean2);
+        var2 /= static_cast<double>(clean2.size());
+        double sigma2 = std::sqrt(var2) * 0.5;
+        auto noisy2 = add_gaussian_noise(clean2, sigma2, rng);
+
+        auto filtered2 = cheb::chebyshev_filter(noisy2, deg2);
+
+        // Skip first few samples (order * 3 is a good rule of thumb for IIR filters)
+        std::size_t transient_skip = 12;
+
+        double rmse_noisy2 = compute_rmse(clean2, noisy2, transient_skip);
+        double rmse_filtered2 = compute_rmse(clean2, filtered2, transient_skip);
+        gbassert(rmse_filtered2 < rmse_noisy2);
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, chebyshev_test3, std::launch::async)
+    {
+        using namespace helpers;
+        constexpr std::size_t N3 = 51;
+        constexpr unsigned deg3 = 3;
+        std::array<float, N3> arr3{};
+        std::vector<float> coeffs3 = { 1.0f, 0.4f, -0.25f, 0.1f };
+        auto clean_vec3 = build_cheb_signal<float>(N3, coeffs3);
+        for (std::size_t i = 0; i < N3; ++i) arr3[i] = clean_vec3[i];
+
+        auto filtered_arr3 = cheb::chebyshev_filter(arr3, deg3);
+        double maxerr3 = 0;
+        for (std::size_t i = 0; i < N3; ++i) maxerr3 = std::max(maxerr3, std::fabs(static_cast<double>(filtered_arr3[i] - arr3[i])));
+        const double tol3 = 1e-5;
+        gbassert(maxerr3 <= tol3);
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, chebyshev_test4, std::launch::async)
+    {
+        // edge cases: N==0 and N==1
+        // N == 0 (empty vector)
+        std::vector<double> empty4;
+        auto out_empty4 = cheb::chebyshev_filter(empty4, 3);
+        gbassert(out_empty4.empty());
+
+        // N == 1
+        std::vector<double> single4 = { 42.0 };
+        auto out_single4 = cheb::chebyshev_filter(single4, 5);
+        gbassert(out_single4.size() == 1);
+        gbassert(std::fabs(out_single4[0] - 42.0) < 1e-12);
+    }
+
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, chebyshev_test5, std::launch::async)
+    {
+        // Degenerate-columns robustness
+        using namespace helpers;
+    
+        const std::size_t N5 = 12;   // intentionally small, makes columns close to collinear for large degree
+        const unsigned deg5 = 11;   // high degree relative to N increases chance of degenerate directions
+        std::vector<double> coeffs5(deg5 + 1, 0.0);
+        // make a simple signal with a couple of coefficients so the matrix A will have structure
+        coeffs5[0] = 1.0;
+        coeffs5[1] = 0.5;
+        // create clean signal
+        auto clean5 = build_cheb_signal<double>(N5, coeffs5);
+        // add small noise
+        std::mt19937 rng5(98765);
+        auto noisy5 = add_gaussian_noise<double>(clean5, 1e-6, rng5);
+
+        bool ok = true;
+        try {
+            auto filtered5 = cheb::chebyshev_filter(noisy5, deg5); // strength forces smoothing behavior
+            // ensure outputs are finite (no nan / inf)
+            for (double v : filtered5) {
+                if (!std::isfinite(v)) { ok = false; break; }
+            }
+        }
+        catch (...) {
+            ok = false;
+        }
+        gbassert(ok);
     }
 }
