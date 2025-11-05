@@ -158,12 +158,11 @@ namespace gb::yadro::async
         auto then(auto&& task, auto&&... futures)
             requires requires { (futures.get(), ...); }
         {
-            {
-                std::unique_lock _(_m_con);
+            std::unique_lock _(_m_con);
 
-                if (!_continuations)
-                    _continuations = std::make_unique<threadpool<>>(std::max(_max_threads / 2, std::size_t(1)));
-            }
+            if (!_continuations)
+                _continuations = std::make_unique<threadpool<>>(std::max(_max_threads / 2, std::size_t(1)));
+         
             return (*_continuations)([](auto&& task, auto&&... futures)
                 {
                     if constexpr (std::is_same_v<std::invoke_result_t<decltype(task), decltype(futures.get())...>, void>)
