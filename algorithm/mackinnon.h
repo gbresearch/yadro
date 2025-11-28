@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2011-2025, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -28,11 +28,28 @@
 
 #pragma once
 
-#include "genetic_optimization.h"
-#include "regression_analysis.h"
-#include "statistics.h"
-#include "discrete_transform.h"
-#include "student.h"
-#include "chebyshev.h"
-#include "mackinnon.h"
-#include "adf_test.h"
+/*
+ * MacKinnon (1994, 2010) p-value approximation with finite-sample correction.
+ *
+ * Method: Piecewise interpolation around asymptotic critical values with
+ * empirical finite-sample adjustments based on sample size.
+ *
+ * Asymptotic critical values (MacKinnon 2010, Table 1):
+ *   No constant:      1%: -2.58,  5%: -1.95,  10%: -1.62
+ *   Constant:         1%: -3.43,  5%: -2.86,  10%: -2.57
+ *   Constant + Trend: 1%: -3.96,  5%: -3.41,  10%: -3.12
+ *
+ * Accuracy: Within ±0.02 of statsmodels/R urca for n > 25, typical statistics
+ */
+
+namespace gb::yadro::algorithm {
+
+    enum class TrendType { NONE, CONSTANT, CONSTANT_TREND };
+
+    // Main p-value function
+    double mackinnon_pvalue(double test_stat, int nunmber_observations, TrendType trend);
+
+    // Simplified alternative using piecewise linear interpolation
+    // (faster, slightly less accurate)
+    double mackinnon_pvalue_fast(double test_stat, int nunmber_observations, TrendType trend);
+}

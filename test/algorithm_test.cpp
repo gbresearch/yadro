@@ -643,4 +643,53 @@ namespace
         }
         gbassert(ok);
     }
+    //--------------------------------------------------------------------------------------------
+    GB_TEST(algorithm, adfuller_test, std::launch::async)
+    {
+        std::mt19937 gen(42);
+
+        // Stationary series
+        std::vector<double> stationary(200);
+        std::normal_distribution<> dist(0.0, 1.0);
+        for (size_t i = 1; i < 200; ++i) {
+            stationary[i] = 0.5 * stationary[i - 1] + dist(gen);  // phi = 0.5 < 1
+        }
+
+        auto stattionary_result = adfuller(stationary);
+        gbassert(stattionary_result.statistic < -3.0); // typical threshold for stationarity
+        gbassert(stattionary_result.pvalue < 0.05);
+
+        // Non-stationary series (random walk)
+        std::vector<double> non_stationary;
+        double value = 0.0;
+        for (int i = 0; i < 100; ++i) {
+            value += dist(gen);
+            non_stationary.push_back(value);
+        }
+
+        auto non_stationary_result = adfuller(non_stationary);
+        gbassert(non_stationary_result.statistic > -3.0); // typical threshold for non-stationarity
+        gbassert(non_stationary_result.pvalue > 0.05);
+
+        // edge case: constant series
+        must_throw([&]()
+            {
+                std::vector<double> constant_series(100, 5.0);
+                adfuller(constant_series);
+            });
+
+        // edge case: very short series
+        must_throw([&]()
+            {
+                std::vector<double> short_series = { 1.0, 2.0 };
+                adfuller(short_series);
+            });
+
+        // edge case: Series with NaN
+        must_throw([&]()
+            {
+                std::vector<double> nan_series = { 1.0, std::nan(""), 2.0 };
+                adfuller(nan_series);
+            });
+    }
 }
