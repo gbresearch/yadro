@@ -27,15 +27,160 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include "gbwin.h"
 #include <string>
 #include <span>
 #include <ranges>
 #include <vector>
 #include <type_traits>
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    template<typename... T> constexpr bool dependent_false_v = false;
+
+    template <typename T> struct utf16_return_type;
+    template <> struct utf16_return_type<std::string> { using type = std::wstring; };
+    template <> struct utf16_return_type<std::u8string> { using type = std::u16string; };
+
+    template <typename T>
+    using utf16_return_type_t = typename utf16_return_type<std::remove_cvref_t<T>>::type;
+
+    template <typename T>
+    concept utf8_string =
+        std::same_as<std::remove_cvref_t<T>, std::string> ||
+        std::same_as<std::remove_cvref_t<T>, std::u8string>;
+
+    // --- Implementation ---
+
+    template <utf8_string T>
+    utf16_return_type_t<T> utf16_from_utf8(const T& utf8)
+    {
+#ifdef GBWINDOWS
+        if (utf8.empty()) return {};
+
+        if (utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+            throw std::length_error("UTF-8 string too large");
+
+        const int input_length = static_cast<int>(utf8.size());
+        const char* data_ptr = reinterpret_cast<const char*>(utf8.data());
+
+        // 1. Query required size first
+        const int required = MultiByteToWideChar(
+            CP_UTF8,
+            MB_ERR_INVALID_CHARS,
+            data_ptr,
+            input_length,
+            nullptr,
+            0
+        );
+
+        if (required <= 0) {
+            throw std::runtime_error("MultiByteToWideChar size query failed. Error: "
+                + std::to_string(GetLastError()));
+        }
+
+        // 2. Prepare result using resize_and_overwrite
+        using ReturnType = utf16_return_type_t<T>;
+        ReturnType result;
+
+        result.resize_and_overwrite(static_cast<size_t>(required), [&](auto* buf, size_t n) {
+            int written = MultiByteToWideChar(
+                CP_UTF8,
+                MB_ERR_INVALID_CHARS,
+                data_ptr,
+                input_length,
+                reinterpret_cast<LPWSTR>(buf),
+                static_cast<int>(n)
+            );
+
+            if (written <= 0 && n > 0) {
+                // Note: If this throws, the string 'result' is left in an indeterminate 
+                // but valid state.
+                throw std::runtime_error("MultiByteToWideChar conversion failed. Error: "
+                    + std::to_string(GetLastError()));
+            }
+
+            return static_cast<size_t>(written);
+            });
+
+        return result;
+#else
+        static_assert(dependent_false_v<T>, "Only supported on Windows");
+#endif
+    }
+
+    template <typename T> struct utf8_return_type;
+    template <> struct utf8_return_type<std::wstring> { using type = std::string; };
+    template <> struct utf8_return_type<std::u16string> { using type = std::u8string; };
+
+    template <typename T>
+    using utf8_return_type_t = typename utf8_return_type<std::remove_cvref_t<T>>::type;
+
+    template <typename T>
+    concept utf16_string =
+        std::same_as<std::remove_cvref_t<T>, std::wstring> ||
+        std::same_as<std::remove_cvref_t<T>, std::u16string>;
+
+    // --- Implementation ---
+
+    template <utf16_string T>
+    utf8_return_type_t<T> utf8_from_utf16(const T& utf16)
+    {
+#ifdef GBWINDOWS
+        if (utf16.empty()) return {};
+
+        if (utf16.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+            throw std::length_error("UTF-16 string too large");
+
+        const int input_length = static_cast<int>(utf16.size());
+        const LPCWSTR data_ptr = reinterpret_cast<LPCWSTR>(utf16.data());
+
+        // 1. Query required buffer size in bytes
+        const int size_needed = WideCharToMultiByte(
+            CP_UTF8,
+            WC_ERR_INVALID_CHARS,
+            data_ptr,
+            input_length,
+            nullptr, 0, nullptr, nullptr
+        );
+
+        if (size_needed <= 0) {
+            throw std::runtime_error("WideCharToMultiByte size query failed. Error: "
+                + std::to_string(GetLastError()));
+        }
+
+        // 2. Prepare result using C++23 resize_and_overwrite
+        using ReturnType = utf8_return_type_t<T>;
+        ReturnType result;
+
+        result.resize_and_overwrite(static_cast<size_t>(size_needed), [&](auto* buf, size_t n) {
+            int written = WideCharToMultiByte(
+                CP_UTF8,
+                WC_ERR_INVALID_CHARS,
+                data_ptr,
+                input_length,
+                reinterpret_cast<char*>(buf),
+                static_cast<int>(n),
+                nullptr, nullptr
+            );
+
+            if (written <= 0 && n > 0) {
+                throw std::runtime_error("WideCharToMultiByte conversion failed. Error: "
+                    + std::to_string(GetLastError()));
+            }
+
+            return static_cast<size_t>(written);
+            });
+
+        return result;
+#else
+        static_assert(dependent_false_v<T>, "Only supported on Windows");
+#endif
+    }
     //-------------------------------------------------------------------------
     // converting command line to a vector of commands
     template<class CharT>

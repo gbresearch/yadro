@@ -222,5 +222,4 @@ namespace gb::yadro::util
                 (static_cast<uint32_t>(input[j + 3]) << 24);
         }
     }
-
 }
