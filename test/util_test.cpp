@@ -35,6 +35,7 @@
 #include <vector>
 #include <deque>
 #include <future>
+#include <numeric>
 
 namespace
 {
@@ -233,6 +234,84 @@ namespace
         gbassert(almost_equal(std::vector{ 1.1, 1.2, 2.2 }, std::deque{ 1.11, 1.19, 2.3 }, 0.11));
     }
 
+    GB_TEST(util, xxhash128_test)
+    {
+        // 1. Consistency Tests: Static vs Stream
+        std::string data = "The quick brown fox jumps over the lazy dog";
+
+        // Static result
+        hash128_t h_static = xxhash128::hash_value(data);
+
+        // Streamed result (in chunks)
+        xxhash128_stream stream;
+        stream.update(data.substr(0, 10).data(), 10);
+        stream.update(data.substr(10).data(), data.size() - 10);
+        hash128_t h_stream = stream.digest();
+
+        gbassert(h_static == h_stream);
+
+        // 2. Collision & Sensitivity Tests
+        std::string data1 = "HashTest001";
+        std::string data2 = "HashTest002";
+
+        auto h1 = xxhash128::hash_value(data1);
+        auto h2 = xxhash128::hash_value(data2);
+
+        gbassert(h1 != h2);
+        
+        // operator() should be sensitive to the order of arguments
+        h1 = xxhash128::operator()(std::string("A"), std::string("B"));
+        h2 = xxhash128::operator()(std::string("B"), std::string("A"));
+        gbassert(h1 != h2);
+
+        // 3. Boundary & Alignment Tests
+        // Test sizes around the BLOCK_SIZE (32) to ensure leftovers 
+        // and exact blocks are handled correctly.
+        for (size_t size : { 0, 1, 7, 8, 31, 32, 33, 63, 64, 65 }) {
+            std::vector<uint8_t> data(size);
+            std::iota(data.begin(), data.end(), static_cast<uint8_t>(0));
+
+            auto h_static = xxhash128::hash_mem(data.data(), data.size());
+
+            xxhash128_stream stream;
+            stream.update(data.data(), data.size());
+            auto h_stream = stream.digest();
+            gbassert(h_static == h_stream);
+        }
+
+        for (size_t len = 0; len <= 64; ++len) {
+            std::string test_data(len, 'x'); // string of 'x' of length len
+            auto h_aligned = xxhash128::hash_value(test_data);
+            // Create misaligned data by adding a prefix
+            std::string misaligned_data = "prefix" + test_data;
+            auto h_misaligned = xxhash128::hash_mem(misaligned_data.data() + 6, len); // skip prefix
+            gbassert(h_aligned == h_misaligned);
+        }
+
+        {
+            // 4. Seed Stability
+            std::string data = "SameData";
+            auto h1 = xxhash128::hash_value(data, 12345ULL);
+            auto h2 = xxhash128::hash_value(data, 54321ULL);
+            gbassert(h1.low != h2.low);
+        }
+
+        // 5. Container Support (C++23 Concepts)
+        std::vector<int> vec = { 1, 2, 3, 4, 5 };
+        std::string str = "12345";
+        std::array<int, 5> arr = { 1, 2, 3, 4, 5 };
+
+        // Should compile and run for all contiguous ranges and not throw
+        (void)xxhash128::hash_value(vec);
+        (void)xxhash128::hash_value(str);
+        (void)xxhash128::hash_value(arr);
+
+        // std::vector<int> hash should match raw array of same data
+        auto h_vec = xxhash128::hash_value(vec);
+        auto h_raw = xxhash128::hash_mem(vec.data(), vec.size() * sizeof(int));
+        gbassert(h_vec == h_raw);
+    }
+
     GB_TEST(util, gnuplot)
     {
         auto golden = R"*(set multiplot layout 3,2 columnsfirst
@@ -336,6 +415,18 @@ unset multiplot)*";
         gbassert(md5digest("2024/07/08") != md5digest("2024/7/8"));
         gbassert(md5string("2024/07/08", "2024/7/8") == "500faf436e1f15bbac22a95b1e896b02");
         gbassert(base64_encode(md5digest("2024/07/08")) == "8kE1D2bSTvuHIONFtGLF/A==");
+
+#ifdef GBWINDOWS
+        // test UTF16/UTF8 conversions
+        std::wstring win16 = L"Hello, UTF16 world!";
+        std::u16string utf16 = u"Hello, UTF16 world!";
+        std::string win8 = "Hello, UTF16 world!";
+        std::u8string utf8 = u8"Hello, UTF16 world!";
+        gbassert(utf8_from_utf16(win16) == win8);
+        gbassert(utf8_from_utf16(utf16) == utf8);
+        gbassert(utf16_from_utf8(utf8) == utf16);
+        gbassert(utf16_from_utf8(win8) == win16);
+#endif
     }
 
     GB_TEST(util, win_pipe1)

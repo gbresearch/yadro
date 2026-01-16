@@ -30,11 +30,15 @@
 #include <string>
 #include <type_traits>
 #include <ranges>
+#include <bit>
+#include <concepts>
+#include <cstring>
+#include <span>
 
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
-    // hash functions
+    // hash functions, based on std::hash and boost::hash_combine
     //-------------------------------------------------------------------------
     inline auto make_hash(const char* str) { return std::hash<std::string>{}(str); }
     inline auto make_hash(const wchar_t* str) { return std::hash<std::wstring>{}(str); }
@@ -84,4 +88,342 @@ namespace gb::yadro::util
 #endif
 
     using make_hash_t = decltype([](auto&& ...v) { return gb::yadro::util::make_hash(std::forward<decltype(v)>(v)...); });
+
+
+    //-------------------------------------------------------------------------
+    // 128-bit hash type
+    //-------------------------------------------------------------------------
+    struct hash128_t {
+        uint64_t low{};
+        uint64_t high{};
+
+        auto operator<=>(const hash128_t&) const = default;
+    };
+
+    //-------------------------------------------------------------------------
+    // Concepts
+    //-------------------------------------------------------------------------
+    template<typename T>
+    concept hashable_container = std::ranges::contiguous_range<T>;
+
+    template<typename T>
+    concept hashable128 = std::is_trivially_copyable_v<T> || hashable_container<T>;
+
+    //-------------------------------------------------------------------------
+    // XXHash128 - Single-pass hashing
+    //-------------------------------------------------------------------------
+    class xxhash128 {
+        // XXH3 prime constants
+        static constexpr uint64_t PRIME64_1 = 0x9E3779B185EBCA87ULL;
+        static constexpr uint64_t PRIME64_2 = 0xC2B2AE3D27D4EB4FULL;
+        static constexpr uint64_t PRIME64_3 = 0x165667B19E3779F9ULL;
+        static constexpr uint64_t PRIME64_4 = 0x85EBCA77C2B2AE63ULL;
+        static constexpr uint64_t PRIME64_5 = 0x27D4EB2F165667C5ULL;
+
+        static constexpr size_t BLOCK_SIZE = 32;  // Process 32 bytes at a time
+
+        // Initial seed constants for hash combining
+        static constexpr uint64_t COMBINE_SEED_LOW = 0x9E3779B97F4A7C15ULL;  // Golden ratio
+        static constexpr uint64_t COMBINE_SEED_HIGH = 0xCBF29CE484222325ULL; // FNV offset
+
+    public:
+        //---------------------------------------------------------------------
+        // Endianness-safe read
+        //---------------------------------------------------------------------
+        [[nodiscard]] static uint64_t read_u64_le(const uint8_t* p) noexcept {
+            uint64_t v;
+            std::memcpy(&v, p, sizeof(uint64_t));
+            if constexpr (std::endian::native == std::endian::big) {
+                return std::byteswap(v);
+            }
+            return v;
+        }
+
+        //---------------------------------------------------------------------
+        // Finalization step
+        //---------------------------------------------------------------------
+        [[nodiscard]] static uint64_t finalize(uint64_t h, uint64_t length) noexcept {
+            h ^= length;
+            h ^= h >> 33;
+            h *= PRIME64_2;
+            h ^= h >> 29;
+            h *= PRIME64_3;
+            h ^= h >> 32;
+            return h;
+        }
+
+        //---------------------------------------------------------------------
+        // Core hashing: Process memory buffer
+        //---------------------------------------------------------------------
+        [[nodiscard]] static hash128_t hash_mem(const void* ptr, size_t len, uint64_t seed = 0) noexcept {
+            const uint8_t* data = static_cast<const uint8_t*>(ptr);
+
+            uint64_t acc1 = seed + PRIME64_1 + PRIME64_2;
+            uint64_t acc2 = seed + PRIME64_2;
+            uint64_t acc3 = seed;
+            uint64_t acc4 = seed - PRIME64_1;
+
+            size_t offset = 0;
+
+            // Process 32-byte blocks (4x 8-byte lanes)
+            while (offset + BLOCK_SIZE <= len) {
+                uint64_t lane1 = read_u64_le(data + offset);
+                uint64_t lane2 = read_u64_le(data + offset + 8);
+                uint64_t lane3 = read_u64_le(data + offset + 16);
+                uint64_t lane4 = read_u64_le(data + offset + 24);
+
+                // Mix each lane with its accumulator
+                acc1 += lane1 * PRIME64_2;
+                acc1 = std::rotl(acc1, 31);
+                acc1 *= PRIME64_1;
+
+                acc2 += lane2 * PRIME64_2;
+                acc2 = std::rotl(acc2, 31);
+                acc2 *= PRIME64_1;
+
+                acc3 += lane3 * PRIME64_2;
+                acc3 = std::rotl(acc3, 31);
+                acc3 *= PRIME64_1;
+
+                acc4 += lane4 * PRIME64_2;
+                acc4 = std::rotl(acc4, 31);
+                acc4 *= PRIME64_1;
+
+                offset += BLOCK_SIZE;
+            }
+
+            // Merge accumulators
+            uint64_t merged_low = std::rotl(acc1, 1) + std::rotl(acc2, 7) +
+                std::rotl(acc3, 12) + std::rotl(acc4, 18);
+            uint64_t merged_high = (acc1 ^ acc3) + (acc2 ^ acc4);
+
+            // Process remaining 8-byte blocks
+            while (offset + 8 <= len) {
+                uint64_t k = read_u64_le(data + offset);
+
+                merged_low ^= std::rotl(k * PRIME64_2, 31) * PRIME64_1;
+                merged_low = std::rotl(merged_low, 27) * PRIME64_1 + PRIME64_4;
+
+                merged_high ^= std::rotl(k * PRIME64_3, 33) * PRIME64_4;
+                merged_high = std::rotl(merged_high, 31) * PRIME64_2 + PRIME64_5;
+
+                offset += 8;
+            }
+
+            // Process remaining bytes (0-7 bytes)
+            while (offset < len) {
+                uint64_t byte_val = static_cast<uint64_t>(data[offset]);
+                merged_low = std::rotl(merged_low ^ (byte_val * PRIME64_5), 11) * PRIME64_1;
+                merged_high = std::rotl(merged_high ^ (byte_val * PRIME64_3), 13) * PRIME64_2;
+                ++offset;
+            }
+
+            // Final avalanche
+            return { finalize(merged_low, len), finalize(merged_high, len) };
+        }
+
+        //---------------------------------------------------------------------
+        // Hash single value or container
+        //---------------------------------------------------------------------
+        template<hashable128 T>
+        [[nodiscard]] static hash128_t hash_value(const T& value, uint64_t seed = 0) noexcept {
+            if constexpr (hashable_container<T>) {
+                auto bytes = std::as_bytes(std::span{ value });
+                return hash_mem(bytes.data(), bytes.size_bytes(), seed);
+            }
+            else {
+                return hash_mem(&value, sizeof(T), seed);
+            }
+        }
+
+        //---------------------------------------------------------------------
+        // Variadic combiner: Hash multiple arguments
+        //---------------------------------------------------------------------
+        [[nodiscard]] static hash128_t operator()(const auto& ...args) noexcept
+            requires(sizeof...(args) > 0)
+        {
+            hash128_t result{ COMBINE_SEED_LOW, COMBINE_SEED_HIGH };
+            size_t index = 0;
+
+            auto combine = [&](const auto& arg) {
+                // Position-dependent seeding for argument order sensitivity
+                uint64_t position_seed = result.low ^ (index * PRIME64_5);
+                auto h = hash_value(arg, position_seed);
+
+                // Mix hash into result with rotation for better avalanche
+                result.low = std::rotl(result.low ^ h.low, 27) * PRIME64_1 + h.high;
+                result.high = std::rotl(result.high ^ h.high, 31) * PRIME64_2 + h.low;
+
+                ++index;
+                };
+
+            (combine(args), ...);
+
+            // Final mix to ensure all bits influence final result
+            result.low = finalize(result.low, sizeof...(args));
+            result.high = finalize(result.high, sizeof...(args));
+
+            return result;
+        }
+    };
+
+    //-------------------------------------------------------------------------
+    // XXHash128 Stream - Incremental hashing
+    //-------------------------------------------------------------------------
+    class xxhash128_stream {
+        static constexpr uint64_t PRIME64_1 = 0x9E3779B185EBCA87ULL;
+        static constexpr uint64_t PRIME64_2 = 0xC2B2AE3D27D4EB4FULL;
+        static constexpr uint64_t PRIME64_3 = 0x165667B19E3779F9ULL;
+        static constexpr uint64_t PRIME64_4 = 0x85EBCA77C2B2AE63ULL;
+        static constexpr uint64_t PRIME64_5 = 0x27D4EB2F165667C5ULL;
+
+        static constexpr size_t BLOCK_SIZE = 32;
+        static constexpr size_t BUFFER_SIZE = BLOCK_SIZE;
+
+        uint64_t acc1;
+        uint64_t acc2;
+        uint64_t acc3;
+        uint64_t acc4;
+        uint64_t total_len;
+        uint8_t buffer[BUFFER_SIZE];
+        size_t buffer_usage;
+        uint64_t seed;
+
+    public:
+        explicit xxhash128_stream(uint64_t seed_value = 0) noexcept
+            : seed(seed_value)
+        {
+            reset(seed_value);
+        }
+
+        //---------------------------------------------------------------------
+        // Reset stream to initial state
+        //---------------------------------------------------------------------
+        void reset(uint64_t seed_value = 0) noexcept {
+            seed = seed_value;
+            acc1 = seed + PRIME64_1 + PRIME64_2;
+            acc2 = seed + PRIME64_2;
+            acc3 = seed;
+            acc4 = seed - PRIME64_1;
+            total_len = 0;
+            buffer_usage = 0;
+        }
+
+        //---------------------------------------------------------------------
+        // Update hash with new data
+        //---------------------------------------------------------------------
+        void update(const void* input, size_t len) noexcept {
+            const uint8_t* data = static_cast<const uint8_t*>(input);
+            total_len += len;
+
+            // Fill buffer if there's existing data
+            if (buffer_usage > 0) {
+                size_t fill = BLOCK_SIZE - buffer_usage;
+                if (len < fill) {
+                    std::memcpy(buffer + buffer_usage, data, len);
+                    buffer_usage += len;
+                    return;
+                }
+                std::memcpy(buffer + buffer_usage, data, fill);
+                process_block(buffer);
+                data += fill;
+                len -= fill;
+                buffer_usage = 0;
+            }
+
+            // Process full 32-byte blocks directly from input
+            while (len >= BLOCK_SIZE) {
+                process_block(data);
+                data += BLOCK_SIZE;
+                len -= BLOCK_SIZE;
+            }
+
+            // Store remaining bytes in buffer
+            if (len > 0) {
+                std::memcpy(buffer, data, len);
+                buffer_usage = len;
+            }
+        }
+
+        //---------------------------------------------------------------------
+        // Finalize and get hash value
+        //---------------------------------------------------------------------
+        [[nodiscard]] hash128_t digest() const noexcept {
+            // Merge accumulators
+            uint64_t merged_low = std::rotl(acc1, 1) + std::rotl(acc2, 7) +
+                std::rotl(acc3, 12) + std::rotl(acc4, 18);
+            uint64_t merged_high = (acc1 ^ acc3) + (acc2 ^ acc4);
+
+            // Process buffered data
+            size_t offset = 0;
+
+            // Process 8-byte blocks from buffer
+            while (offset + 8 <= buffer_usage) {
+                uint64_t k = xxhash128::read_u64_le(buffer + offset);
+
+                merged_low ^= std::rotl(k * PRIME64_2, 31) * PRIME64_1;
+                merged_low = std::rotl(merged_low, 27) * PRIME64_1 + PRIME64_4;
+
+                merged_high ^= std::rotl(k * PRIME64_3, 33) * PRIME64_4;
+                merged_high = std::rotl(merged_high, 31) * PRIME64_2 + PRIME64_5;
+
+                offset += 8;
+            }
+
+            // Process remaining bytes
+            while (offset < buffer_usage) {
+                uint64_t byte_val = static_cast<uint64_t>(buffer[offset]);
+                merged_low = std::rotl(merged_low ^ (byte_val * PRIME64_5), 11) * PRIME64_1;
+                merged_high = std::rotl(merged_high ^ (byte_val * PRIME64_3), 13) * PRIME64_2;
+                ++offset;
+            }
+
+            // Final avalanche
+            return {
+                xxhash128::finalize(merged_low, total_len),
+                xxhash128::finalize(merged_high, total_len)
+            };
+        }
+
+        //---------------------------------------------------------------------
+        // Convenience: Update with typed value
+        //---------------------------------------------------------------------
+        template<hashable128 T>
+        void update(const T& value) noexcept {
+            if constexpr (hashable_container<T>) {
+                auto bytes = std::as_bytes(std::span{ value });
+                update(bytes.data(), bytes.size_bytes());
+            }
+            else {
+                update(&value, sizeof(T));
+            }
+        }
+
+    private:
+        //---------------------------------------------------------------------
+        // Process one 32-byte block
+        //---------------------------------------------------------------------
+        void process_block(const uint8_t* block) noexcept {
+            uint64_t lane1 = xxhash128::read_u64_le(block);
+            uint64_t lane2 = xxhash128::read_u64_le(block + 8);
+            uint64_t lane3 = xxhash128::read_u64_le(block + 16);
+            uint64_t lane4 = xxhash128::read_u64_le(block + 24);
+
+            acc1 += lane1 * PRIME64_2;
+            acc1 = std::rotl(acc1, 31);
+            acc1 *= PRIME64_1;
+
+            acc2 += lane2 * PRIME64_2;
+            acc2 = std::rotl(acc2, 31);
+            acc2 *= PRIME64_1;
+
+            acc3 += lane3 * PRIME64_2;
+            acc3 = std::rotl(acc3, 31);
+            acc3 *= PRIME64_1;
+
+            acc4 += lane4 * PRIME64_2;
+            acc4 = std::rotl(acc4, 31);
+            acc4 *= PRIME64_1;
+        }
+    };
 }
