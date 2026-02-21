@@ -79,32 +79,6 @@ namespace gb::yadro::util
     };
 
     //-------------------------------------------------------------------------
-    // lambda function traits, deducing return type and parameters
-    template<class Fn> struct lambda_traits;
-
-    template< class R, class G, class ... A >
-    struct lambda_traits<R(G::*)(A...) const>
-    {
-        using Ret = R;
-        using Args = std::tuple<A...>;
-        using PureArgs = std::tuple<std::remove_cvref_t<A>...>;
-    };
-
-    template<class Fn>
-    struct lambda_traits : lambda_traits<decltype(&Fn::operator())>
-    {
-    };
-
-    template<class Fn>
-    using lambda_args = typename lambda_traits<std::remove_cvref_t<Fn>>::Args;
-
-    template<class Fn>
-    using lambda_pure_args = typename lambda_traits<std::remove_cvref_t<Fn>>::PureArgs;
-
-    template<class Fn>
-    using lambda_ret = typename lambda_traits<std::remove_cvref_t<Fn>>::Ret;
-
-    //-------------------------------------------------------------------------
     // move_forward function
     // if supplied parameter is (qualified) lvalue, returns (qualified) lvalue reference
     // if supplied parameter is (qualified) rvalue, returns (qualified) value using move constructor
@@ -421,4 +395,24 @@ namespace gb::yadro::util
         return value < min_value || value > max_value ? std::invoke(std::forward<decltype(fun)>(fun), value - min_value)
             : value > max_value ? std::invoke(std::forward<decltype(fun)>(fun), max_value - value) : value;
     }
+
+    // ============================================================
+    // Fast pseudo-random generator
+    // ============================================================
+    struct fast_random 
+    {
+        fast_random(uint32_t seed) : current_state(seed) {}
+        
+        uint32_t next() {
+            current_state = current_state * 747796405 + 2891336453;
+            current_state = ((current_state >> ((current_state >> 28) + 4)) ^ current_state) * 277803737;
+            current_state = (current_state >> 22) ^ current_state;
+            return current_state;
+        }
+    
+        size_t next_range(size_t limit) { return next() % limit; }
+
+    private:
+        uint32_t current_state;
+    };
 }

@@ -35,3 +35,5 @@
 #include "static_vector.h"
 #include "tensor.h"
 #include "tree.h"
+#include "lockfree_memo_table.h"
+#include "bounded_priority_queue.h"

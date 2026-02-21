@@ -28,14 +28,15 @@
 
 #include "../util/gbtest.h"
 #include "../util/misc.h"
-#include "../container/tensor.h"
-#include "../container/matrix.h"
-#include "../container/matrix_functions.h"
-#include "../container/static_string.h"
-#include "../container/static_vector.h"
-#include "../container/tree.h"
+#include "../util/hash_util.h"
+#include "../container/gbcontainer.h"
 #include "../archive/archive.h"
 #include <vector>
+#include <iostream>
+#include <chrono>
+#include <random>
+#include <thread>
+#include <barrier>
 
 namespace
 {
@@ -43,8 +44,8 @@ namespace
     using namespace gb::yadro::util;
     using namespace gb::yadro::archive;
     using namespace gb::yadro::matrix_operators;
-    
-    GB_TEST(yadro, static_string_test)
+
+    GB_TEST(container, static_string_test)
     {
         static_string<1> s1;
         gbassert(s1.size() == 0);
@@ -91,7 +92,7 @@ namespace
         gbassert(s4 == static_string<11>("123"));
     }
 
-    GB_TEST(yadro, static_vector_test)
+    GB_TEST(container, static_vector_test)
     {
         static_vector<int, 1> v1;
         gbassert(v1.empty());
@@ -158,7 +159,7 @@ namespace
         gbassert(v4 == std::vector{ 1,111,11,11,11 });
     }
 
-    GB_TEST(yadro, tensor_test)
+    GB_TEST(container, tensor_test)
     {
         using namespace tensor_operators;
         static_assert(tensor_c< tensor<int, 2, 2>>);
@@ -194,7 +195,7 @@ namespace
         gbassert(t == t1);
     }
 
-    GB_TEST(yadro, matrix_test)
+    GB_TEST(container, matrix_test)
     {
         using namespace tensor_operators;
         static_assert(tensor_c< tensor<int, 2, 2>>);
@@ -267,7 +268,7 @@ namespace
             11, 13, 7,
                 12, 6, 5,
                 17, 13, 12}
-        );
+                );
 
         gbassert(matrix<int, 2, 2>{
             1, 2,
@@ -280,5 +281,444 @@ namespace
         gbassert(matrix<int, 2, 2>{2, 0, 0, 2} == identity_matrix<int>(2) * 2);
         gbassert(matrix<int, 2, 2>{2, 0, 0, 2} == 2 * identity_matrix<int>(2));
         gbassert(matrix<int, 2, 2>{2, 0, 0, 2} / 2 == identity_matrix<int>(2));
+    }
+
+    GB_TEST(container, lockfree_memo_test)
+    {
+        using hasher = gb::yadro::util::xxhash128;
+        std::atomic<int> call_count{ 0 };
+
+        // function with one argument
+        lockfree_memo_table table(/*capacity=*/16,
+            [&call_count](int x) { call_count.fetch_add(1, std::memory_order_relaxed); return x * 2; }, hasher{},/*max_probe=*/8);
+        static_assert(HashFunctor<hasher, int>);
+        gbassert(table.get_or_compute(5) == 10);
+        gbassert(call_count.load(std::memory_order_relaxed) == 1);
+        gbassert(table.get_or_compute(5) == 10);
+        gbassert(call_count.load(std::memory_order_relaxed) == 1);
+        gbassert(table.get_or_compute(10) == 20);
+        gbassert(call_count.load(std::memory_order_relaxed) == 2);
+        gbassert(table.get_or_compute(20) == 40);
+        gbassert(call_count.load(std::memory_order_relaxed) == 3);
+
+        // function with three arguments
+        lockfree_memo_table table1(/*capacity=*/32,
+            [&call_count](int a, int b, int c) { call_count.fetch_add(1, std::memory_order_relaxed); return a + b + c; }, hasher{}, /*max_probe=*/16);
+        call_count = 0;
+        gbassert(table1.get_or_compute(1, 2, 3) == 6);
+        gbassert(call_count.load(std::memory_order_relaxed) == 1);
+        gbassert(table1.get_or_compute(1, 2, 3) == 6);
+        gbassert(call_count.load(std::memory_order_relaxed) == 1);
+        gbassert(table1.get_or_compute(10, 20, 30) == 60);
+        gbassert(call_count.load(std::memory_order_relaxed) == 2);
+
+        // function with no return value
+        lockfree_memo_table table2(/*capacity=*/16,
+            [&call_count](int x) { call_count.fetch_add(1, std::memory_order_relaxed); /* do nothing */ }, hasher{}, /*max_probe=*/8);
+        call_count = 0;
+        table2.get_or_compute(5);
+        gbassert(call_count.load(std::memory_order_relaxed) == 1);
+        table2.get_or_compute(5);
+        gbassert(call_count.load(std::memory_order_relaxed) == 1);
+
+        // test exceptions
+        must_throw<std::runtime_error>([]() {
+            lockfree_memo_table table3(/*capacity=*/8,
+                [](int x) {
+                    if (x == 42) {
+                        throw std::runtime_error("test exception");
+                    }
+                    return x;
+                }, hasher{}, /*max_probe=*/4);
+            gbassert(table3.get_or_compute(10) == 10);
+            table3.get_or_compute(42); // should throw
+            });
+
+        must_throw<std::invalid_argument>([]() {
+            lockfree_memo_table table4(/*capacity=*/0, // invalid capacity
+                [](int x) { return x; }, hasher{}, /*max_probe=*/2);
+            });
+
+        must_throw<std::invalid_argument>([]() {
+            lockfree_memo_table table4(/*capacity=*/15, // not power of two
+                [](int x) { return x; }, hasher{}, /*max_probe=*/2);
+            });
+
+        must_throw<std::runtime_error>([]() {
+            lockfree_memo_table table5(/*capacity=*/4,
+                [](int x) { return x; }, hasher{}, /*max_probe=*/2);
+            // Fill the table to force probe limit exceed
+            for (int i = 0; i < 4; ++i) {
+                table5.get_or_compute(i);
+            }
+            table5.get_or_compute(100); // should throw due to probe limit
+            });
+
+        // test concurrent access, same key
+        {
+            lockfree_memo_table table6(/*capacity=*/16,
+                [&call_count](int x) {
+                    // simulate some work
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    call_count.fetch_add(1, std::memory_order_relaxed);
+                    return x * x;
+                }, hasher{}, /*max_probe=*/8);
+
+            call_count = 0;
+            const int test_key = 7;
+            const int expected_value = test_key * test_key;
+            const int num_threads = 8;
+            std::vector<std::thread> threads;
+
+            for (int i = 0; i < num_threads; ++i) {
+                threads.emplace_back([&table6, test_key, expected_value]() {
+                    gbassert(table6.get_or_compute(test_key) == expected_value);
+                    });
+            }
+
+            for (auto& t : threads) {
+                t.join();
+            }
+            gbassert(call_count.load(std::memory_order_relaxed) == 1); // function should be called only once
+        }
+
+        // test concurrent access, different keys
+        {
+            lockfree_memo_table table7(/*capacity=*/64,
+                [&call_count](int x) {
+                    // simulate some work
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    call_count.fetch_add(1, std::memory_order_relaxed);
+                    return x + 100;
+                }, hasher{}, /*max_probe=*/16);
+
+            call_count = 0;
+            const int num_threads = 16;
+            std::vector<std::thread> threads;
+
+            for (int i = 0; i < num_threads; ++i) {
+                threads.emplace_back([&table7, i]() {
+                    gbassert(table7.get_or_compute(i) == i + 100);
+                    });
+            }
+            for (auto& t : threads) {
+                t.join();
+            }
+            gbassert(call_count.load(std::memory_order_relaxed) == num_threads); // function should be called once per unique key
+        }
+
+        // test concurrent access, mixed keys
+        {
+            lockfree_memo_table table8(/*capacity=*/64,
+                [&call_count](int x) {
+                    // simulate some work
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    call_count.fetch_add(1, std::memory_order_relaxed);
+                    return x * 3;
+                }, hasher{}, /*max_probe=*/16);
+
+            call_count = 0;
+            const int num_threads = 20;
+            std::vector<std::thread> threads;
+
+            for (int i = 0; i < num_threads; ++i) {
+                threads.emplace_back([&table8, i]() {
+                    int key = (i % 5) + 1; // keys will be 1,2,3,4,5 repeated
+                    gbassert(table8.get_or_compute(key) == key * 3);
+                    });
+            }
+            for (auto& t : threads) {
+                t.join();
+            }
+            gbassert(call_count.load(std::memory_order_relaxed) == 5); // function should be called once per unique key (1 to 5)
+        }
+
+        // stress test with many threads and keys
+        {
+            lockfree_memo_table table9(/*capacity=*/256,
+                [&call_count](int x) {
+                    // simulate some work
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    call_count.fetch_add(1, std::memory_order_relaxed);
+                    return x - 50;
+                }, hasher{}, /*max_probe=*/32);
+
+            call_count = 0;
+            const int num_threads = 64;
+            const int keys_per_thread = 10;
+            std::vector<std::thread> threads;
+
+            for (int i = 0; i < num_threads; ++i) {
+                threads.emplace_back([&table9, i, keys_per_thread]() {
+                    for (int k = 0; k < keys_per_thread; ++k) {
+                        int key = (i + k) % 20; // keys will be in range 0-19
+                        gbassert(table9.get_or_compute(key) == key - 50);
+                    }
+                    });
+            }
+            for (auto& t : threads) {
+                t.join();
+            }
+            gbassert(call_count.load(std::memory_order_relaxed) == 20); // function should be called once per unique key (0 to 19)
+        }
+
+        {
+            // test large values
+            struct LargeValue {
+                std::array<uint64_t, 128> data;
+
+                bool operator==(const LargeValue& other) const {
+                    return data == other.data;
+                }
+            };
+
+            auto func = [](int x) -> LargeValue {
+                LargeValue v;
+                v.data.fill(x);
+                return v;
+                };
+
+            lockfree_memo_table table(/*capacity=*/16, func, hasher{}, 8);
+
+            auto result1 = table.get_or_compute(42);
+            auto result2 = table.get_or_compute(42);
+            gbassert(result1 == result2);
+        }
+
+        {
+            // create pathalogical hasher that always returns the same value
+            auto bad_hasher = [](const auto&...)noexcept -> std::pair<uint64_t, uint64_t> {
+                return { 1, 1 };  // Always same hash - terrible!
+                };
+
+            auto func = [](int x) -> int { return x; };
+
+            lockfree_memo_table table(/*capacity=*/16, func, bad_hasher, /*max_probe=*/4);  // Small probe limit
+
+            // Fill slots with same hash
+            for (int i = 0; i < 4; ++i) {
+                table.get_or_compute(i);
+            }
+
+            gbassert(table.get_or_compute(999) == 0); // always returns the first value
+        }
+    }
+
+    GB_TEST(container, sharded_lockfree_memo_test)
+    {
+        using hasher = gb::yadro::util::xxhash128;
+
+        // ShardedLockFreeMemoTable basic functionality test
+        std::atomic<int> call_count{ 0 };
+
+        auto func = [&call_count](int x) -> int {
+            call_count.fetch_add(1, std::memory_order_relaxed);
+            return x * 2;
+            };
+
+        ShardedLockFreeMemoTable table(/*total_capacity=*/64, func, hasher{}, /*max_probe=*/8);
+        gbassert(table.get_or_compute(5) == 10);
+
+        // Non-power-of-2 should throw
+        must_throw<std::invalid_argument>([]() {
+            ShardedLockFreeMemoTable table(/*total_capacity=*/30,
+                [](int x) { return x; }, hasher{}, /*max_probe=*/4);
+            });
+
+        {
+            // total_capacity < NumShards should throw
+            must_throw<std::invalid_argument>([]() {
+                auto func = [](int x) { return x; };
+                ShardedLockFreeMemoTable < hasher, decltype(func), int, 64 > table(/*total_capacity=*/32,
+                    func, hasher{}, /*max_probe=*/4);
+                });
+        }
+
+        {
+            // concurrent high contention test
+            auto func = [&call_count](int x) -> int {
+                call_count.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                return x * 2;
+                };
+
+            ShardedLockFreeMemoTable table(/*total_capacity=*/1024, func, hasher{}, /*max_probe=*/16);
+
+            call_count = 0;
+            constexpr int num_threads = 32;
+            constexpr int num_unique_keys = 10;
+            std::vector<std::thread> threads;
+
+            for (int i = 0; i < num_threads; ++i) {
+                threads.emplace_back([&table, i]() {
+                    int key = i % num_unique_keys;
+                    int result = table.get_or_compute(key);
+                    gbassert(result == key * 2);
+                    });
+            }
+
+            for (auto& t : threads) {
+                t.join();
+            }
+            gbassert(call_count.load(std::memory_order_relaxed) == num_unique_keys);
+        }
+
+        {
+            // scalability test
+            auto func = [&call_count](int x) -> int {
+                call_count.fetch_add(1, std::memory_order_relaxed);
+                // Simulate expensive computation
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                return x * 2;
+                };
+
+            // Test with different shard counts
+            auto benchmark = [&](size_t num_shards) {
+                call_count.store(0);
+
+                ShardedLockFreeMemoTable table_sharded(/*total_capacity=*/1024, func, hasher{}, /*max_probe=*/16);
+
+                constexpr int num_threads = 16;
+                constexpr int ops_per_thread = 100;
+                constexpr int key_range = 50;
+
+                auto start = std::chrono::high_resolution_clock::now();
+
+                std::vector<std::thread> threads;
+
+                for (int i = 0; i < num_threads; ++i) {
+                    threads.emplace_back([&table_sharded, i]() {
+                        std::mt19937 rng(i);
+                        std::uniform_int_distribution<int> dist(0, key_range - 1);
+
+                        for (int j = 0; j < ops_per_thread; ++j) {
+                            int key = dist(rng);
+                            table_sharded.get_or_compute(key);
+                        }
+                        });
+                }
+
+                for (auto& t : threads) {
+                    t.join();
+                }
+
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+                return duration.count();
+                };
+
+            auto time_64_shards = benchmark(64);
+            gbassert(time_64_shards > 0); // just to use the variable
+        }
+    }
+
+    // benchmark for all implementations with the same driver code to compare results easily
+    template <size_t ExtraBytes>
+    struct TestItem {
+        uint64_t priority;
+        alignas(64) char payload[ExtraBytes];   // deliberately uninitialized (no zeroing cost)
+
+        TestItem(uint64_t p) : priority(p)
+        {
+            // Prevent compiler from optimizing payload away
+            std::memset(payload, static_cast<int>(p), sizeof(payload));
+        }
+
+        friend auto operator<=> (const TestItem& a, const TestItem& b) {
+            return a.priority <=> b.priority;   // higher value = better (top-K)
+        }
+    };
+
+    template <class PQ>
+    inline auto run_benchmark(size_t total_inserts, bool silent = true) {
+        const size_t K = 500;
+        const std::vector<size_t> thread_list = { 1, 4, 8, 16, 32 };
+        std::map<std::size_t, double> insert_time_map; // thread count → ns/insert
+
+        if (!silent) {
+            std::cout << "=== Bounded Priority Queue Benchmark ===\n";
+            std::cout << "K = " << K << ", total inserts = " << total_inserts << "\n\n";
+
+            std::cout << std::left
+                << std::setw(8) << "Threads"
+                << std::setw(10) << "Payload(B)"
+                << std::setw(14) << "TotalInserts"
+                << std::setw(12) << "Insert(ms)"
+                << std::setw(13) << "ns/insert"
+                << std::setw(14) << "M inserts/s"
+                << std::setw(12) << "Finalize(ms)" << '\n';
+            std::cout << std::string(85, '-') << '\n';
+        }
+
+        for (size_t nthreads : thread_list) {
+            using Item = PQ::value_type;
+
+            PQ pq(K, 32);
+
+            std::barrier sync_barrier(nthreads + 1);
+
+            std::vector<std::jthread> workers;
+            workers.reserve(nthreads);
+
+            for (size_t t = 0; t < nthreads; ++t) {
+                workers.emplace_back([&, t]() {
+                    sync_barrier.arrive_and_wait();   // synchronized start
+
+                    std::mt19937_64 rng(12345ULL + t);
+                    std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX / 2);
+
+                    for (size_t i = 0; i < total_inserts / nthreads; ++i) {
+                        pq.insert(Item{ dist(rng) });
+                    }
+                    });
+            }
+
+            sync_barrier.arrive_and_wait();           // release all threads together
+
+            auto insert_start = std::chrono::high_resolution_clock::now();
+
+            for (auto& w : workers) w.join();         // wait for all inserts to finish
+
+            auto insert_end = std::chrono::high_resolution_clock::now();
+
+            auto fstart = std::chrono::high_resolution_clock::now();
+            std::vector<Item> topk = pq.drain();
+            auto fend = std::chrono::high_resolution_clock::now();
+
+            auto insert_ms = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - insert_start).count();
+            auto fin_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fend - fstart).count();
+
+            double ns_per_insert = static_cast<double>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(insert_end - insert_start).count()) / total_inserts;
+
+            insert_time_map[nthreads] = ns_per_insert;
+
+            double mips = total_inserts / 1'000'000.0 / (insert_ms / 1000.0);
+
+            if (!silent) {
+
+                std::cout << std::setw(8) << nthreads
+                    << std::setw(10) << sizeof(Item)
+                    << std::setw(14) << total_inserts
+                    << std::setw(12) << insert_ms
+                    << std::setw(13) << std::fixed << std::setprecision(1) << ns_per_insert
+                    << std::setw(14) << std::setprecision(2) << mips
+                    << std::setw(12) << fin_ms << '\n';
+            }
+        }
+
+        return insert_time_map;
+    }
+
+    GB_TEST(container, bounded_priority_queue_test)
+    {
+#ifdef NDEBUG
+        using namespace gb::yadro::container;
+        auto small_map = run_benchmark<grok::bounded_priority_queue<TestItem<1024>>>(32'000'000);
+        auto large_map = run_benchmark<grok::bounded_priority_queue<TestItem<10240>>>(32'000'000);
+        gbassert(small_map[1] < 50 && small_map[16] < 5);
+        gbassert(large_map[1] < 90 && large_map[16] < 9);
+#endif
     }
 }

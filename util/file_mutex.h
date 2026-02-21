@@ -37,28 +37,10 @@
 #include "gbwin.h"
 
 #ifdef POSIX
+#include "../util/hybrid_mutex.h"
+
 namespace gb::yadro::util
 {
-    //-------------------------------------------------------------------------
-    // spin and wait class
-    //-------------------------------------------------------------------------
-    struct spin_wait
-    {
-        void yield()
-        {
-            if (spin_count < (nop_pause_limit >> 2)) { /*nop*/ }
-            // Intel pause: https://tinyurl.com/yb3lh2ph
-            else if (spin_count < nop_pause_limit) { __asm__ __volatile__("rep; nop" : : : "memory"); }
-            else { std::this_thread::yield(); }
-            ++spin_count;
-        }
-
-    private:
-        unsigned long long spin_count{ num_cores > 1u ? 0u : nop_pause_limit };
-        static constexpr unsigned nop_pause_limit = 32u;
-        static inline const auto num_cores = std::thread::hardware_concurrency();
-    };
-
     //-------------------------------------------------------------------------
     // global mutex for threads and processes
     //-------------------------------------------------------------------------

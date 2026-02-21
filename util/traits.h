@@ -37,6 +37,62 @@
 
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    // callable (function, lambda) traits, deducing return type and parameters
+
+    template<typename T>
+    struct callable_traits;
+
+    // Function pointer
+    template<typename R, typename... Args>
+    struct callable_traits<R(*)(Args...)> {
+        using return_type = R;
+        using args_tuple = std::tuple<Args...>;
+        using pure_args_tuple = std::tuple<std::remove_cvref_t<Args>...>;
+    };
+
+    // Noexcept function pointer
+    template<typename R, typename... Args>
+    struct callable_traits<R(*)(Args...) noexcept>
+        : callable_traits<R(*)(Args...)> {
+    };
+
+    // Function reference
+    template<typename R, typename... Args>
+    struct callable_traits<R(&)(Args...)> : callable_traits<R(*)(Args...)> {};
+
+    // Member function pointer (const)
+    template<typename C, typename R, typename... Args>
+    struct callable_traits<R(C::*)(Args...) const> {
+        using return_type = R;
+        using args_tuple = std::tuple<Args...>;
+        using pure_args_tuple = std::tuple<std::remove_cvref_t<Args>...>;
+    };
+
+    // Member function pointer (mutable)
+    template<typename C, typename R, typename... Args>
+    struct callable_traits<R(C::*)(Args...)> {
+        using return_type = R;
+        using args_tuple = std::tuple<Args...>;
+        using pure_args_tuple = std::tuple<std::remove_cvref_t<Args>...>;
+    };
+
+    // Functor / lambda
+    template<typename F>
+    struct callable_traits : callable_traits<decltype(&F::operator())> {};
+
+    template<typename F>
+    using callable_return_t =
+        typename callable_traits<std::remove_cvref_t<F>>::return_type;
+
+    template<typename F>
+    using callable_args_t =
+        typename callable_traits<std::remove_cvref_t<F>>::args_tuple;
+
+    template<typename F>
+    using callable_pure_args_t =
+        typename callable_traits<std::remove_cvref_t<F>>::pure_args_tuple;
+
     //---------------------------------------------------------------------
     // facilities from <experimental/type_traits>
 

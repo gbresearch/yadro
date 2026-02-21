@@ -34,6 +34,7 @@
 #include <concepts>
 #include <cstring>
 #include <span>
+#include <immintrin.h>
 
 namespace gb::yadro::util
 {
@@ -97,6 +98,10 @@ namespace gb::yadro::util
         uint64_t low{};
         uint64_t high{};
 
+        operator std::pair<uint64_t, uint64_t>() const noexcept {
+            return { low, high };
+        }
+
         auto operator<=>(const hash128_t&) const = default;
     };
 
@@ -112,7 +117,7 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // XXHash128 - Single-pass hashing
     //-------------------------------------------------------------------------
-    class xxhash128 {
+    class xxhash128_scalar {
         // XXH3 prime constants
         static constexpr uint64_t PRIME64_1 = 0x9E3779B185EBCA87ULL;
         static constexpr uint64_t PRIME64_2 = 0xC2B2AE3D27D4EB4FULL;
@@ -359,7 +364,7 @@ namespace gb::yadro::util
 
             // Process 8-byte blocks from buffer
             while (offset + 8 <= buffer_usage) {
-                uint64_t k = xxhash128::read_u64_le(buffer + offset);
+                uint64_t k = xxhash128_scalar::read_u64_le(buffer + offset);
 
                 merged_low ^= std::rotl(k * PRIME64_2, 31) * PRIME64_1;
                 merged_low = std::rotl(merged_low, 27) * PRIME64_1 + PRIME64_4;
@@ -380,8 +385,8 @@ namespace gb::yadro::util
 
             // Final avalanche
             return {
-                xxhash128::finalize(merged_low, total_len),
-                xxhash128::finalize(merged_high, total_len)
+                xxhash128_scalar::finalize(merged_low, total_len),
+                xxhash128_scalar::finalize(merged_high, total_len)
             };
         }
 
@@ -404,10 +409,10 @@ namespace gb::yadro::util
         // Process one 32-byte block
         //---------------------------------------------------------------------
         void process_block(const uint8_t* block) noexcept {
-            uint64_t lane1 = xxhash128::read_u64_le(block);
-            uint64_t lane2 = xxhash128::read_u64_le(block + 8);
-            uint64_t lane3 = xxhash128::read_u64_le(block + 16);
-            uint64_t lane4 = xxhash128::read_u64_le(block + 24);
+            uint64_t lane1 = xxhash128_scalar::read_u64_le(block);
+            uint64_t lane2 = xxhash128_scalar::read_u64_le(block + 8);
+            uint64_t lane3 = xxhash128_scalar::read_u64_le(block + 16);
+            uint64_t lane4 = xxhash128_scalar::read_u64_le(block + 24);
 
             acc1 += lane1 * PRIME64_2;
             acc1 = std::rotl(acc1, 31);
@@ -426,4 +431,223 @@ namespace gb::yadro::util
             acc4 *= PRIME64_1;
         }
     };
+
+
+    //-------------------------------------------------------------------------
+    // xxhash128_avx2 - SIMD-accelerated implementation
+    // compile with /arch:AVX2 on MSVC or -mavx2 on GCC/Clang
+    //-------------------------------------------------------------------------
+
+    // make sure linker fails if AVX2 is defined inconsistently in different translation units
+#if defined(__AVX2__)
+    inline constexpr int xxhash128_simd_level = 2;
+#else
+    inline constexpr int xxhash128_simd_level = 0;
+#endif
+
+    extern const int xxhash128_simd_guard[xxhash128_simd_level + 1];
+    inline const int xxhash128_simd_guard[xxhash128_simd_level + 1] = {};
+
+#if defined(XXHASH128_REQUIRE_AVX2) && !defined(__AVX2__)
+#error "XXHASH128: AVX2 required but compiler target does not enable it"
+#endif
+
+#ifdef __AVX2__
+#if defined(_MSC_VER)
+#pragma message("xxhash128_scalar: AVX2 enabled; using AVX2 implementation")
+#elif defined(__clang__) || defined(__GNUC__)
+#pragma message "xxhash128_scalar: AVX2 enabled; using AVX2 implementation"
+#endif
+
+    class xxhash128_avx2
+    {
+        static constexpr uint64_t PRIME64_1 = 0x9E3779B185EBCA87ULL;
+        static constexpr uint64_t PRIME64_2 = 0xC2B2AE3D27D4EB4FULL;
+        static constexpr uint64_t PRIME64_3 = 0x165667B19E3779F9ULL;
+        static constexpr uint64_t PRIME64_4 = 0x85EBCA77C2B2AE63ULL;
+        static constexpr uint64_t PRIME64_5 = 0x27D4EB2F165667C5ULL;
+
+        static constexpr size_t STRIDE = 32;  // Process 32 bytes per SIMD iteration
+
+    public:
+        //---------------------------------------------------------------------
+        // Runtime CPU feature detection
+        //---------------------------------------------------------------------
+        [[nodiscard]] static bool is_supported() noexcept {
+#ifdef _MSC_VER
+            int cpuInfo[4];
+            __cpuid(cpuInfo, 0);
+            if (cpuInfo[0] >= 7) {
+                __cpuidex(cpuInfo, 7, 0);
+                return (cpuInfo[1] & (1 << 5)) != 0;  // Check AVX2 bit (EBX bit 5)
+            }
+            return false;
+#elif defined(__GNUC__) || defined(__clang__)
+            return __builtin_cpu_supports("avx2");
+#else
+            return false;
+#endif
+        }
+
+        //---------------------------------------------------------------------
+        // Main hashing function
+        //---------------------------------------------------------------------
+        [[nodiscard]] static hash128_t hash_mem(const void* ptr, size_t len, uint64_t seed = 0) noexcept {
+            const uint8_t* data = static_cast<const uint8_t*>(ptr);
+            size_t offset = 0;
+
+            uint64_t merged_low, merged_high;
+
+            if (len >= STRIDE) {
+                // Initialize accumulators in AVX2 register
+                // Note: _mm256_set_epi64x stores in REVERSE order: (a[3], a[2], a[1], a[0])
+                // We want: acc1, acc2, acc3, acc4 to match scalar implementation
+                __m256i acc = _mm256_set_epi64x(
+                    seed - PRIME64_1,              // acc4 (lane 3)
+                    seed,                          // acc3 (lane 2)
+                    seed + PRIME64_2,              // acc2 (lane 1)
+                    seed + PRIME64_1 + PRIME64_2   // acc1 (lane 0)
+                );
+
+                __m256i v_prime1 = _mm256_set1_epi64x(PRIME64_1);
+                __m256i v_prime2 = _mm256_set1_epi64x(PRIME64_2);
+
+                // Process 32-byte blocks with SIMD
+                while (offset + STRIDE <= len) {
+                    __m256i lanes = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + offset));
+
+                    // acc += lanes * PRIME64_2
+                    acc = _mm256_add_epi64(acc, _mm256_mul_gen64(lanes, v_prime2));
+
+                    // acc = rotl(acc, 31)
+                    acc = rotl31_avx2(acc);
+
+                    // acc *= PRIME64_1
+                    acc = _mm256_mul_gen64(acc, v_prime1);
+
+                    offset += STRIDE;
+                }
+
+                // Extract accumulators from SIMD register
+                alignas(32) uint64_t a[4];
+                _mm256_store_si256(reinterpret_cast<__m256i*>(a), acc);
+
+                // Map back to scalar layout: a[0]=acc1, a[1]=acc2, a[2]=acc3, a[3]=acc4
+                uint64_t acc1 = a[0];
+                uint64_t acc2 = a[1];
+                uint64_t acc3 = a[2];
+                uint64_t acc4 = a[3];
+
+                // Merge accumulators (must match scalar implementation)
+                merged_low = std::rotl(acc1, 1) + std::rotl(acc2, 7) +
+                    std::rotl(acc3, 12) + std::rotl(acc4, 18);
+                merged_high = (acc1 ^ acc3) + (acc2 ^ acc4);
+            }
+            else {
+                // Not enough data for SIMD processing; use scalar initialization
+                // This matches the scalar version when no blocks are processed
+                uint64_t acc1 = seed + PRIME64_1 + PRIME64_2;
+                uint64_t acc2 = seed + PRIME64_2;
+                uint64_t acc3 = seed;
+                uint64_t acc4 = seed - PRIME64_1;
+
+                merged_low = std::rotl(acc1, 1) + std::rotl(acc2, 7) +
+                    std::rotl(acc3, 12) + std::rotl(acc4, 18);
+                merged_high = (acc1 ^ acc3) + (acc2 ^ acc4);
+            }
+
+            // Process remaining bytes (0-31) with scalar code
+            return finish_scalar(data, len, offset, merged_low, merged_high);
+        }
+
+        //---------------------------------------------------------------------
+        // Hash single value or container
+        //---------------------------------------------------------------------
+        template<hashable128 T>
+        [[nodiscard]] static hash128_t hash_value(const T& value, uint64_t seed = 0) noexcept {
+            if constexpr (hashable_container<T>) {
+                auto bytes = std::as_bytes(std::span{ value });
+                return hash_mem(bytes.data(), bytes.size_bytes(), seed);
+            }
+            else {
+                return hash_mem(&value, sizeof(T), seed);
+            }
+        }
+
+        //---------------------------------------------------------------------
+        // Variadic combiner: Hash multiple arguments
+        //---------------------------------------------------------------------
+        [[nodiscard]] static hash128_t operator()(const auto& ...args) noexcept
+            requires(sizeof...(args) > 0)
+        {
+            return xxhash128_scalar::operator()(args...);
+        }
+
+    private:
+        //---------------------------------------------------------------------
+        // Scalar tail processing for remaining 0-31 bytes
+        //---------------------------------------------------------------------
+        static hash128_t finish_scalar(const uint8_t* data, size_t len, size_t offset,
+            uint64_t ml, uint64_t mh) noexcept {
+            // 1. Process remaining 8-byte blocks
+            while (offset + 8 <= len) {
+                uint64_t k = xxhash128_scalar::read_u64_le(data + offset);
+
+                ml ^= std::rotl(k * PRIME64_2, 31) * PRIME64_1;
+                ml = std::rotl(ml, 27) * PRIME64_1 + PRIME64_4;
+
+                mh ^= std::rotl(k * PRIME64_3, 33) * PRIME64_4;
+                mh = std::rotl(mh, 31) * PRIME64_2 + PRIME64_5;
+
+                offset += 8;
+            }
+
+            // 2. Process remaining bytes (0-7 bytes)
+            while (offset < len) {
+                uint64_t byte_val = static_cast<uint64_t>(data[offset]);
+                ml = std::rotl(ml ^ (byte_val * PRIME64_5), 11) * PRIME64_1;
+                mh = std::rotl(mh ^ (byte_val * PRIME64_3), 13) * PRIME64_2;
+                ++offset;
+            }
+
+            // 3. Final avalanche incorporating total length
+            return { xxhash128_scalar::finalize(ml, len), xxhash128_scalar::finalize(mh, len) };
+        }
+
+        //---------------------------------------------------------------------
+        // AVX2 64-bit multiplication (emulated using 32-bit multiplies)
+        //---------------------------------------------------------------------
+        static inline __m256i _mm256_mul_gen64(__m256i a, __m256i b) noexcept {
+            // 64-bit multiply: (a_hi:a_lo) * (b_hi:b_lo) = a_lo*b_lo + (a_hi*b_lo + a_lo*b_hi) << 32
+            // We only need the low 64 bits of the result
+
+            __m256i b_swap = _mm256_shuffle_epi32(b, _MM_SHUFFLE(2, 3, 0, 1));  // Swap hi/lo 32-bit parts
+            __m256i prod_hi = _mm256_mul_epu32(a, b_swap);  // a_lo * b_hi
+
+            __m256i a_swap = _mm256_shuffle_epi32(a, _MM_SHUFFLE(2, 3, 0, 1));
+            __m256i prod_lo = _mm256_mul_epu32(a, b);       // a_lo * b_lo
+            __m256i prod_hi2 = _mm256_mul_epu32(a_swap, b); // a_hi * b_lo
+
+            return _mm256_add_epi64(prod_lo,
+                _mm256_slli_epi64(_mm256_add_epi64(prod_hi, prod_hi2), 32));
+        }
+
+        //---------------------------------------------------------------------
+        // AVX2 left rotation by 31 bits
+        //---------------------------------------------------------------------
+        static inline __m256i rotl31_avx2(__m256i x) noexcept {
+            return _mm256_or_si256(_mm256_slli_epi64(x, 31), _mm256_srli_epi64(x, 33));
+        }
+    };
+
+    using xxhash128 = xxhash128_avx2;
+#else
+// Fallback when AVX2 is not available
+#if defined(_MSC_VER)
+#pragma message("AVX2 not enabled, xxhash128_avx2 will fallback to scalar implementation")
+#elif defined(__GNUC__) || defined(__clang__)
+#pragma message "AVX2 not enabled, xxhash128_avx2 will fallback to scalar implementation"
+#endif
+    using xxhash128 = xxhash128_scalar;
+#endif
 }

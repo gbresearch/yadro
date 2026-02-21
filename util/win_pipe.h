@@ -361,13 +361,13 @@ namespace gb::yadro::util
                 std::visit([&](auto&& fn)
                     {
                         using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
-                        auto params = receive<lambda_pure_args<lambda_type>>();
+                        auto params = receive<callable_pure_args_t<lambda_type>>();
                         log("received parameters for function: ", fun_index);
-                        using sent_t = std::expected< lambda_ret<lambda_type>, std::string>;
+                        using sent_t = std::expected< callable_return_t<lambda_type>, std::string>;
 
                         try
                         {
-                            if constexpr (std::is_void_v<lambda_ret<lambda_type>>)
+                            if constexpr (std::is_void_v<callable_return_t<lambda_type>>)
                             {
                                 std::apply([&](auto&& ...args)
                                     {
@@ -436,11 +436,11 @@ namespace gb::yadro::util
                         {
                             auto&& fn = std::get<1>(fn_tuple);
                             using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
-                            auto params = receive<lambda_pure_args<lambda_type>>();
+                            auto params = receive<callable_pure_args_t<lambda_type>>();
                             log("received parameters for function: ", fun_name);
-                            using sent_t = std::expected< lambda_ret<lambda_type>, std::string>;
+                            using sent_t = std::expected< callable_return_t<lambda_type>, std::string>;
 
-                            if constexpr (std::is_void_v<lambda_ret<lambda_type>>)
+                            if constexpr (std::is_void_v<callable_return_t<lambda_type>>)
                             {
                                 std::apply([&](auto&& ...args)
                                     {

@@ -301,11 +301,18 @@ namespace
         std::string str = "12345";
         std::array<int, 5> arr = { 1, 2, 3, 4, 5 };
 
+#if defined(__AVX2__)
+        // both implementations should match
+        gbassert(xxhash128_avx2::is_supported());
+        gbassert(xxhash128_scalar::hash_value(arr) == xxhash128_avx2::hash_value(arr));
+        gbassert(xxhash128_scalar::hash_value(vec) == xxhash128_avx2::hash_value(vec));
+        gbassert(xxhash128_scalar::hash_value(str) == xxhash128_avx2::hash_value(str));
+#else
         // Should compile and run for all contiguous ranges and not throw
         (void)xxhash128::hash_value(vec);
         (void)xxhash128::hash_value(str);
         (void)xxhash128::hash_value(arr);
-
+#endif
         // std::vector<int> hash should match raw array of same data
         auto h_vec = xxhash128::hash_value(vec);
         auto h_raw = xxhash128::hash_mem(vec.data(), vec.size() * sizeof(int));
