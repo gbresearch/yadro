@@ -1,5 +1,5 @@
 //-----------------------------------------------------------------------------
-//  Copyright (C) 2011-2024, Gene Bushuyev
+//  Copyright (C) 2026, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
@@ -34,113 +34,110 @@
 
 namespace gb::yadro::container
 {
-    namespace grok
+    // A lock-free, thread-local sharded priority queue that maintains the top-K elements across all threads.
+    template<class T, class Compare = std::less<>>
+    class bounded_priority_queue
     {
-        // A lock-free, thread-local sharded priority queue that maintains the top-K elements across all threads.
-        template<class T, class Compare = std::less<>>
-        class bounded_priority_queue 
+        class local_topK
         {
-            class local_topK 
-            {
-                struct ReverseCompare {
-                    Compare comp;
-                    bool operator()(const T& a, const T& b) const { return comp(b, a); }
-                };
-
-                std::priority_queue<T, std::vector<T>, ReverseCompare> heap;
-                Compare user_comp;
-                size_t max_k;
-
-            public:
-                local_topK(size_t k, Compare c)
-                    : heap(ReverseCompare{ c }), user_comp(std::move(c)), max_k(k) {
-                }
-
-                void insert(T&& item) {
-                    if (heap.size() < max_k) {
-                        heap.push(std::move(item));
-                        return;
-                    }
-                    if (user_comp(heap.top(), item)) {  // item is better than current worst
-                        heap.pop();
-                        heap.push(std::move(item));
-                    }
-                }
-
-                void drain_to(std::vector<T>& out) {
-                    out.reserve(out.size() + heap.size());
-                    while (!heap.empty()) {
-                        out.push_back(std::move(heap.top()));
-                        heap.pop();
-                    }
-                }
+            struct ReverseCompare {
+                Compare comp;
+                bool operator()(const T& a, const T& b) const { return comp(b, a); }
             };
 
-            std::vector<local_topK> locals;
-            std::atomic<size_t> next_thread_id{ 0 };
-            Compare comp;
+            std::priority_queue<T, std::vector<T>, ReverseCompare> heap;
+            Compare user_comp;
             size_t max_k;
-            // Automatic thread → index mapping via thread_local (executed once per thread)
-            thread_local static inline size_t my_thread_id = std::numeric_limits<size_t>::max();
-            static constexpr size_t default_max_thread_count = 256;   // maximum threads allowed by default (can be overridden in constructor)
 
         public:
-            using value_type = T;
-            using compare_type = Compare;
+            local_topK(size_t k, Compare c)
+                : heap(ReverseCompare{ c }), user_comp(std::move(c)), max_k(k) {
+            }
 
-            explicit bounded_priority_queue(size_t max_elements, Compare c, size_t max_expected_threads = default_max_thread_count)
-                : comp(std::move(c)), max_k(max_elements)
-            {
-                locals.reserve(max_expected_threads);
-                for (size_t i = 0; i < max_expected_threads; ++i) {
-                    locals.emplace_back(max_k, comp);
+            void insert(T&& item) {
+                if (heap.size() < max_k) {
+                    heap.push(std::move(item));
+                    return;
+                }
+                if (user_comp(heap.top(), item)) {  // item is better than current worst
+                    heap.pop();
+                    heap.push(std::move(item));
                 }
             }
 
-            explicit bounded_priority_queue(size_t max_elements) : bounded_priority_queue(max_elements, Compare(), default_max_thread_count) {}
-            explicit bounded_priority_queue(size_t max_elements, size_t max_expected_threads) : bounded_priority_queue(max_elements, Compare(), max_expected_threads) {}
-
-            // inserted from multiple threads concurrently, each thread will insert into its own local_topK without contention
-            void insert(T&& item) 
-            {
-                if (my_thread_id == std::numeric_limits<size_t>::max()) {
-                    my_thread_id = next_thread_id.fetch_add(1, std::memory_order_relaxed);
-                    if (my_thread_id >= locals.size()) {
-                        throw std::runtime_error("bounded_priority_queue: too many threads (increase MAX_EXPECTED_THREADS)");
-                    }
+            void drain_to(std::vector<T>& out) {
+                out.reserve(out.size() + heap.size());
+                while (!heap.empty()) {
+                    out.push_back(std::move(heap.top()));
+                    heap.pop();
                 }
-                locals[my_thread_id].insert(std::move(item));
-            }
-
-            // Called from a single thread after all workers finish, no synchronization needed since workers are done
-            void drain(std::vector<T>& result) 
-            {
-                result.clear();
-                size_t active = next_thread_id.load(std::memory_order_acquire);
-                result.reserve(active * max_k);
-
-                for (size_t i = 0; i < active; ++i) {
-                    locals[i].drain_to(result);
-                }
-
-                if (result.size() > max_k) {
-                    // Keep the MAX best elements (highest priority)
-                    auto split_it = result.begin() + static_cast<std::ptrdiff_t>(result.size() - max_k);
-
-                     std::nth_element(result.begin(), split_it, result.end(),
-                            [this](const T& a, const T& b) { return comp(a, b); });
-
-                    result.erase(result.begin(), split_it);
-                }
-            }
-
-            auto drain() 
-            {
-                std::vector<T> result;
-                drain(result);
-                return result;
             }
         };
-    }
 
+        std::vector<local_topK> locals;
+        std::atomic<size_t> next_thread_id{ 0 };
+        Compare comp;
+        size_t max_k;
+        // Automatic thread → index mapping via thread_local (executed once per thread)
+        thread_local static inline size_t my_thread_id = std::numeric_limits<size_t>::max();
+        static constexpr size_t default_max_thread_count = 256;   // maximum threads allowed by default (can be overridden in constructor)
+
+    public:
+        using value_type = T;
+        using compare_type = Compare;
+
+        explicit bounded_priority_queue(size_t max_elements, Compare c, size_t max_expected_threads = default_max_thread_count)
+            : comp(std::move(c)), max_k(max_elements)
+        {
+            locals.reserve(max_expected_threads);
+            for (size_t i = 0; i < max_expected_threads; ++i) {
+                locals.emplace_back(max_k, comp);
+            }
+        }
+
+        explicit bounded_priority_queue(size_t max_elements) : bounded_priority_queue(max_elements, Compare(), default_max_thread_count) {}
+        explicit bounded_priority_queue(size_t max_elements, size_t max_expected_threads) : bounded_priority_queue(max_elements, Compare(), max_expected_threads) {}
+
+        // inserted from multiple threads concurrently, each thread will insert into its own local_topK without contention
+        void insert(T&& item)
+        {
+            if (my_thread_id == std::numeric_limits<size_t>::max()) {
+                my_thread_id = next_thread_id.fetch_add(1, std::memory_order_relaxed);
+                if (my_thread_id >= locals.size()) {
+                    throw std::runtime_error("bounded_priority_queue: too many threads (increase MAX_EXPECTED_THREADS)");
+                }
+            }
+            locals[my_thread_id].insert(std::move(item));
+        }
+
+        // Called from a single thread after all workers finish, no synchronization needed since workers are done
+        void drain(std::vector<T>& result)
+        {
+            result.clear();
+            size_t active = next_thread_id.load(std::memory_order_acquire);
+            result.reserve(active * max_k);
+
+            for (size_t i = 0; i < active; ++i) {
+                locals[i].drain_to(result);
+            }
+
+            if (result.size() > max_k) {
+                // Keep the MAX best elements (highest priority)
+                auto split_it = result.begin() + static_cast<std::ptrdiff_t>(result.size() - max_k);
+
+                std::nth_element(result.begin(), split_it, result.end(),
+                    [this](const T& a, const T& b) { return comp(a, b); });
+
+                result.erase(result.begin(), split_it);
+            }
+        }
+
+        auto drain()
+        {
+            std::vector<T> result;
+            drain(result);
+            return result;
+        }
+    };
 }
+

@@ -715,8 +715,8 @@ namespace
     {
 #ifdef NDEBUG
         using namespace gb::yadro::container;
-        auto small_map = run_benchmark<grok::bounded_priority_queue<TestItem<1024>>>(32'000'000);
-        auto large_map = run_benchmark<grok::bounded_priority_queue<TestItem<10240>>>(32'000'000);
+        auto small_map = run_benchmark<bounded_priority_queue<TestItem<1024>>>(32'000'000);
+        auto large_map = run_benchmark<bounded_priority_queue<TestItem<10240>>>(32'000'000);
         gbassert(small_map[1] < 50 && small_map[16] < 5);
         gbassert(large_map[1] < 90 && large_map[16] < 9);
 #endif
