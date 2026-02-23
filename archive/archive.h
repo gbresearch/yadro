@@ -33,22 +33,16 @@
 #include <ios>
 #include <iterator>
 #include <string>
-#include <fstream>
-#include <sstream>
-#include <iostream>
 #include <cassert>
 #include <array>
 #include <vector>
-#include <string>
-#include <queue>
-#include <stack>
 #include <tuple>
 #include <optional>
-#include <map>
-#include <unordered_map>
 #include <span>
 #include <ranges>
 #include <expected>
+#include <atomic>
+#include <chrono>
 
 #include "../util/gberror.h"
 #include "../util/string_util.h"
@@ -232,7 +226,7 @@ namespace gb::yadro::archive
     }
     
     //---------------------------------------------------------------------
-    // archive_size_stream is archive proxy class for size calculation
+    // archive_md5_stream is archive proxy class for MD5 calculation
     struct archive_md5_stream
     {
         using char_type = std::uint8_t;
@@ -247,7 +241,7 @@ namespace gb::yadro::archive
         util::md5 _md5;
     };
 
-    // calculate the size (in bytes) of buffer necessary to serialize binary data
+    // calculate MD5 of all arguments
     inline auto serialization_md5(auto&&... args)
     {
         archive< archive_md5_stream, archive_format_t::custom> ar;
@@ -756,6 +750,121 @@ namespace gb::yadro::archive
         else
             a(exp.error());
     }
+
+    namespace detail {
+
+        // -----------------------------------------------------------------------------
+        // A1. Type-identity traits for concept constraints
+        //
+        // We need to recognise std::atomic<T> and std::chrono::duration<Rep,Period>
+        // regardless of cv-ref qualifiers on the incoming auto&& argument, so we strip
+        // cv-ref with remove_cvref_t before matching against the primary template.
+        // -----------------------------------------------------------------------------
+
+        template<typename T>
+        struct is_atomic_type : std::false_type {};
+
+        template<typename T>
+        struct is_atomic_type<std::atomic<T>> : std::true_type {
+            using value_type = T;
+        };
+
+        template<typename T>
+        struct is_duration_type : std::false_type {};
+
+        template<typename Rep, typename Period>
+        struct is_duration_type<std::chrono::duration<Rep, Period>> : std::true_type {
+            using rep_type = Rep;
+        };
+
+        // Concepts that fire on the decayed type, so auto&& can bind to const or
+        // non-const, lvalue or rvalue, without any overload-set gymnastics.
+        template<typename T>
+        concept AtomicType = is_atomic_type<std::remove_cvref_t<T>>::value;
+
+        template<typename T>
+        concept DurationType = is_duration_type<std::remove_cvref_t<T>>::value;
+    } // namespace detail
+
+
+    // -----------------------------------------------------------------------------
+    // serialize_duration
+    //
+    // On save (is_oarchive_v<Archive>):
+    //   Extract .count() into a local Rep, pass that to the archive.
+    //   The duration itself is not modified.
+    //
+    // On load (is_iarchive_v<Archive>):
+    //   Load a fresh Rep from the archive, reconstruct the duration in-place.
+    //   Requires that the duration is not const — enforced by static_assert so the
+    //   error message is actionable rather than a template wall.
+    // -----------------------------------------------------------------------------
+    template<typename Archive, detail::DurationType Dur>
+    void serialize(Archive&& ar, Dur&& d)
+    {
+        using duration_t = std::remove_cvref_t<Dur>;
+        using rep_t = typename detail::is_duration_type<duration_t>::rep_type;
+
+        if constexpr (is_oarchive_v<std::remove_cvref_t<Archive>>) {
+            // Save: duration may be const; we only read from it.
+            rep_t count = d.count();
+            std::invoke(std::forward<Archive>(ar), count);
+
+        }
+        else {
+            static_assert(
+                !std::is_const_v<std::remove_reference_t<Dur>>,
+                "serialize_duration: cannot deserialize into a const duration — "
+                "ensure the archive is an input archive and 'self' is not const");
+
+            // Load: read the rep, reconstruct the duration in-place.
+            rep_t count{};
+            std::invoke(std::forward<Archive>(ar), count);
+            d = duration_t{ count };
+        }
+    }
+
+
+    // -----------------------------------------------------------------------------
+    // serialize_atomic
+    //
+    // On save (is_oarchive_v<Archive>):
+    //   Load the current value into a plain T local, pass that to the archive.
+    //   load() is a const member of atomic, so the const& binding is legal.
+    //
+    // On load (is_iarchive_v<Archive>):
+    //   Read a fresh T from the archive, store it back into the atomic.
+    //   Requires a non-const atomic — enforced by static_assert.
+    //
+    // Note: both load() and store() use relaxed ordering.  This is safe because
+    // serialize() is called either before any threads are launched (save) or after
+    // all threads have finished (load); there is no concurrent access to these
+    // atomics at the point of serialization.
+    // -----------------------------------------------------------------------------
+    template<typename Archive, detail::AtomicType Atom>
+    void serialize(Archive&& ar, Atom&& atom)
+    {
+        using T = typename detail::is_atomic_type<std::remove_cvref_t<Atom>>::value_type;
+
+        if constexpr (is_oarchive_v<std::remove_cvref_t<Archive>>) {
+            // Save: atomic::load() is const — legal even when Atom is const&.
+            T tmp = atom.load(std::memory_order_relaxed);
+            std::invoke(std::forward<Archive>(ar), tmp);
+
+        }
+        else {
+            static_assert(
+                !std::is_const_v<std::remove_reference_t<Atom>>,
+                "serialize_atomic: cannot deserialize into a const atomic — "
+                "ensure the archive is an input archive and 'self' is not const");
+
+            // Load: read value from archive, then store into the atomic.
+            T tmp{};
+            std::invoke(std::forward<Archive>(ar), tmp);
+            atom.store(tmp, std::memory_order_relaxed);
+        }
+    }
+
 
 #if defined(clang_p1061)
     //---------------------------------------------------------------------

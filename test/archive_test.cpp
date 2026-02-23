@@ -238,5 +238,20 @@ namespace
                 enum_type::three,
                 std::string("Hello World"),
                 123, 3.14, 2.7f) == "2e44ca1b103d900c0d7d9c08b58e9194");
+
+        // test atomic and chrono::duration serialization
+        {
+            std::atomic<int> a(123);
+            using namespace std::chrono_literals;
+            auto d = 321ns;
+            omem_archive<> ma;
+            ma(a, d);
+            imem_archive<> ia(ma);
+            a.store(999, std::memory_order_relaxed);
+            d = 888s;
+            ia(a, d);
+            gbassert(a.load() == 123);
+            gbassert(d == 321ns);
+        }
     }
 }
