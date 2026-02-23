@@ -43,6 +43,9 @@
 #include <filesystem>
 
 #include "../util/gbutil.h"
+#include "../util/hash_util.h"
+#include "../container/lockfree_memo_table.h"
+#include "../container/bounded_priority_queue.h"
 #include "../async/threadpool.h"
 #include "../archive/archive.h"
 
@@ -561,3 +564,800 @@ namespace gb::yadro::algorithm
     }
 }
 
+namespace gb::yadro::algorithm::v2 {
+    using namespace gb::yadro::util;
+    using namespace gb::yadro::container;
+    // =============================================================================
+    // SECTION 1 — Concepts
+    // =============================================================================
+
+    /// A ValueWrapper must expose:
+    ///   value_type               — the wrapped gene type
+    ///   random_value(rng)        — draw a random valid gene
+    ///   mutate(value, rng)       — return a mutated copy of value
+    ///   crossover(a, b, rng)     — return an offspring gene from parents a and b
+    template<typename W, typename RNG = std::mt19937_64>
+    concept ValueWrapper = requires {
+        typename W::value_type;
+    }&& requires(const W& w, RNG& rng, const typename W::value_type& v) {
+        { w.random_value(rng) } -> std::same_as<typename W::value_type>;
+        { w.mutate(v, rng) } -> std::same_as<typename W::value_type>;
+        { w.crossover(v, v, rng) } -> std::same_as<typename W::value_type>;
+    };
+
+    // Shorthand: wrapper compatible with mt19937_64 (the internal RNG)
+    template<typename W>
+    concept GeneticWrapper = ValueWrapper<W, std::mt19937_64>;
+
+
+    // =============================================================================
+    // SECTION 2 — Type Wrappers for Arithmetic Types
+    // =============================================================================
+
+    // -----------------------------------------------------------------------------
+    // 2a. min_max_value_range<T>
+    //     Continuous range [min_value, max_value].
+    //     Floats: Simulated Binary Crossover (SBX) + Gaussian mutation.
+    //     Integers: uniform crossover + bounded random-walk mutation.
+    // -----------------------------------------------------------------------------
+    template<typename T>
+        requires std::is_arithmetic_v<T>
+    struct min_max_value_range {
+        using value_type = T;
+
+        T      min_value;
+        T      max_value;
+        double mutation_sigma_frac = 0.15; // for floats: σ = frac * range
+
+        template<typename RNG>
+        [[nodiscard]] T random_value(RNG& rng) const {
+            if constexpr (std::is_integral_v<T>)
+                return std::uniform_int_distribution<T>{min_value, max_value}(rng);
+            else
+                return std::uniform_real_distribution<T>{min_value, max_value}(rng);
+        }
+
+        template<typename RNG>
+        [[nodiscard]] T mutate(T value, RNG& rng) const {
+            if constexpr (std::is_integral_v<T>) {
+                if (std::uniform_real_distribution<double>{0, 1}(rng) < 0.1)
+                    return random_value(rng);                      // occasional full reset
+                T span = max_value - min_value;
+                T step_hi = std::max(T{ 1 }, static_cast<T>(span / 10));
+                T delta = std::uniform_int_distribution<T>{ -step_hi, step_hi }(rng);
+                return std::clamp(static_cast<T>(value + delta), min_value, max_value);
+            }
+            else {
+                double sigma = static_cast<double>(max_value - min_value) * mutation_sigma_frac;
+                T result = value + static_cast<T>(
+                    std::normal_distribution<double>{0.0, sigma}(rng));
+                return std::clamp(result, min_value, max_value);
+            }
+        }
+
+        template<typename RNG>
+        [[nodiscard]] T crossover(T a, T b, RNG& rng) const {
+            if constexpr (std::is_floating_point_v<T>) {
+                // SBX — tends to produce children near parents, distribution index η=2
+                constexpr double eta = 2.0;
+                double u = std::uniform_real_distribution<double>{ 0, 1 }(rng);
+                double beta = (u <= 0.5) ? std::pow(2.0 * u, 1.0 / (eta + 1.0))
+                    : std::pow(0.5 / (1.0 - u), 1.0 / (eta + 1.0));
+                double child = 0.5 * ((1.0 + beta) * a + (1.0 - beta) * b);
+                return std::clamp(static_cast<T>(child), min_value, max_value);
+            }
+            else {
+                return std::uniform_int_distribution<int>{0, 1}(rng) ? a : b;
+            }
+        }
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            // min_value and max_value define the search domain.
+            // mutation_sigma_frac tunes the Gaussian mutation width.
+            // All are arithmetic — serialized directly.
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.min_value,
+                self.max_value,
+                self.mutation_sigma_frac
+            );
+        }
+    };
+
+    // -----------------------------------------------------------------------------
+    // 2b. discrete_value_range<T>
+    //     Finite set of allowed values.
+    //     allowed_values should be sorted for efficient neighbor mutation.
+    // -----------------------------------------------------------------------------
+    template<typename T>
+        requires std::is_arithmetic_v<T>
+    struct discrete_value_range {
+        using value_type = T;
+
+        std::vector<T> allowed_values; ///< Must be non-empty; sort for neighbour mutation
+
+        template<typename RNG>
+        [[nodiscard]] T random_value(RNG& rng) const {
+            size_t i = std::uniform_int_distribution<size_t>{ 0, allowed_values.size() - 1 }(rng);
+            return allowed_values[i];
+        }
+
+        template<typename RNG>
+        [[nodiscard]] T mutate(T value, RNG& rng) const {
+            double p = std::uniform_real_distribution<double>{ 0,1 }(rng);
+            if (p < 0.30) {
+                // Neighbour mutation: ±1 or ±2 steps in sorted order
+                auto it = std::ranges::lower_bound(allowed_values, value);
+                auto idx = static_cast<int>(it - allowed_values.begin());
+                int  d = std::uniform_int_distribution<int>{ -2, 2 }(rng);
+                int  ni = std::clamp(idx + d, 0, static_cast<int>(allowed_values.size()) - 1);
+                return allowed_values[static_cast<size_t>(ni)];
+            }
+            return random_value(rng);
+        }
+
+        template<typename RNG>
+        [[nodiscard]] T crossover(T a, T b, RNG& rng) const {
+            return std::uniform_int_distribution<int>{0, 1}(rng) ? a : b;
+        }
+    };
+
+
+    // =============================================================================
+    // SECTION 3 — Container Wrapper
+    //
+    // Wraps a Container (e.g. std::vector<T>) where every element is governed
+    // by the same ElementWrapper.  container_size is fixed; for variable-length
+    // containers see DESIGN NOTES at the end of this file.
+    // =============================================================================
+    template<typename Container, GeneticWrapper ElementWrapper>
+        requires std::is_arithmetic_v<typename ElementWrapper::value_type>
+    && std::same_as<typename Container::value_type,
+        typename ElementWrapper::value_type>
+        struct container_range {
+        using element_type = typename ElementWrapper::value_type;
+        using value_type = Container;
+
+        size_t         container_size;   ///< Fixed number of elements
+        ElementWrapper element_wrapper;
+
+        // per-element mutation probability; negative → auto (1/size)
+        double per_element_mut_prob = -1.0;
+
+        template<typename RNG>
+        [[nodiscard]] value_type random_value(RNG& rng) const {
+            value_type result;
+            if constexpr (requires(value_type v, size_t n) { v.resize(n); })
+                result.resize(container_size);
+            for (auto& el : result)
+                el = element_wrapper.random_value(rng);
+            return result;
+        }
+
+        template<typename RNG>
+        [[nodiscard]] value_type mutate(value_type value, RNG& rng) const {
+            double prob = (per_element_mut_prob >= 0.0)
+                ? per_element_mut_prob
+                : 1.0 / static_cast<double>(container_size);
+            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
+            for (auto& el : value)
+                if (coin(rng) < prob)
+                    el = element_wrapper.mutate(el, rng);
+            return value;
+        }
+
+        template<typename RNG>
+        [[nodiscard]] value_type crossover(const value_type& a, const value_type& b,
+            RNG& rng) const
+        {
+            value_type result;
+            if constexpr (requires(value_type v, size_t n) { v.resize(n); })
+                result.resize(container_size);
+            // Single-point crossover at element level
+            size_t cut = std::uniform_int_distribution<size_t>{ 0, container_size }(rng);
+            auto ia = std::begin(a), ib = std::begin(b), ir = std::begin(result);
+            for (size_t i = 0; i < container_size; ++i, ++ia, ++ib, ++ir)
+                *ir = (i < cut) ? *ia : *ib;
+            return result;
+        }
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            // element_wrapper must itself have a serialize() method.
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.container_size,
+                self.element_wrapper,
+                self.per_element_mut_prob
+            );
+        }
+    };
+
+
+    // =============================================================================
+    // SECTION 4 — GA Configuration & Stats
+    // =============================================================================
+
+    struct ga_config {
+        double mutation_rate = 0.15; ///< Per-gene mutation probability
+        double crossover_rate = 0.80; ///< Probability of crossover (vs. clone)
+        size_t tournament_size = 5;    ///< Tournament selection K
+        double elitism_fraction = 0.05; ///< Fraction of best kept unchanged each gen
+        size_t memo_capacity = 1u << 20; ///< ShardedLockFreeMemoTable total entries
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.mutation_rate,
+                self.crossover_rate,
+                self.tournament_size,
+                self.elitism_fraction,
+                self.memo_capacity
+            );
+        }
+    };
+
+    struct optimization_stats {
+        size_t total_evaluations = 0; ///< Actual fitness-function calls (cache misses)
+        size_t cache_hits = 0; ///< Evaluations skipped by memo table
+        size_t generations = 0;
+        std::chrono::nanoseconds elapsed{ 0 };
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.total_evaluations,
+                self.cache_hits,
+                self.generations,
+                self.elapsed
+            );
+        }
+    };
+
+    // =============================================================================
+    // SECTION 5 — Optimization History
+    //
+    // Maintains the top max_size (chromosome, fitness) pairs seen so far,
+    // ordered best-first according to CompareFn.
+    // NOT thread-safe — call from a single thread (the main thread).
+    // =============================================================================
+    template<typename Chromosome, typename Target, typename CompareFn>
+    class optimization_history {
+    public:
+        using entry_t = std::pair<Target, Chromosome>; // (fitness, params)
+
+        optimization_history() = default;
+        explicit optimization_history(size_t max_size, CompareFn cmp)
+            : max_size_(max_size), cmp_(std::move(cmp)) {
+        }
+
+        void try_insert(Target fitness, Chromosome chrom) {
+            if (entries_.size() >= max_size_) {
+                if (!cmp_(fitness, entries_.back().first))
+                    return; // not better than current worst
+                entries_.pop_back();
+            }
+            // Binary-search insertion keeps vector sorted best-first
+            auto pos = std::lower_bound(entries_.begin(), entries_.end(), fitness,
+                [&](const entry_t& e, const Target& t) { return cmp_(e.first, t); });
+            entries_.insert(pos, { std::move(fitness), std::move(chrom) });
+        }
+
+        [[nodiscard]] bool              empty()   const noexcept { return entries_.empty(); }
+        [[nodiscard]] size_t            size()    const noexcept { return entries_.size(); }
+        [[nodiscard]] const entry_t& best()    const { return entries_.front(); }
+        [[nodiscard]] const std::vector<entry_t>& all() const noexcept { return entries_; }
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            // max_size_ controls the capacity limit for future insertions.
+            // entries_ is the actual sorted best-first data.
+            // compare_ is intentionally omitted — it is a construction argument.
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.max_size_,
+                self.entries_
+            );
+        }
+    private:
+        size_t               max_size_ = std::numeric_limits<size_t>::max();
+        CompareFn            cmp_;
+        std::vector<entry_t> entries_; // sorted best-first
+    };
+
+
+    // =============================================================================
+    // SECTION 6 — Internal Helpers (detail namespace)
+    // =============================================================================
+    namespace detail {
+
+        /// Thread-local mt19937_64 seeded from hardware entropy XORed with thread-id.
+        /// Each thread gets an independent stream; zero contention.
+        inline std::mt19937_64& thread_rng() {
+            thread_local std::mt19937_64 rng{
+                std::random_device{}() ^
+                (std::hash<std::thread::id>{}(std::this_thread::get_id()) << 32u)
+            };
+            return rng;
+        }
+
+        /// Build a random chromosome by sampling from every wrapper.
+        template<typename... Wrappers>
+        auto random_chromosome(std::mt19937_64& rng,
+            const std::tuple<Wrappers...>& wrappers)
+        {
+            return std::apply([&](const auto&... w) {
+                return std::make_tuple(w.random_value(rng)...);
+                }, wrappers);
+        }
+
+        /// Mutate each gene independently with probability mutation_rate.
+        template<typename Chromosome, typename... Wrappers>
+        Chromosome mutate_chromosome(std::mt19937_64& rng,
+            Chromosome chrom,
+            const std::tuple<Wrappers...>& wrappers,
+            double mutation_rate)
+        {
+            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
+            [&] <size_t... Is>(std::index_sequence<Is...>) {
+                ((coin(rng) < mutation_rate
+                    ? void(std::get<Is>(chrom) =
+                        std::get<Is>(wrappers).mutate(std::get<Is>(chrom), rng))
+                    : void()), ...);
+            }(std::index_sequence_for<Wrappers...>{});
+            return chrom;
+        }
+
+        /// Element-wise crossover using each wrapper's crossover operator.
+        template<typename Chromosome, typename... Wrappers>
+        Chromosome crossover_chromosomes(std::mt19937_64& rng,
+            const Chromosome& a,
+            const Chromosome& b,
+            const std::tuple<Wrappers...>& wrappers)
+        {
+            return[&]<size_t... Is>(std::index_sequence<Is...>) {
+                return Chromosome{ std::get<Is>(wrappers).crossover(
+                    std::get<Is>(a), std::get<Is>(b), rng)... };
+            }(std::index_sequence_for<Wrappers...>{});
+        }
+
+        /// Tournament selection — returns index of winner in [0, fitnesses.size()).
+        template<typename Target, typename CompareFn>
+        size_t tournament_select(std::mt19937_64& rng,
+            const std::vector<Target>& fitnesses,
+            size_t k, CompareFn cmp)
+        {
+            std::uniform_int_distribution<size_t> dist{ 0, fitnesses.size() - 1 };
+            size_t best = dist(rng);
+            for (size_t i = 1; i < k; ++i) {
+                size_t c = dist(rng);
+                if (cmp(fitnesses[c], fitnesses[best])) best = c;
+            }
+            return best;
+        }
+
+    } // namespace detail
+
+
+    // =============================================================================
+    // SECTION 7 — genetic_optimization_t
+    // =============================================================================
+
+    template<typename Fn, typename CompareFn, GeneticWrapper... Wrapper>
+    struct genetic_optimization_t {
+        // -------------------------------------------------------------------------
+        // Public type aliases
+        // -------------------------------------------------------------------------
+        using chromosome_t = std::tuple<typename Wrapper::value_type...>;
+        using target_t = std::invoke_result_t<Fn, typename Wrapper::value_type...>;
+        using history_t = optimization_history<chromosome_t, target_t, CompareFn>;
+
+        // -------------------------------------------------------------------------
+        // GA tuning — modify before calling optimize()
+        // -------------------------------------------------------------------------
+        ga_config config;
+
+        // -------------------------------------------------------------------------
+        // Constructor
+        //   target_fn     : the expensive fitness function
+        //   compare       : comparator; compare(a,b)==true means a is a better fit
+        //   type_wrappers : one wrapper per parameter
+        // -------------------------------------------------------------------------
+        genetic_optimization_t(Fn target_fn, CompareFn compare, Wrapper... type_wrappers)
+            : target_fn_(std::move(target_fn))
+            , compare_(std::move(compare))
+            , wrappers_(std::move(type_wrappers)...)
+            , history_(std::numeric_limits<size_t>::max(), compare_)
+        {
+        }
+
+        // Prevent accidental copying (memo table and state are non-trivial)
+        genetic_optimization_t(const genetic_optimization_t&) = delete;
+        genetic_optimization_t& operator=(const genetic_optimization_t&) = delete;
+        genetic_optimization_t(genetic_optimization_t&&) = default;
+
+        // -------------------------------------------------------------------------
+        // Single-threaded optimize
+        //
+        // Evaluates fitness on the calling thread.
+        // Use this when the fitness function is fast (< ~1µs) and thread-pool
+        // overhead would dominate.
+        //
+        // Returns: {cumulative_stats, cumulative_history}
+        //   optimize() may be called repeatedly; state (population, history, stats)
+        //   accumulates across calls.  Call clear() to restart.
+        // -------------------------------------------------------------------------
+        template<typename Rep, typename Period>
+        auto optimize(std::chrono::duration<Rep, Period> duration,
+            std::size_t population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max(),
+            std::size_t max_tries = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            using clock = std::chrono::steady_clock;
+            const auto t0 = clock::now();
+            const auto deadline = t0 + duration;
+            auto& rng = detail::thread_rng();
+
+            history_.resize_limit(max_history);
+            init_population(population_size, rng);
+            evaluate_all_single();                        // fill nullopt entries
+
+            const size_t elite_n = elite_count(population_size);
+
+            while (clock::now() < deadline &&
+                total_attempts() < max_tries)
+            {
+                sort_population();
+                feed_history_from_population();
+
+                auto next = breed_next_generation(population_size, elite_n, rng);
+                population_ = std::move(next);
+                evaluate_all_single();
+                ++stats_.generations;
+            }
+
+            stats_.elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - t0);
+
+            return { stats_, history_ };
+        }
+
+        // -------------------------------------------------------------------------
+        // Multi-threaded optimize
+        //
+        // Submits fitness evaluations to `tp` (one task per unevaluated chromosome).
+        // Genetic operators (selection, crossover, mutation) remain on the calling
+        // thread — they are fast and RNG-heavy, not worth parallelising.
+        //
+        // Thread safety of fitness function: the function is called concurrently
+        // from multiple threads.  The memoisation table is lock-free.  Ensure your
+        // fitness function is itself thread-safe (or stateless).
+        //
+        // The bounded_priority_queue accumulates results lock-free per-thread; it is
+        // drained into history_ after all tasks for the generation complete.
+        // -------------------------------------------------------------------------
+        template<typename Rep, typename Period, typename ThreadPool>
+        auto optimize(ThreadPool& tp,
+            std::chrono::duration<Rep, Period> duration,
+            std::size_t population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max(),
+            std::size_t max_tries = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            using clock = std::chrono::steady_clock;
+            using bpq_item = std::pair<target_t, chromosome_t>;
+            struct bpq_cmp {
+                CompareFn cmp;
+                bool operator()(const bpq_item& a, const bpq_item& b) const {
+                    return cmp(a.first, b.first);
+                }
+            };
+
+            const auto t0 = clock::now();
+            const auto deadline = t0 + duration;
+            auto& rng = detail::thread_rng();
+
+            history_.resize_limit(max_history);
+            init_population(population_size, rng);
+
+            // Shared bounded-priority-queue collects best results lock-free.
+            // We create a new one each optimize() call; history_ is cumulative.
+            bounded_priority_queue<bpq_item, bpq_cmp> bpq{
+                max_history, bpq_cmp{compare_} };
+
+            evaluate_all_parallel(tp, bpq);
+
+            const size_t elite_n = elite_count(population_size);
+
+            while (clock::now() < deadline &&
+                total_attempts() < max_tries)
+            {
+                sort_population();
+
+                // Drain BPQ into persistent history (single-threaded; workers done)
+                for (auto& [fit, chrom] : bpq.drain())
+                    history_.try_insert(fit, chrom);
+
+                // Breed next generation (fast, no locking needed)
+                auto next = breed_next_generation(population_size, elite_n, rng);
+                population_ = std::move(next);
+
+                // Re-create BPQ for next generation
+                bpq = bounded_priority_queue<bpq_item, bpq_cmp>{
+                    max_history, bpq_cmp{compare_} };
+
+                evaluate_all_parallel(tp, bpq);
+                ++stats_.generations;
+            }
+
+            // Drain final generation into history
+            for (auto& [fit, chrom] : bpq.drain())
+                history_.try_insert(fit, chrom);
+
+            stats_.elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - t0);
+
+            return { stats_, history_ };
+        }
+
+        // -------------------------------------------------------------------------
+        // clear() — reset to initial state; next optimize() starts from scratch
+        // -------------------------------------------------------------------------
+        void clear() {
+            population_.clear();
+            stats_ = {};
+            history_ = history_t{ std::numeric_limits<size_t>::max(), compare_ };
+            fn_call_count_.store(0, std::memory_order_relaxed);
+            total_eval_requests_.store(0, std::memory_order_relaxed);
+        }
+
+        // -------------------------------------------------------------------------
+        // Accessors for inspection between optimize() calls
+        // -------------------------------------------------------------------------
+        [[nodiscard]] const history_t& history()    const { return history_; }
+        [[nodiscard]] const optimization_stats& stats()     const { return stats_; }
+        [[nodiscard]] size_t                    pop_size()  const { return population_.size(); }
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            // ── 1. GA tuning knobs ────────────────────────────────────────────────
+            // config is a plain struct of arithmetic members — serialized directly.
+            std::invoke(std::forward<decltype(archive)>(archive), self.config);
+
+            // ── 2. Cumulative statistics ──────────────────────────────────────────
+            // stats_ contains size_t counters and a std::chrono::nanoseconds elapsed.
+            // elapsed is serialized via a rep-integer temporary (see serialize()).
+            std::invoke(std::forward<decltype(archive)>(archive), self.stats_);
+
+            // ── 3. Best-result history ────────────────────────────────────────────
+            // history_ holds max_size_ (size_t) and entries_ (sorted vector of
+            // pair<target_t, chromosome_t>).  compare_ is not in the serialized
+            // stream — it remains bound from the constructor and stays valid.
+            std::invoke(std::forward<decltype(archive)>(archive), self.history_);
+
+            // ── 4. Live population ────────────────────────────────────────────────
+            // population_ is std::vector<pair<chromosome_t, optional<target_t>>>.
+            //   chromosome_t = tuple<Wrapper::value_type...>   (arithmetic or vector)
+            //   optional<target_t>: nullopt for newly bred individuals that have not
+            //     yet been evaluated, or a value for elites carried from last gen.
+            //     On load, nullopt entries will be evaluated on the first optimize()
+            //     call, exactly as they would have been in the original run.
+            std::invoke(std::forward<decltype(archive)>(archive), self.population_);
+
+            // ── 5. Atomic evaluation counters ────────────────────────────────────
+            // fn_call_count_ and total_eval_requests_ are mutable std::atomic<size_t>.
+            std::invoke(std::forward<decltype(archive)>(archive), self.fn_call_count_);
+            std::invoke(std::forward<decltype(archive)>(archive), self.total_eval_requests_);
+
+            // ── 6. Memo table — intentionally not serialized ──────────────────────
+            // The memo table is a pure performance cache.  Reasons for exclusion:
+            //
+            //   a) Its internal layout (hash table with linear probing) depends on
+            //      memo_capacity and NumShards — which may differ between save and
+            //      load environments.
+            //
+            //   b) The restored population may reference chromosomes not yet in the
+            //      new table; a stale table could skip re-evaluation incorrectly.
+            //
+            //   c) After loading, the first evaluate_chromosome() call triggers lazy
+            //      initialisation and rebuilds the table from scratch.  Any elites
+            //      in population_ that already have a fitness value (optional is
+            //      engaged) will not even call evaluate_chromosome — elites are
+            //      carried straight into the next generation without re-evaluation.
+            //
+            // Reset the table so the lazy-init guard is cleared.
+            self.memo_table_.reset();
+        }
+
+    private:
+        // -------------------------------------------------------------------------
+        // Types
+        // -------------------------------------------------------------------------
+        using individual_t = std::pair<chromosome_t, std::optional<target_t>>;
+
+        // -------------------------------------------------------------------------
+        // Memo table
+        //
+        // ShardedLockFreeMemoTable<xxhash128, Fn, target_t, 128>
+        //
+        // We wrap target_fn_ in a std::function that also increments fn_call_count_
+        // so we can report cache hits = total_requests - actual_calls.
+        //
+        // The table is initialised lazily (first call to evaluate_chromosome) so
+        // that config.memo_capacity is respected even if changed after construction.
+        //
+        // If target_t == void, use the void-specialisation of ShardedLockFreeMemoTable.
+        // -------------------------------------------------------------------------
+        using memo_fn_t = std::function<target_t(typename Wrapper::value_type...)>;
+        using memo_table_t = ShardedLockFreeMemoTable<xxhash128, memo_fn_t, target_t, /*NumShards=*/128>;
+
+        // Lazy-initialised via ensure_memo_table()
+        mutable std::optional<memo_table_t> memo_table_;
+
+        void ensure_memo_table() const {
+            if (!memo_table_) {
+                memo_fn_t counting_fn =
+                    [this](typename Wrapper::value_type... args) -> target_t {
+                    fn_call_count_.fetch_add(1, std::memory_order_relaxed);
+                    return target_fn_(args...);
+                    };
+                memo_table_.emplace(config.memo_capacity, std::move(counting_fn));
+            }
+        }
+
+        // Evaluate a chromosome — uses memo table; thread-safe.
+        [[nodiscard]] target_t evaluate_chromosome(const chromosome_t& chrom) const {
+            ensure_memo_table();
+            total_eval_requests_.fetch_add(1, std::memory_order_relaxed);
+            return std::apply([&](const auto&... args) {
+                return memo_table_->get_or_compute(args...);
+                }, chrom);
+        }
+
+        // -------------------------------------------------------------------------
+        // Population helpers
+        // -------------------------------------------------------------------------
+
+        void init_population(size_t target_size, std::mt19937_64& rng) {
+            // Grow if needed, shrink if oversized (rare across multiple calls)
+            while (population_.size() < target_size)
+                population_.push_back({ detail::random_chromosome(rng, wrappers_), std::nullopt });
+            if (population_.size() > target_size)
+                population_.resize(target_size);
+        }
+
+        void evaluate_all_single() {
+            for (auto& ind : population_)
+                if (!ind.second)
+                    ind.second = evaluate_chromosome(ind.first);
+            sync_stats();
+        }
+
+        template<typename ThreadPool, typename BPQ>
+        void evaluate_all_parallel(ThreadPool& tp, BPQ& bpq) {
+            // Launch one task per unevaluated individual; capture by value.
+            std::vector<std::pair<size_t, std::future<target_t>>> futures;
+            futures.reserve(population_.size());
+
+            for (size_t i = 0; i < population_.size(); ++i) {
+                if (population_[i].second) continue;     // already evaluated (elite)
+                chromosome_t chrom = population_[i].first;
+                auto fut = tp([this, chrom, &bpq]() mutable -> target_t {
+                    target_t result = evaluate_chromosome(chrom);
+                    // Lock-free insert into thread-local BPQ slot
+                    bpq.insert({ result, chrom });
+                    return result;
+                    });
+                futures.emplace_back(i, std::move(fut));
+            }
+
+            // Harvest results — .get() preserves any exceptions from fitness fn
+            for (auto& [idx, fut] : futures)
+                population_[idx].second = fut.get();
+
+            sync_stats();
+        }
+
+        // Copy atomic counters into the stats struct (call after each eval batch)
+        void sync_stats() {
+            size_t calls = fn_call_count_.load(std::memory_order_relaxed);
+            size_t requests = total_eval_requests_.load(std::memory_order_relaxed);
+            stats_.total_evaluations = calls;
+            stats_.cache_hits = (requests > calls) ? (requests - calls) : 0;
+        }
+
+        void sort_population() {
+            std::ranges::sort(population_, [this](const individual_t& a,
+                const individual_t& b) {
+                    if (!a.second) return false;
+                    if (!b.second) return true;
+                    return compare_(*a.second, *b.second);  // best-first
+                });
+        }
+
+        void feed_history_from_population() {
+            for (auto& [chrom, fit] : population_)
+                if (fit) history_.try_insert(*fit, chrom);
+        }
+
+        [[nodiscard]] size_t elite_count(size_t pop_size) const {
+            return std::max(size_t{ 1 },
+                static_cast<size_t>(pop_size * config.elitism_fraction));
+        }
+
+        [[nodiscard]] size_t total_attempts() const {
+            return total_eval_requests_.load(std::memory_order_relaxed);
+        }
+
+        // Build the next generation using elitism + tournament + crossover/mutation.
+        // Called on the main thread; uses the thread-local RNG.
+        [[nodiscard]] std::vector<individual_t>
+            breed_next_generation(size_t pop_size, size_t elite_n, std::mt19937_64& rng) const
+        {
+            // Extract fitness vector for tournament selection (best-first sorted)
+            std::vector<target_t> fitnesses;
+            fitnesses.reserve(population_.size());
+            for (const auto& [chrom, fit] : population_)
+                if (fit) fitnesses.push_back(*fit);
+
+            std::vector<individual_t> next;
+            next.reserve(pop_size);
+
+            // Elites carried over with their already-evaluated fitness
+            for (size_t i = 0; i < elite_n && i < population_.size(); ++i)
+                next.push_back(population_[i]);          // fitness kept — no re-eval
+
+            // Offspring
+            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
+            while (next.size() < pop_size) {
+                size_t p1 = detail::tournament_select(rng, fitnesses,
+                    config.tournament_size, compare_);
+                chromosome_t child;
+                if (coin(rng) < config.crossover_rate) {
+                    size_t p2 = detail::tournament_select(rng, fitnesses,
+                        config.tournament_size, compare_);
+                    child = detail::crossover_chromosomes(rng,
+                        population_[p1].first, population_[p2].first, wrappers_);
+                }
+                else {
+                    child = population_[p1].first;
+                }
+                child = detail::mutate_chromosome(rng, std::move(child),
+                    wrappers_, config.mutation_rate);
+                next.push_back({ std::move(child), std::nullopt });
+            }
+            return next;
+        }
+
+        // -------------------------------------------------------------------------
+        // Data members
+        // -------------------------------------------------------------------------
+        Fn                          target_fn_;
+        CompareFn                   compare_;
+        std::tuple<Wrapper...>      wrappers_;
+
+        // Persistent across multiple optimize() calls:
+        std::vector<individual_t>   population_;
+        optimization_stats          stats_;
+        history_t                   history_;
+
+        // Atomic counters — updated concurrently by worker threads
+        mutable std::atomic<size_t> fn_call_count_{ 0 };       // actual fn calls
+        mutable std::atomic<size_t> total_eval_requests_{ 0 }; // requests to evaluate_chromosome
+    };
+
+
+    // =============================================================================
+    // SECTION 8 — CTAD deduction guide + factory helper
+    // =============================================================================
+
+    template<typename Fn, typename CompareFn, GeneticWrapper... Wrapper>
+    genetic_optimization_t(Fn, CompareFn, Wrapper...)
+        -> genetic_optimization_t<Fn, CompareFn, Wrapper...>;
+
+    template<typename Fn, typename CompareFn, GeneticWrapper... Wrapper>
+    [[nodiscard]] auto make_optimizer(Fn fn, CompareFn cmp, Wrapper... wrappers) {
+        return genetic_optimization_t<Fn, CompareFn, Wrapper...>{
+            std::move(fn), std::move(cmp), std::move(wrappers)...};
+    }
+
+} // namespace genetic
