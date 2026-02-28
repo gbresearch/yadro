@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 //  Copyright (C) 2025, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
@@ -30,13 +30,8 @@
 
 #include <cmath>
 #include <ranges>
-#include <algorithm>
 #include <utility>
-#include <stdexcept>
-#include <limits>
 #include <iostream>
-#include <iterator>
-#include <vector>
 #include "../util/gberror.h"
 
 namespace gb::yadro::algorithm
@@ -195,7 +190,7 @@ namespace gb::yadro::algorithm
                 return sum * std::exp(-x + a * std::log(x) - std::lgamma(a));
             }
             else {
-                // Continued fraction (Lentz�s algorithm)
+                // Continued fraction (Lentz’s algorithm)
                 constexpr auto epsilon = 1e-10, fp_min = 1e-30;
                 auto b = x + 1.0 - a;
                 auto c = 1.0 / fp_min;

@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 //  Copyright (C) 2011-2025, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
@@ -39,7 +39,7 @@
  *   Constant:         1%: -3.43,  5%: -2.86,  10%: -2.57
  *   Constant + Trend: 1%: -3.96,  5%: -3.41,  10%: -3.12
  *
- * Accuracy: Within �0.02 of statsmodels/R urca for n > 25, typical statistics
+ * Accuracy: Within ±0.02 of statsmodels/R urca for n > 25, typical statistics
  */
 
 namespace gb::yadro::algorithm {

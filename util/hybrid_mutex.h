@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 //  Copyright (C) 2011-2025, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
@@ -54,7 +54,7 @@ namespace gb::yadro::util
         inline void yield() noexcept
         {
             if (spin_count < (pause_limit >> 2)) {
-                // tight spin � best for short critical sections
+                // tight spin — best for short critical sections
 #if defined(__GNUC__) || defined(__clang__)
                 asm volatile("" ::: "memory"); // compiler barrier
 #endif
