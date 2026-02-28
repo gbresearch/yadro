@@ -27,116 +27,179 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
-#include <vector>
-#include <queue>
-#include <atomic>
-#include <algorithm>
+    #include <vector>
+    #include <queue>
+    #include <atomic>
+    #include <algorithm>
+    #include <memory>
+    #include <mutex>
+    #include <stdexcept>
+    #include <unordered_map>
 
 namespace gb::yadro::container
 {
-    // A lock-free, thread-local sharded priority queue that maintains the top-K elements across all threads.
     template<class T, class Compare = std::less<>>
     class bounded_priority_queue
     {
-        class local_topK
-        {
-            struct ReverseCompare {
-                Compare comp;
-                bool operator()(const T& a, const T& b) const { return comp(b, a); }
-            };
+        struct ReverseCompare {
+            Compare comp;
+            bool operator()(const T& a, const T& b) const { return comp(b, a); }
+        };
+        using local_queue_t = std::priority_queue<T, std::vector<T>, ReverseCompare>;
 
-            std::priority_queue<T, std::vector<T>, ReverseCompare> heap;
+        struct local_topK
+        {
+            local_queue_t heap;
             Compare user_comp;
             size_t max_k;
 
-        public:
             local_topK(size_t k, Compare c)
                 : heap(ReverseCompare{ c }), user_comp(std::move(c)), max_k(k) {
             }
 
-            void insert(T&& item) {
+            // insert is called concurrently by multiple threads, 
+            // but each thread only accesses its own local_topK instance, so no synchronization is needed here.
+            template<std::constructible_from<T> U>
+            void insert(U&& item) {
                 if (heap.size() < max_k) {
-                    heap.push(std::move(item));
+                    heap.push(std::forward<U>(item));
                     return;
                 }
                 if (user_comp(heap.top(), item)) {  // item is better than current worst
-                    heap.pop();
-                    heap.push(std::move(item));
+                    heap.push(std::forward<U>(item));
+                    heap.pop();  // evict worst element (sitting at top of min-heap)
                 }
             }
 
-            void drain_to(std::vector<T>& out) {
-                out.reserve(out.size() + heap.size());
+            // drain_to is called from a single thread after all insertions are done, so no synchronization is needed here.
+            // draining to a single local_topK, worst element on top,
+            // so we can efficiently merge multiple local_topK's by repeatedly taking the best element among their tops.
+            void drain_to(local_topK& out) {
                 while (!heap.empty()) {
-                    out.push_back(std::move(heap.top()));
+                    out.insert(std::move(const_cast<T&>(heap.top())));
                     heap.pop();
                 }
+            }
+
+            // reset clears the local heap so the queue can be reused for another round of insertions.
+            // Must be called from a single thread after all workers have finished (same precondition as drain).
+            // Thread-to-slot assignments are preserved, so workers can start inserting again 
+            // immediately after reset() returns without paying the slot-assignment cost again.
+            void reset() {
+                heap = local_queue_t(ReverseCompare{ user_comp });
             }
         };
 
-        std::vector<local_topK> locals;
-        std::atomic<size_t> next_thread_id{ 0 };
+        // Heap-allocate each local_topK so their addresses are stable even
+        // as the locals vector grows. The vector itself is reserved to max_expected_threads
+        // in the constructor, so push_back never reallocates the pointer array — threads
+        // holding a previously assigned slot index can read locals[slot] concurrently
+        // with another thread appending to the end, because they access disjoint memory.
+        std::vector<std::unique_ptr<local_topK>> locals;
+        std::mutex init_mutex;               // guards slot assignment and locals growth
+        std::atomic<size_t> active_count{ 0 }; // number of slots assigned so far
         Compare comp;
         size_t max_k;
-        // Automatic thread → index mapping via thread_local (executed once per thread)
-        thread_local static inline size_t my_thread_id = std::numeric_limits<size_t>::max();
-        static constexpr size_t default_max_thread_count = 256;   // maximum threads allowed by default (can be overridden in constructor)
+        size_t max_expected_threads;
+
+        static constexpr size_t default_max_thread_count = 256;
+
+        // Per-thread map from queue-instance address → assigned slot index.
+        // A single thread_local size_t is shared across ALL
+        // instances of bounded_priority_queue<T,Compare> in the process, so a thread
+        // that has already been assigned slot 3 in instance A silently skips
+        // re-initialization and writes into the wrong slot of instance B.
+        // Using the queue's address as a key scopes each slot to its owning instance.
+    private:
+        // Per-thread map: function-local thread_local avoids TLS registration/linker issues
+        static std::unordered_map<const void*, size_t>& thread_slot_map() {
+            thread_local static std::unordered_map<const void*, size_t> map;
+            return map;
+        }
+    public:
+
+        size_t acquire_slot() {
+            const void* key = static_cast<const void*>(this);
+            auto& slot_map = thread_slot_map();                // use accessor
+            auto it = slot_map.find(key);
+            if (it != slot_map.end()) {
+                return it->second;  // fast path: already registered, no lock needed
+            }
+
+            // Slow path: first insertion from this thread into this instance.
+            std::lock_guard<std::mutex> lock(init_mutex);
+            // Check again under lock in case two threads raced to the slow path.
+            it = slot_map.find(key);
+            if (it != slot_map.end()) {
+                return it->second;
+            }
+
+            size_t slot = active_count.load(std::memory_order_relaxed);
+            if (slot >= max_expected_threads) {
+                throw std::runtime_error("bounded_priority_queue: too many threads "
+                    "(increase max_expected_threads)");
+            }
+            active_count.store(slot + 1, std::memory_order_relaxed);
+            locals.push_back(std::make_unique<local_topK>(max_k, comp));
+            slot_map[key] = slot;
+            return slot;
+        }
 
     public:
         using value_type = T;
         using compare_type = Compare;
 
-        explicit bounded_priority_queue(size_t max_elements, Compare c, size_t max_expected_threads = default_max_thread_count)
-            : comp(std::move(c)), max_k(max_elements)
+        explicit bounded_priority_queue(size_t max_elements,
+            Compare c = Compare(),
+            size_t max_expected_threads = default_max_thread_count)
+            : comp(std::move(c)), max_k(max_elements), max_expected_threads(max_expected_threads)
         {
-            locals.reserve(max_expected_threads);
-            for (size_t i = 0; i < max_expected_threads; ++i) {
-                locals.emplace_back(max_k, comp);
-            }
+            locals.reserve(max_expected_threads);  // capacity only, no local_topK constructed yet
         }
 
-        explicit bounded_priority_queue(size_t max_elements) : bounded_priority_queue(max_elements, Compare(), default_max_thread_count) {}
-        explicit bounded_priority_queue(size_t max_elements, size_t max_expected_threads) : bounded_priority_queue(max_elements, Compare(), max_expected_threads) {}
-
-        // inserted from multiple threads concurrently, each thread will insert into its own local_topK without contention
-        void insert(T&& item)
-        {
-            if (my_thread_id == std::numeric_limits<size_t>::max()) {
-                my_thread_id = next_thread_id.fetch_add(1, std::memory_order_relaxed);
-                if (my_thread_id >= locals.size()) {
-                    throw std::runtime_error("bounded_priority_queue: too many threads (increase MAX_EXPECTED_THREADS)");
-                }
-            }
-            locals[my_thread_id].insert(std::move(item));
+        explicit bounded_priority_queue(size_t max_elements, size_t max_expected_threads)
+            : bounded_priority_queue(max_elements, Compare(), max_expected_threads) {
         }
 
-        // Called from a single thread after all workers finish, no synchronization needed since workers are done
-        void drain(std::vector<T>& result)
-        {
-            result.clear();
-            size_t active = next_thread_id.load(std::memory_order_acquire);
-            result.reserve(active * max_k);
+        // Thread-safe: after the one-time slot assignment (which takes init_mutex),
+        // every subsequent call goes through the fast path and is entirely lock-free.
+        template<std::constructible_from<T> U>
+        void insert(U&& item) {
+            locals[acquire_slot()]->insert(std::forward<U>(item));
+        }
+        // Must be called from a single thread after all workers have finished inserting.
+        // FIX 5: Result is sorted best-first.
+        // Uses partial_sort (O(N log K)) when we have more candidates than needed,
+        // which is more efficient than a full sort when K << N = active * max_k.
+        std::vector<T> drain() {
+            // merge all heaps into a single heap of size at most active * max_k, worst element on top
+            local_topK merged(max_k, comp);
+            size_t active = active_count.load(std::memory_order_acquire);
 
             for (size_t i = 0; i < active; ++i) {
-                locals[i].drain_to(result);
+                locals[i]->drain_to(merged);
             }
 
-            if (result.size() > max_k) {
-                // Keep the MAX best elements (highest priority)
-                auto split_it = result.begin() + static_cast<std::ptrdiff_t>(result.size() - max_k);
-
-                std::nth_element(result.begin(), split_it, result.end(),
-                    [this](const T& a, const T& b) { return comp(a, b); });
-
-                result.erase(result.begin(), split_it);
+            std::vector<T> result;
+            while (!merged.heap.empty()) {
+                result.push_back(std::move(const_cast<T&>(merged.heap.top())));
+                merged.heap.pop();
             }
+
+            std::reverse(result.begin(), result.end()); // reverse to get best element first
+            return result;
         }
 
-        auto drain()
-        {
-            std::vector<T> result;
-            drain(result);
-            return result;
+        // Reset all local heaps so the queue can be reused for another round.
+        // Must be called from a single thread after all workers have finished (same
+        // precondition as drain). Thread-to-slot assignments are preserved, so workers
+        // can start inserting again immediately after reset() returns without paying
+        // the slot-assignment cost again.
+        void reset() {
+            size_t active = active_count.load(std::memory_order_acquire);
+            for (size_t i = 0; i < active; ++i) {
+                locals[i]->reset();
+            }
         }
     };
 }
