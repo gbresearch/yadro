@@ -405,7 +405,7 @@ namespace gb::yadro::container
         typename Value = util::callable_return_t<Function>,
         size_t NumShards = 64  // Power of 2, typically 2x core count
             >
-        class ShardedLockFreeMemoTable {
+        class sharded_lockfree_memo_table {
         static_assert((NumShards& (NumShards - 1)) == 0,
             "NumShards must be a power of two");
         static_assert(NumShards > 0,
@@ -438,7 +438,7 @@ namespace gb::yadro::container
              * @throws std::invalid_argument if total_capacity is not power of 2
              * @throws std::invalid_argument if total_capacity < NumShards
              */
-            explicit ShardedLockFreeMemoTable(
+            explicit sharded_lockfree_memo_table(
                 size_t total_capacity,
                 Function func,
                 Hasher hasher = Hasher{},
@@ -554,7 +554,7 @@ namespace gb::yadro::container
         typename Function,
         size_t NumShards
                 >
-        class ShardedLockFreeMemoTable<Hasher, Function, void, NumShards> {
+        class sharded_lockfree_memo_table<Hasher, Function, void, NumShards> {
         static_assert((NumShards& (NumShards - 1)) == 0,
             "NumShards must be a power of two");
         static_assert(NumShards > 0,
@@ -582,7 +582,7 @@ namespace gb::yadro::container
              *                            If false (default), threads return immediately on hash match
              *                            even if computation is in progress (fire-and-forget).
              */
-            explicit ShardedLockFreeMemoTable(
+            explicit sharded_lockfree_memo_table(
                 size_t total_capacity,
                 Function func,
                 Hasher hasher = Hasher{},

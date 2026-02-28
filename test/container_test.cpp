@@ -31,6 +31,7 @@
 #include "../util/hash_util.h"
 #include "../container/gbcontainer.h"
 #include "../archive/archive.h"
+#include "../async/threadpool.h"
 #include <vector>
 #include <iostream>
 #include <chrono>
@@ -508,7 +509,7 @@ namespace
     {
         using hasher = gb::yadro::util::xxhash128;
 
-        // ShardedLockFreeMemoTable basic functionality test
+        // sharded_lockfree_memo_table basic functionality test
         std::atomic<int> call_count{ 0 };
 
         auto func = [&call_count](int x) -> int {
@@ -516,12 +517,12 @@ namespace
             return x * 2;
             };
 
-        ShardedLockFreeMemoTable table(/*total_capacity=*/64, func, hasher{}, /*max_probe=*/8);
+        sharded_lockfree_memo_table table(/*total_capacity=*/64, func, hasher{}, /*max_probe=*/8);
         gbassert(table.get_or_compute(5) == 10);
 
         // Non-power-of-2 should throw
         must_throw<std::invalid_argument>([]() {
-            ShardedLockFreeMemoTable table(/*total_capacity=*/30,
+            sharded_lockfree_memo_table table(/*total_capacity=*/30,
                 [](int x) { return x; }, hasher{}, /*max_probe=*/4);
             });
 
@@ -529,7 +530,7 @@ namespace
             // total_capacity < NumShards should throw
             must_throw<std::invalid_argument>([]() {
                 auto func = [](int x) { return x; };
-                ShardedLockFreeMemoTable < hasher, decltype(func), int, 64 > table(/*total_capacity=*/32,
+                sharded_lockfree_memo_table < hasher, decltype(func), int, 64 > table(/*total_capacity=*/32,
                     func, hasher{}, /*max_probe=*/4);
                 });
         }
@@ -542,7 +543,7 @@ namespace
                 return x * 2;
                 };
 
-            ShardedLockFreeMemoTable table(/*total_capacity=*/1024, func, hasher{}, /*max_probe=*/16);
+            sharded_lockfree_memo_table table(/*total_capacity=*/1024, func, hasher{}, /*max_probe=*/16);
 
             call_count = 0;
             constexpr int num_threads = 32;
@@ -576,7 +577,7 @@ namespace
             auto benchmark = [&](size_t num_shards) {
                 call_count.store(0);
 
-                ShardedLockFreeMemoTable table_sharded(/*total_capacity=*/1024, func, hasher{}, /*max_probe=*/16);
+                sharded_lockfree_memo_table table_sharded(/*total_capacity=*/1024, func, hasher{}, /*max_probe=*/16);
 
                 constexpr int num_threads = 16;
                 constexpr int ops_per_thread = 100;
@@ -614,104 +615,182 @@ namespace
     }
 
     // benchmark for all implementations with the same driver code to compare results easily
-    template <size_t ExtraBytes>
-    struct TestItem {
-        uint64_t priority;
-        alignas(64) char payload[ExtraBytes];   // deliberately uninitialized (no zeroing cost)
+        template <size_t ExtraBytes>
+        struct TestItem {
+            uint64_t priority;
+            alignas(64) char payload[ExtraBytes];   // deliberately uninitialized (no zeroing cost)
 
-        TestItem(uint64_t p) : priority(p)
-        {
-            // Prevent compiler from optimizing payload away
-            std::memset(payload, static_cast<int>(p), sizeof(payload));
-        }
-
-        friend auto operator<=> (const TestItem& a, const TestItem& b) {
-            return a.priority <=> b.priority;   // higher value = better (top-K)
-        }
-    };
-
-    template <class PQ>
-    inline auto run_benchmark(size_t total_inserts, bool silent = true) {
-        const size_t K = 500;
-        const std::vector<size_t> thread_list = { 1, 4, 8, 16, 32 };
-        std::map<std::size_t, double> insert_time_map; // thread count → ns/insert
-
-        if (!silent) {
-            std::cout << "=== Bounded Priority Queue Benchmark ===\n";
-            std::cout << "K = " << K << ", total inserts = " << total_inserts << "\n\n";
-
-            std::cout << std::left
-                << std::setw(8) << "Threads"
-                << std::setw(10) << "Payload(B)"
-                << std::setw(14) << "TotalInserts"
-                << std::setw(12) << "Insert(ms)"
-                << std::setw(13) << "ns/insert"
-                << std::setw(14) << "M inserts/s"
-                << std::setw(12) << "Finalize(ms)" << '\n';
-            std::cout << std::string(85, '-') << '\n';
-        }
-
-        for (size_t nthreads : thread_list) {
-            using Item = PQ::value_type;
-
-            PQ pq(K, 32);
-
-            std::barrier sync_barrier(nthreads + 1);
-
-            std::vector<std::jthread> workers;
-            workers.reserve(nthreads);
-
-            for (size_t t = 0; t < nthreads; ++t) {
-                workers.emplace_back([&, t]() {
-                    sync_barrier.arrive_and_wait();   // synchronized start
-
-                    std::mt19937_64 rng(12345ULL + t);
-                    std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX / 2);
-
-                    for (size_t i = 0; i < total_inserts / nthreads; ++i) {
-                        pq.insert(Item{ dist(rng) });
-                    }
-                    });
+            TestItem(uint64_t p) : priority(p)
+            {
+                // Prevent compiler from optimizing payload away
+                std::memset(payload, static_cast<int>(p), sizeof(payload));
             }
 
-            sync_barrier.arrive_and_wait();           // release all threads together
+            friend auto operator<=> (const TestItem& a, const TestItem& b) {
+                return a.priority <=> b.priority;   // higher value = better (top-K)
+            }
+        };
 
-            auto insert_start = std::chrono::high_resolution_clock::now();
-
-            for (auto& w : workers) w.join();         // wait for all inserts to finish
-
-            auto insert_end = std::chrono::high_resolution_clock::now();
-
-            auto fstart = std::chrono::high_resolution_clock::now();
-            std::vector<Item> topk = pq.drain();
-            auto fend = std::chrono::high_resolution_clock::now();
-
-            auto insert_ms = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - insert_start).count();
-            auto fin_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fend - fstart).count();
-
-            double ns_per_insert = static_cast<double>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(insert_end - insert_start).count()) / total_inserts;
-
-            insert_time_map[nthreads] = ns_per_insert;
-
-            double mips = total_inserts / 1'000'000.0 / (insert_ms / 1000.0);
+        template <class PQ>
+        inline auto run_benchmark(size_t total_inserts, bool silent = true) {
+            const size_t K = 500;
+            const std::vector<size_t> thread_list = { 1, 4, 8, 16, 32 };
+            std::map<std::size_t, double> insert_time_map; // thread count → ns/insert
 
             if (!silent) {
+                std::cout << "=== Bounded Priority Queue Benchmark ===\n";
+                std::cout << "K = " << K << ", total inserts = " << total_inserts << "\n\n";
 
-                std::cout << std::setw(8) << nthreads
-                    << std::setw(10) << sizeof(Item)
-                    << std::setw(14) << total_inserts
-                    << std::setw(12) << insert_ms
-                    << std::setw(13) << std::fixed << std::setprecision(1) << ns_per_insert
-                    << std::setw(14) << std::setprecision(2) << mips
-                    << std::setw(12) << fin_ms << '\n';
+                std::cout << std::left
+                    << std::setw(8) << "Threads"
+                    << std::setw(10) << "Payload(B)"
+                    << std::setw(14) << "TotalInserts"
+                    << std::setw(12) << "Insert(ms)"
+                    << std::setw(13) << "ns/insert"
+                    << std::setw(14) << "M inserts/s"
+                    << std::setw(12) << "Finalize(ms)" << '\n';
+                std::cout << std::string(85, '-') << '\n';
             }
+
+            for (size_t nthreads : thread_list) {
+                using Item = PQ::value_type;
+
+                PQ pq(K, 32);
+
+                std::barrier sync_barrier(nthreads + 1);
+
+                std::vector<std::jthread> workers;
+                workers.reserve(nthreads);
+
+                for (size_t t = 0; t < nthreads; ++t) {
+                    workers.emplace_back([&, t]() {
+                        sync_barrier.arrive_and_wait();   // synchronized start
+
+                        std::mt19937_64 rng(12345ULL + t);
+                        std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX / 2);
+
+                        for (size_t i = 0; i < total_inserts / nthreads; ++i) {
+                            pq.insert(Item{ dist(rng) });
+                        }
+                        });
+                }
+
+                sync_barrier.arrive_and_wait();           // release all threads together
+
+                auto insert_start = std::chrono::high_resolution_clock::now();
+
+                for (auto& w : workers) w.join();         // wait for all inserts to finish
+
+                auto insert_end = std::chrono::high_resolution_clock::now();
+
+                auto fstart = std::chrono::high_resolution_clock::now();
+                std::vector<Item> topk = pq.drain();
+                auto fend = std::chrono::high_resolution_clock::now();
+
+                auto insert_ms = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - insert_start).count();
+                auto fin_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fend - fstart).count();
+
+                double ns_per_insert = static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(insert_end - insert_start).count()) / total_inserts;
+
+                insert_time_map[nthreads] = ns_per_insert;
+
+                double mips = total_inserts / 1'000'000.0 / (insert_ms / 1000.0);
+
+                if (!silent) {
+
+                    std::cout << std::setw(8) << nthreads
+                        << std::setw(10) << sizeof(Item)
+                        << std::setw(14) << total_inserts
+                        << std::setw(12) << insert_ms
+                        << std::setw(13) << std::fixed << std::setprecision(1) << ns_per_insert
+                        << std::setw(14) << std::setprecision(2) << mips
+                        << std::setw(12) << fin_ms << '\n';
+                }
+            }
+
+            return insert_time_map;
         }
 
-        return insert_time_map;
-    }
+        template <class PQ>
+        inline auto run_benchmark_fixed(size_t total_inserts, bool silent = false) {
+            const size_t K = 50;
+            const std::vector<size_t> thread_list = { 1, 4, 8, 16, 32 };
+            std::map<std::size_t, double> insert_time_map; // thread count → ns/insert
 
-    GB_TEST(container, bounded_priority_queue_test)
+            if (!silent) {
+                std::cout << "=== Bounded Priority Queue Benchmark ===\n";
+                std::cout << "K = " << K << ", total inserts = " << total_inserts << "\n\n";
+
+                std::cout << std::left
+                    << std::setw(8) << "Threads"
+                    << std::setw(10) << "Payload(B)"
+                    << std::setw(14) << "TotalInserts"
+                    << std::setw(12) << "Insert(ms)"
+                    << std::setw(13) << "ns/insert"
+                    << std::setw(14) << "M inserts/s"
+                    << std::setw(12) << "Finalize(ms)" << '\n';
+                std::cout << std::string(85, '-') << '\n';
+            }
+
+            for (size_t nthreads : thread_list) {
+                using Item = PQ::value_type;
+
+                PQ pq(K, 32);
+                gb::yadro::async::threadpool<> pool(nthreads);
+                std::vector<std::future<void>> results;
+
+                std::barrier sync_barrier(nthreads + 1);
+
+                for (size_t t = 0; t < nthreads; ++t) {
+                    results.push_back(pool([&, t]() {
+                        sync_barrier.arrive_and_wait();   // synchronized start
+
+                        for (size_t i = 0; i < total_inserts / nthreads; ++i) {
+                            pq.insert(Item{ t + i * nthreads });
+                        }
+                        }));
+                }
+
+                sync_barrier.arrive_and_wait();           // release all threads together
+
+                auto insert_start = std::chrono::high_resolution_clock::now();
+                for (auto& r : results) r.get();              // wait for all inserts to finish
+                auto insert_end = std::chrono::high_resolution_clock::now();
+
+                auto fstart = std::chrono::high_resolution_clock::now();
+                std::vector<Item> topk = pq.drain();
+                auto fend = std::chrono::high_resolution_clock::now();
+                for (auto& item : topk) {
+                    std::cout << item.priority << ", ";
+                }
+                std::cout << '\n';
+                auto insert_ms = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - insert_start).count();
+                auto fin_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fend - fstart).count();
+
+                double ns_per_insert = static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(insert_end - insert_start).count()) / total_inserts;
+
+                insert_time_map[nthreads] = ns_per_insert;
+
+                double mips = total_inserts / 1'000'000.0 / (insert_ms / 1000.0);
+
+                if (!silent) {
+
+                    std::cout << std::setw(8) << nthreads
+                        << std::setw(10) << sizeof(Item)
+                        << std::setw(14) << total_inserts
+                        << std::setw(12) << insert_ms
+                        << std::setw(13) << std::fixed << std::setprecision(1) << ns_per_insert
+                        << std::setw(14) << std::setprecision(2) << mips
+                        << std::setw(12) << fin_ms << '\n';
+                }
+            }
+
+            return insert_time_map;
+        }
+        
+        GB_TEST(container, bounded_priority_queue_test)
     {
 #ifdef NDEBUG
         using namespace gb::yadro::container;
@@ -720,5 +799,6 @@ namespace
         gbassert(small_map[1] < 50 && small_map[16] < 5);
         gbassert(large_map[1] < 90 && large_map[16] < 9);
 #endif
-    }
+        //run_benchmark_fixed<bounded_priority_queue<TestItem<1024>>>(32'000);
+     }
 }
