@@ -98,6 +98,9 @@ namespace gb::yadro::util
         uint64_t low{};
         uint64_t high{};
 
+        // Knuth reduction algorithm
+        uint64_t reduce() const { return low ^ (high * 0x9e3779b97f4a7c15ULL); }
+
         operator std::pair<uint64_t, uint64_t>() const noexcept {
             return { low, high };
         }
