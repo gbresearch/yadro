@@ -10,6 +10,8 @@
 #include "gberror.h"
 #include <Windows.h>
 #include <Rpcdce.h>
+#include <cstdint> 
+#include <immintrin.h> // for _mm_pause()
 
 #undef min
 #undef max
@@ -129,5 +131,34 @@ namespace gb::yadro::util
         return std::filesystem::temp_directory_path() / (get_uuid_string() + extension);
     }
 
+
+    //------------------------------------------------------------------------------
+    // microsleep in 1us increments
+    class micro_sleep {
+        long long ticks;
+        long long freq;
+    public:
+        explicit micro_sleep(uint64_t microseconds) 
+        {
+            LARGE_INTEGER f;
+            QueryPerformanceFrequency(&f);
+            freq = f.QuadPart;
+
+            // Convert nanoseconds → QPC ticks
+            ticks = (freq * microseconds) / 1'000'000ULL;
+        }
+
+        void sleep()
+        {
+            LARGE_INTEGER start, now;
+            QueryPerformanceCounter(&start);
+            long long target = start.QuadPart + ticks;
+
+            do {
+                _mm_pause(); // reduces power + improves loop stability
+                QueryPerformanceCounter(&now);
+            } while (now.QuadPart < target);
+        }
+    };
 }
 #endif
