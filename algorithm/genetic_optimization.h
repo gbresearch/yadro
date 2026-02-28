@@ -51,522 +51,526 @@
 
 namespace gb::yadro::algorithm
 {
-    //------------------------------------------------------------------------------------------
-    // modified genetic optimization algorithm, minimizing target function
-    // algorithm makes probablistic changes: parent swaps, mutations, gradient moves
-    // probabilities of changes are defined in opt_param_t type
-    // algorithm is greedy
-    // parameters to be optimized are supplied in min_max tuples
-    // parameters may be scalar types or random access sized ranges (e.g. vector)
-    //------------------------------------------------------------------------------------------
-
-    template<class Fn, class CompareFn, class ...Types>
-    struct genetic_optimization_t
-    {
-        using target_t = std::invoke_result_t<Fn, Types...>;
-
+    inline namespace fast {
         //------------------------------------------------------------------------------------------
-        // constructor takes comparison function for target function
+        // modified genetic optimization algorithm, greedy elitist optimization, fast with low diversity
+        // algorithm makes probablistic changes: parent swaps, mutations, gradient moves
+        // probabilities of changes are defined in opt_param_t type
+        // parameters to be optimized are supplied in min_max tuples
+        // parameters may be scalar types or random access sized ranges (e.g. vector)
         //------------------------------------------------------------------------------------------
-        genetic_optimization_t(Fn target_fn, CompareFn compare, std::tuple<Types, Types> ... min_max)
-            requires ((std::invocable<Fn, Types...>
-        && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
-            : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(compare)
+
+        template<class Fn, class CompareFn, class ...Types>
+        struct genetic_optimization_t
         {
-        }
+            using target_t = std::invoke_result_t<Fn, Types...>;
 
-        //------------------------------------------------------------------------------------------
-        // constructor uses std::less<> for target function
-        //------------------------------------------------------------------------------------------
-        genetic_optimization_t(Fn target_fn, std::tuple<Types, Types> ... min_max)
-            requires (std::invocable<Fn, Types...>)
-        : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(std::less<>{})
-        {
-        }
+            //------------------------------------------------------------------------------------------
+            // constructor takes comparison function for target function
+            //------------------------------------------------------------------------------------------
+            genetic_optimization_t(Fn target_fn, CompareFn compare, std::tuple<Types, Types> ... min_max)
+                requires ((std::invocable<Fn, Types...>
+            && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
+                : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(compare)
+            {
+            }
 
-        //------------------------------------------------------------------------------------------
-        // constructor takes comparison function and loads optimizer state from specified archive file
-        //------------------------------------------------------------------------------------------
-        genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn, CompareFn compare,
-            std::tuple<Types, Types> ... min_max)
-            requires ((std::invocable<Fn, Types...>
-        && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
-            : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(compare)
-        {
-            load(archive_file);
-        }
+            //------------------------------------------------------------------------------------------
+            // constructor uses std::less<> for target function
+            //------------------------------------------------------------------------------------------
+            genetic_optimization_t(Fn target_fn, std::tuple<Types, Types> ... min_max)
+                requires (std::invocable<Fn, Types...>)
+            : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(std::less<>{})
+            {
+            }
 
-        //------------------------------------------------------------------------------------------
-        // constructor uses std::less<> as comparison and loads optimizer state from specified archive file
-        //------------------------------------------------------------------------------------------
-        genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn,
-            std::tuple<Types, Types> ... min_max)
-            requires (std::invocable<Fn, Types...>)
-        : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(std::less<>{})
-        {
-            load(archive_file);
-        }
+            //------------------------------------------------------------------------------------------
+            // constructor takes comparison function and loads optimizer state from specified archive file
+            //------------------------------------------------------------------------------------------
+            genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn, CompareFn compare,
+                std::tuple<Types, Types> ... min_max)
+                requires ((std::invocable<Fn, Types...>
+            && std::invocable<CompareFn, std::invoke_result_t< Fn, Types...>, std::invoke_result_t< Fn, Types...>>))
+                : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(compare)
+            {
+                load(archive_file);
+            }
 
-        //------------------------------------------------------------------------------------------
-        // save optimizer state to archive file
-        //------------------------------------------------------------------------------------------
-        void save(const std::filesystem::path& archive_file) const
-        {
-            std::ofstream ofs(archive_file, std::ios::binary);
-            serialize(gb::yadro::archive::bin_archive(ofs));
-        }
+            //------------------------------------------------------------------------------------------
+            // constructor uses std::less<> as comparison and loads optimizer state from specified archive file
+            //------------------------------------------------------------------------------------------
+            genetic_optimization_t(const std::filesystem::path& archive_file, Fn target_fn,
+                std::tuple<Types, Types> ... min_max)
+                requires (std::invocable<Fn, Types...>)
+            : _target_fn(std::move(target_fn)), _min_max_params(std::move(min_max)...), _opt_map(std::less<>{})
+            {
+                load(archive_file);
+            }
 
-        //------------------------------------------------------------------------------------------
-        // load optimizer state from archive file
-        //------------------------------------------------------------------------------------------
-        void load(const std::filesystem::path& archive_file)
-        {
-            std::ifstream ifs(archive_file, std::ios::binary);
-            serialize(gb::yadro::archive::bin_archive(ifs));
-        }
+            //------------------------------------------------------------------------------------------
+            // save optimizer state to archive file
+            //------------------------------------------------------------------------------------------
+            void save(const std::filesystem::path& archive_file) const
+            {
+                std::ofstream ofs(archive_file, std::ios::binary);
+                serialize(gb::yadro::archive::bin_archive(ofs));
+            }
 
-        //------------------------------------------------------------------------------------------
-        // set probabilities of optimization steps
-        //------------------------------------------------------------------------------------------
-        void set_opt_parameters(double swap_probability, double mutation_probability, double gradient_probability)
-        {
-            _opt_param = opt_param_t{ swap_probability, mutation_probability, gradient_probability};
-        }
+            //------------------------------------------------------------------------------------------
+            // load optimizer state from archive file
+            //------------------------------------------------------------------------------------------
+            void load(const std::filesystem::path& archive_file)
+            {
+                std::ifstream ifs(archive_file, std::ios::binary);
+                serialize(gb::yadro::archive::bin_archive(ifs));
+            }
 
-        //------------------------------------------------------------------------------------------
-        // adding a solution with a known target
-        // adding a known good solution can speed up optimzation
-        //------------------------------------------------------------------------------------------
-        auto add_solution(std::convertible_to<target_t> auto&& target, auto&& ... params)
-            requires (sizeof...(params) == sizeof...(Types))
-        {
-            _opt_map.emplace(std::forward<decltype(target)>(target), std::tuple{ std::forward<decltype(params)>(params)... });
-        }
+            //------------------------------------------------------------------------------------------
+            // set probabilities of optimization steps
+            //------------------------------------------------------------------------------------------
+            void set_opt_parameters(double swap_probability, double mutation_probability, double gradient_probability)
+            {
+                _opt_param = opt_param_t{ swap_probability, mutation_probability, gradient_probability };
+            }
 
-        //------------------------------------------------------------------------------------------
-        // adding a solution with unknown target, which will be calculated (can be expensive)
-        //------------------------------------------------------------------------------------------
-        auto add_solution(auto&& ... params) requires (sizeof...(params) == sizeof...(Types))
-        {
-            // order of evalution of function parameters is unspecified, must calculate target first
-            auto target = std::invoke(_target_fn, params ...);
-            _opt_map.emplace(std::move(target), std::tuple{ std::forward<decltype(params)>(params)... });
-        }
+            //------------------------------------------------------------------------------------------
+            // adding a solution with a known target
+            // adding a known good solution can speed up optimzation
+            //------------------------------------------------------------------------------------------
+            auto add_solution(std::convertible_to<target_t> auto&& target, auto&& ... params)
+                requires (sizeof...(params) == sizeof...(Types))
+            {
+                _opt_map.emplace(std::forward<decltype(target)>(target), std::tuple{ std::forward<decltype(params)>(params)... });
+            }
 
-        //------------------------------------------------------------------------------------------
-        // performs genetic_optimization optimization, limited to time duration and max_tries
-        // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map
-        // optimize can be called multiple times, it will continue from the previous state, unless cleared
-        //------------------------------------------------------------------------------------------
-        template<class Rep, class Period>
-        auto optimize(std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+            //------------------------------------------------------------------------------------------
+            // adding a solution with unknown target, which will be calculated (can be expensive)
+            //------------------------------------------------------------------------------------------
+            auto add_solution(auto&& ... params) requires (sizeof...(params) == sizeof...(Types))
+            {
+                // order of evalution of function parameters is unspecified, must calculate target first
+                auto target = std::invoke(_target_fn, params ...);
+                _opt_map.emplace(std::move(target), std::tuple{ std::forward<decltype(params)>(params)... });
+            }
 
-        //------------------------------------------------------------------------------------------
-        // same as above, but also specifying acceptable target, after satisfying which the optimization may stop
-        template<class Rep, class Period>
-        auto optimize(target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+            //------------------------------------------------------------------------------------------
+            // performs genetic_optimization optimization, limited to time duration and max_tries
+            // returns tuple(optimization_stats, optimization_map), keeping best max_history results in optimization_map
+            // optimize can be called multiple times, it will continue from the previous state, unless cleared
+            //------------------------------------------------------------------------------------------
+            template<class Rep, class Period>
+            auto optimize(std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
-        //------------------------------------------------------------------------------------------
-        // multithreaded version of the above, using threadpool (intended for slow target functions)
-        // if target function is fast, then context switching overhead will make this function slower than single threaded function
-        //------------------------------------------------------------------------------------------
-        template<class Rep, class Period>
-        auto optimize(gb::yadro::async::threadpool<>& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+            //------------------------------------------------------------------------------------------
+            // same as above, but also specifying acceptable target, after satisfying which the optimization may stop
+            template<class Rep, class Period>
+            auto optimize(target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
-        //------------------------------------------------------------------------------------------
-        // same as above, but also specifying acceptable target, after satisfying which the optimization may stop
-        template<class Rep, class Period>
-        auto optimize(gb::yadro::async::threadpool<>& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+            //------------------------------------------------------------------------------------------
+            // multithreaded version of the above, using threadpool (intended for slow target functions)
+            // if target function is fast, then context switching overhead will make this function slower than single threaded function
+            //------------------------------------------------------------------------------------------
+            template<class Rep, class Period>
+            auto optimize(gb::yadro::async::threadpool<>& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
-        //------------------------------------------------------------------------------------------
-        // clear the state
-        //------------------------------------------------------------------------------------------
-        void clear() { _visited.clear(); _opt_map.clear(); }
+            //------------------------------------------------------------------------------------------
+            // same as above, but also specifying acceptable target, after satisfying which the optimization may stop
+            template<class Rep, class Period>
+            auto optimize(gb::yadro::async::threadpool<>& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
-        //------------------------------------------------------------------------------------------
-        // serialize the state in the archive
-        //------------------------------------------------------------------------------------------
-        auto serialize(this auto&& self, auto&& archive)
-        {
-            std::invoke(std::forward<decltype(archive)>(archive), self._visited, self._opt_map, self._opt_param);
-        }
+            //------------------------------------------------------------------------------------------
+            // clear the state
+            //------------------------------------------------------------------------------------------
+            void clear() { _visited.clear(); _opt_map.clear(); }
 
-    private:
-        Fn _target_fn;
-        std::tuple<std::tuple<Types, Types>...> _min_max_params;
-        util::mutexer<std::mutex> _m;
-        std::unordered_set<std::size_t> _visited; // hashes of already tried parameters
-        std::multimap<target_t, std::tuple<Types...>, CompareFn> _opt_map; // target functions calculated
-
-        //------------------------------------------------------------------------------------------
-        // optimization parameters
-        struct opt_param_t
-        {
-            double swap_probability = 0.3;
-            double mutation_probability = 0.5;
-            double gradient_probability = 0.3;
-
+            //------------------------------------------------------------------------------------------
+            // serialize the state in the archive
+            //------------------------------------------------------------------------------------------
             auto serialize(this auto&& self, auto&& archive)
             {
-                std::invoke(std::forward<decltype(archive)>(archive), self.swap_probability, 
-                    self.mutation_probability, self.gradient_probability);
-            }
-        } _opt_param;
-
-        auto insert_visited(std::size_t v)
-        {
-            std::lock_guard _(_m);
-            return _visited.insert(v).second;
-        }
-
-        // emplace the new target and return true if it improved
-        auto opt_map_emplace(auto target, auto&& params, std::size_t max_history)
-        {
-            std::lock_guard _(_m);
-            auto improved = _opt_map.empty() || _opt_map.key_comp()(target, _opt_map.begin()->first);
-
-            if (improved || _opt_map.size() < max_history || _opt_map.key_comp()(target, _opt_map.rend()->first))
-            {
-                _opt_map.emplace(target, params);
+                std::invoke(std::forward<decltype(archive)>(archive), self._visited, self._opt_map, self._opt_param);
             }
 
-            while (_opt_map.size() > max_history)
+        private:
+            Fn _target_fn;
+            std::tuple<std::tuple<Types, Types>...> _min_max_params;
+            util::mutexer<std::mutex> _m;
+            std::unordered_set<std::size_t> _visited; // hashes of already tried parameters
+            std::multimap<target_t, std::tuple<Types...>, CompareFn> _opt_map; // target functions calculated
+
+            //------------------------------------------------------------------------------------------
+            // optimization parameters
+            struct opt_param_t
             {
-                _opt_map.erase(--_opt_map.end());
-            }
+                double swap_probability = 0.3;
+                double mutation_probability = 0.5;
+                double gradient_probability = 0.3;
 
-            return improved;
-        }
-
-        //------------------------------------------------------------------------------------------
-        // single thread optimization, end when acceptable_target, or timeout, or max_tries are reached
-        auto optimize_one(std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
-        auto optimize_in_pool(gb::yadro::async::threadpool<>& tp, std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
-
-        //------------------------------------------------------------------------------------------
-        // random functions
-        static auto& random_generator() { thread_local std::mt19937 gen(std::random_device{}()); return gen; }
-        
-        static auto random_scalar(auto&& min_value, auto&& max_value)
-        {
-            using type_t = std::remove_cvref_t<decltype(min_value)>;
-            if (min_value < max_value)
-                return static_cast<type_t>(std::uniform_real_distribution<>{(double)min_value, (double)max_value}(random_generator()));
-            else
-                return static_cast<type_t>(std::uniform_real_distribution<>{(double)max_value, (double)min_value}(random_generator()));
-        }
-        
-        //------------------------------------------------------------------------------------------
-        // create a tuple of random numbers between min and max values in _min_max_params
-        auto random_initializer() const 
-        {
-            auto random_param = [](auto&& min_max_tuple)
+                auto serialize(this auto&& self, auto&& archive)
                 {
-                    const auto& [min_value, max_value] = min_max_tuple;
-                    using type = std::remove_cvref_t<decltype(min_value)>;
-
-                    if constexpr (std::ranges::random_access_range<type>)
-                    {
-                        util::gbassert(min_value.size() == max_value.size());
-                        type result(min_value.size());
-
-                        for (auto size = min_value.size(); size; --size)
-                            result[size - 1] = random_scalar(min_value[size - 1], max_value[size - 1]);
-
-                        return result;
-                    }
-                    else
-                        return random_scalar(min_value, max_value);
-                };
-        
-            return util::tuple_transform([&](auto&& min_max_tuple)
-                { return random_param(min_max_tuple); }, _min_max_params);
-        }
-
-        //------------------------------------------------------------------------------------------
-        // mutate random parameter
-        auto mutate_parameters(auto&& param_tuple) const
-        {
-            auto mutate_value = [&](auto&& param, auto&& min_value, auto&& max_value)
-                {
-                    if (random_scalar(0., 1.) < _opt_param.mutation_probability)
-                        return random_scalar(min_value, max_value);
-                    else
-                        return param;
-                };
-            auto mutate_param = [&](auto&& param, auto&& min_max_tuple)
-                {
-                    const auto& [min_value, max_value] = min_max_tuple;
-                    using type = std::remove_cvref_t<decltype(param)>;
-
-                    if constexpr (std::ranges::random_access_range<type>)
-                    {
-                        util::gbassert(min_value.size() == max_value.size());
-                        type result(min_value.size());
-
-                        for (auto size = min_value.size(); size; --size)
-                            result[size - 1] = mutate_value(param[size - 1], min_value[size - 1], max_value[size - 1]);
-
-                        return result;
-                    }
-                    else
-                        return mutate_value(param, min_value, max_value);
-                };
-
-            return util::tuple_transform([&](auto&& param, auto&& min_max_tuple)
-                { return mutate_param(param, min_max_tuple); }, param_tuple, _min_max_params);
-        }
-
-        //------------------------------------------------------------------------------------------
-        // return tuple containing random swaps between parent tuples, tuple_latest is the best
-        auto swap_parameters(auto&& tuple_latest, auto&& tuple_prev) const
-        {
-            auto swap_values = [&](auto&& param1, auto&& param2)
-                {
-                    return random_scalar(0., 1.) < _opt_param.swap_probability ? param2 : param1;
-                };
-            auto swap_param = [&](auto&& param1, auto&& param2)
-                {
-                    using type = std::common_type_t<std::remove_cvref_t<decltype(param1)>, std::remove_cvref_t<decltype(param2)>>;
-
-                    if constexpr (std::ranges::random_access_range<type>)
-                    {
-                        util::gbassert(param1.size() == param2.size());
-                        type result(param1.size());
-
-                        for (auto size = param1.size(); size; --size)
-                            result[size - 1] = swap_values(param1[size - 1], param2[size - 1]);
-
-                        return result;
-                    }
-                    else
-                        return swap_values(param1, param2);
-                };
-
-            return util::tuple_transform([&](auto&& v1, auto&& v2) { return swap_param(v1, v2); }, tuple_latest, tuple_prev);
-        }
-
-        //------------------------------------------------------------------------------------------
-        // make a random gradient move, taking two tuples and returning a tuple with a gradient move
-        auto gradient_move(auto&& tuple_latest, auto&& tuple_prev) const
-        {
-            auto grad_value = [&](auto&& v1, auto&& v2, auto&& min_value, auto&& max_value)
-                {
-                    if (random_scalar(0., 1.) < _opt_param.gradient_probability)
-                        return std::max(min_value, std::min(max_value, random_scalar(v1, 2 * v1 - v2)));
-                    else
-                        return v1;
-                };
-
-            auto grad_change = [&](auto&& v1, auto&& v2, auto&& min_max_tuple)
-                {
-                    const auto& [min_value, max_value] = min_max_tuple;
-                    using type = std::remove_cvref_t<decltype(v1)>;
-                    static_assert(std::same_as < type, std::remove_cvref_t<decltype(v2)>>);
-
-                    if constexpr (std::ranges::random_access_range<type>)
-                    {
-                        util::gbassert(v1.size() == v2.size());
-                        type result(v1.size());
-
-                        for (auto size = v1.size(); size; --size)
-                            result[size - 1] = grad_value(v1[size - 1], v2[size - 1], min_value[size - 1], max_value[size - 1]);
-
-                        return result;
-                    }
-                    else
-                        return grad_value(v1, v2, min_value, max_value);
-                };
-
-            return util::tuple_transform([&](auto&& v1, auto&& v2, auto&& min_max_tuple) { return grad_change(v1, v2, min_max_tuple); },
-                tuple_latest, tuple_prev, _min_max_params);
-        }
-    };
-
-    //------------------------------------------------------------------------------------------
-    // optimizer construction guides
-    template<class Fn, class ...Types>
-    genetic_optimization_t(Fn, std::tuple<Types, Types> ...) -> genetic_optimization_t<Fn, std::less<>, Types...>;
-
-    template<class Fn, class ...Types>
-    genetic_optimization_t(const std::string&, Fn, std::tuple<Types, Types> ...) -> genetic_optimization_t<Fn, std::less<>, Types...>;
-
-
-    //------------------------------------------------------------------------------------------
-    // statistics for genetic_optimization_t
-    struct stats
-    {
-        std::size_t gradient_count;
-        std::size_t genetic_count;
-        std::size_t mutation_count;
-        std::size_t improvement_count;
-        std::size_t repetition_count;
-        std::size_t loop_count;
-        std::size_t unique_param_count;
-
-        void add(const stats& other)
-        {
-            gradient_count += other.gradient_count;
-            genetic_count += other.genetic_count;
-            mutation_count += other.mutation_count;
-            improvement_count += other.improvement_count;
-            repetition_count += other.repetition_count;
-            loop_count += other.loop_count;
-            unique_param_count += other.unique_param_count;
-        }
-
-        friend auto& operator<< (std::ostream& os, const stats& s)
-        {
-            os << "loops: " << s.loop_count
-                << ", improvements: " << s.improvement_count
-                << ", gradients: " << s.gradient_count
-                << ", genetics: " << s.genetic_count
-                << ", mutations: " << s.mutation_count
-                << ", unique: " << s.unique_param_count
-                << ", repetitions: " << (s.loop_count != 0 ? 100. * s.repetition_count / s.loop_count : 0) << "%"
-                << "\n";
-            return os;
-        }
-    };
-
-    //------------------------------------------------------------------------------------------
-    template<class Fn, class CompareFn, class ...Types>
-    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_one(std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries)
-    {
-        auto rand_params = random_initializer();
-        auto start_time = std::chrono::high_resolution_clock::now();
-        stats s{};
-        
-        auto is_acceptable_target = [&]
-            {
-                if (acceptable_target)
-                {
-                    std::unique_lock _(_m);
-                    return !_opt_map.empty() && CompareFn {}(_opt_map.begin()->first, acceptable_target.value());
+                    std::invoke(std::forward<decltype(archive)>(archive), self.swap_probability,
+                        self.mutation_probability, self.gradient_probability);
                 }
-                return false;
-            };
+            } _opt_param;
 
-        for (auto last_target_update = start_time;
-            max_tries != 0 && std::chrono::high_resolution_clock::now() - start_time < duration
-            && std::chrono::high_resolution_clock::now() - last_target_update < duration / 2
-            && !is_acceptable_target();
-            --max_tries, ++s.loop_count)
-        {
-            if (insert_visited(gb::yadro::util::make_hash(rand_params)))
-            {
-                ++s.unique_param_count;
-                auto new_target = std::apply(_target_fn, rand_params);
-
-                if (opt_map_emplace(new_target, rand_params, max_history))
-                {
-                    last_target_update = std::chrono::high_resolution_clock::now();
-                    ++s.improvement_count;
-                }
-            }
-            else
-            {
-                ++s.repetition_count;
-            }
-            
-            // try next parameter set, get copies of two best parents
-            std::tuple<Types...> first_best{};
-            std::tuple<Types...> second_best{};
+            auto insert_visited(std::size_t v)
             {
                 std::lock_guard _(_m);
-                first_best = _opt_map.begin()->second;
-                second_best = _opt_map.size() > 1 ? (++_opt_map.begin())->second : first_best;
+                return _visited.insert(v).second;
             }
-            // get a new parameter set
-            do
+
+            // emplace the new target and return true if it improved
+            auto opt_map_emplace(auto target, auto&& params, std::size_t max_history)
             {
-                if (first_best != second_best)
+                std::lock_guard _(_m);
+                auto improved = _opt_map.empty() || _opt_map.key_comp()(target, _opt_map.begin()->first);
+
+                if (improved || _opt_map.size() < max_history || _opt_map.key_comp()(target, _opt_map.rend()->first))
                 {
-                    if ((s.loop_count & 1) == 0)
-                    {
-                        rand_params = swap_parameters(first_best, second_best);
-                        if (rand_params != first_best)
-                            ++s.genetic_count;
-                    }
-                    else
-                    {
-                        rand_params = gradient_move(first_best, second_best);
-                        if (rand_params != first_best)
-                            ++s.gradient_count;
-                    }
-                }
-                
-                if(auto mutated_params = mutate_parameters(rand_params); rand_params != mutated_params)
-                {
-                    rand_params = mutated_params;
-                    ++s.mutation_count;
+                    _opt_map.emplace(target, params);
                 }
 
-            } while (rand_params == first_best && std::chrono::high_resolution_clock::now() - start_time < duration);
-        }
-        return s;
-    }
-    
-    //------------------------------------------------------------------------------------------
-    template<class Fn, class CompareFn, class ...Types>
-    template<class Rep, class Period>
-    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
-    {
-        return std::tuple(optimize_one(std::nullopt, duration, max_history, max_tries), _opt_map);
-    }
-
-    //------------------------------------------------------------------------------------------
-    template<class Fn, class CompareFn, class ...Types>
-    template<class Rep, class Period>
-    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
-    {
-        return std::tuple(optimize_one(acceptable_target, duration, max_history, max_tries), _opt_map);
-    }
-
-    //------------------------------------------------------------------------------------------
-    template<class Fn, class CompareFn, class ...Types>
-    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_in_pool(gb::yadro::async::threadpool<>& tp, std::optional<target_t> acceptable_target, 
-        auto&& duration, std::size_t max_history, std::size_t max_tries)
-    {
-        std::vector<std::future<stats>> futures;
-
-        for (std::size_t i = 0, thread_count = tp.max_thread_count(); i < thread_count; ++i)
-        {
-            futures.push_back(tp([&]
+                while (_opt_map.size() > max_history)
                 {
-                    return optimize_one(acceptable_target, duration, max_history, max_tries);
-                }));
-        }
+                    _opt_map.erase(--_opt_map.end());
+                }
 
-        stats s{};
-        for (auto&& f : futures)
+                return improved;
+            }
+
+            //------------------------------------------------------------------------------------------
+            // single thread optimization, end when acceptable_target, or timeout, or max_tries are reached
+            auto optimize_one(std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
+            auto optimize_in_pool(gb::yadro::async::threadpool<>& tp, std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
+
+            //------------------------------------------------------------------------------------------
+            // random functions
+            static auto& random_generator() { thread_local std::mt19937 gen(std::random_device{}()); return gen; }
+
+            static auto random_scalar(auto&& min_value, auto&& max_value)
+            {
+                using type_t = std::remove_cvref_t<decltype(min_value)>;
+                if (min_value < max_value)
+                    return static_cast<type_t>(std::uniform_real_distribution<>{(double)min_value, (double)max_value}(random_generator()));
+                else
+                    return static_cast<type_t>(std::uniform_real_distribution<>{(double)max_value, (double)min_value}(random_generator()));
+            }
+
+            //------------------------------------------------------------------------------------------
+            // create a tuple of random numbers between min and max values in _min_max_params
+            auto random_initializer() const
+            {
+                auto random_param = [](auto&& min_max_tuple)
+                    {
+                        const auto& [min_value, max_value] = min_max_tuple;
+                        using type = std::remove_cvref_t<decltype(min_value)>;
+
+                        if constexpr (std::ranges::random_access_range<type>)
+                        {
+                            util::gbassert(min_value.size() == max_value.size());
+                            type result(min_value.size());
+
+                            for (auto size = min_value.size(); size; --size)
+                                result[size - 1] = random_scalar(min_value[size - 1], max_value[size - 1]);
+
+                            return result;
+                        }
+                        else
+                            return random_scalar(min_value, max_value);
+                    };
+
+                return util::tuple_transform([&](auto&& min_max_tuple)
+                    { return random_param(min_max_tuple); }, _min_max_params);
+            }
+
+            //------------------------------------------------------------------------------------------
+            // mutate random parameter
+            auto mutate_parameters(auto&& param_tuple) const
+            {
+                auto mutate_value = [&](auto&& param, auto&& min_value, auto&& max_value)
+                    {
+                        if (random_scalar(0., 1.) < _opt_param.mutation_probability)
+                            return random_scalar(min_value, max_value);
+                        else
+                            return param;
+                    };
+                auto mutate_param = [&](auto&& param, auto&& min_max_tuple)
+                    {
+                        const auto& [min_value, max_value] = min_max_tuple;
+                        using type = std::remove_cvref_t<decltype(param)>;
+
+                        if constexpr (std::ranges::random_access_range<type>)
+                        {
+                            util::gbassert(min_value.size() == max_value.size());
+                            type result(min_value.size());
+
+                            for (auto size = min_value.size(); size; --size)
+                                result[size - 1] = mutate_value(param[size - 1], min_value[size - 1], max_value[size - 1]);
+
+                            return result;
+                        }
+                        else
+                            return mutate_value(param, min_value, max_value);
+                    };
+
+                return util::tuple_transform([&](auto&& param, auto&& min_max_tuple)
+                    { return mutate_param(param, min_max_tuple); }, param_tuple, _min_max_params);
+            }
+
+            //------------------------------------------------------------------------------------------
+            // return tuple containing random swaps between parent tuples, tuple_latest is the best
+            auto swap_parameters(auto&& tuple_latest, auto&& tuple_prev) const
+            {
+                auto swap_values = [&](auto&& param1, auto&& param2)
+                    {
+                        return random_scalar(0., 1.) < _opt_param.swap_probability ? param2 : param1;
+                    };
+                auto swap_param = [&](auto&& param1, auto&& param2)
+                    {
+                        using type = std::common_type_t<std::remove_cvref_t<decltype(param1)>, std::remove_cvref_t<decltype(param2)>>;
+
+                        if constexpr (std::ranges::random_access_range<type>)
+                        {
+                            util::gbassert(param1.size() == param2.size());
+                            type result(param1.size());
+
+                            for (auto size = param1.size(); size; --size)
+                                result[size - 1] = swap_values(param1[size - 1], param2[size - 1]);
+
+                            return result;
+                        }
+                        else
+                            return swap_values(param1, param2);
+                    };
+
+                return util::tuple_transform([&](auto&& v1, auto&& v2) { return swap_param(v1, v2); }, tuple_latest, tuple_prev);
+            }
+
+            //------------------------------------------------------------------------------------------
+            // make a random gradient move, taking two tuples and returning a tuple with a gradient move
+            auto gradient_move(auto&& tuple_latest, auto&& tuple_prev) const
+            {
+                auto grad_value = [&](auto&& v1, auto&& v2, auto&& min_value, auto&& max_value)
+                    {
+                        if (random_scalar(0., 1.) < _opt_param.gradient_probability)
+                            return std::max(min_value, std::min(max_value, random_scalar(v1, 2 * v1 - v2)));
+                        else
+                            return v1;
+                    };
+
+                auto grad_change = [&](auto&& v1, auto&& v2, auto&& min_max_tuple)
+                    {
+                        const auto& [min_value, max_value] = min_max_tuple;
+                        using type = std::remove_cvref_t<decltype(v1)>;
+                        static_assert(std::same_as < type, std::remove_cvref_t<decltype(v2)>>);
+
+                        if constexpr (std::ranges::random_access_range<type>)
+                        {
+                            util::gbassert(v1.size() == v2.size());
+                            type result(v1.size());
+
+                            for (auto size = v1.size(); size; --size)
+                                result[size - 1] = grad_value(v1[size - 1], v2[size - 1], min_value[size - 1], max_value[size - 1]);
+
+                            return result;
+                        }
+                        else
+                            return grad_value(v1, v2, min_value, max_value);
+                    };
+
+                return util::tuple_transform([&](auto&& v1, auto&& v2, auto&& min_max_tuple) { return grad_change(v1, v2, min_max_tuple); },
+                    tuple_latest, tuple_prev, _min_max_params);
+            }
+        };
+
+        //------------------------------------------------------------------------------------------
+        // optimizer construction guides
+        template<class Fn, class ...Types>
+        genetic_optimization_t(Fn, std::tuple<Types, Types> ...) -> genetic_optimization_t<Fn, std::less<>, Types...>;
+
+        template<class Fn, class ...Types>
+        genetic_optimization_t(const std::string&, Fn, std::tuple<Types, Types> ...) -> genetic_optimization_t<Fn, std::less<>, Types...>;
+
+
+        //------------------------------------------------------------------------------------------
+        // statistics for genetic_optimization_t
+        struct stats
         {
-            s.add(f.get());
+            std::size_t gradient_count;
+            std::size_t genetic_count;
+            std::size_t mutation_count;
+            std::size_t improvement_count;
+            std::size_t repetition_count;
+            std::size_t loop_count;
+            std::size_t unique_param_count;
+
+            void add(const stats& other)
+            {
+                gradient_count += other.gradient_count;
+                genetic_count += other.genetic_count;
+                mutation_count += other.mutation_count;
+                improvement_count += other.improvement_count;
+                repetition_count += other.repetition_count;
+                loop_count += other.loop_count;
+                unique_param_count += other.unique_param_count;
+            }
+
+            friend auto& operator<< (std::ostream& os, const stats& s)
+            {
+                os << "loops: " << s.loop_count
+                    << ", improvements: " << s.improvement_count
+                    << ", gradients: " << s.gradient_count
+                    << ", genetics: " << s.genetic_count
+                    << ", mutations: " << s.mutation_count
+                    << ", unique: " << s.unique_param_count
+                    << ", repetitions: " << (s.loop_count != 0 ? 100. * s.repetition_count / s.loop_count : 0) << "%"
+                    << "\n";
+                return os;
+            }
+        };
+
+        //------------------------------------------------------------------------------------------
+        template<class Fn, class CompareFn, class ...Types>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_one(std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries)
+        {
+            auto rand_params = random_initializer();
+            auto start_time = std::chrono::high_resolution_clock::now();
+            stats s{};
+
+            auto is_acceptable_target = [&]
+                {
+                    if (acceptable_target)
+                    {
+                        std::unique_lock _(_m);
+                        return !_opt_map.empty() && CompareFn {}(_opt_map.begin()->first, acceptable_target.value());
+                    }
+                    return false;
+                };
+
+            for (auto last_target_update = start_time;
+                max_tries != 0 && std::chrono::high_resolution_clock::now() - start_time < duration
+                && std::chrono::high_resolution_clock::now() - last_target_update < duration / 2
+                && !is_acceptable_target();
+                --max_tries, ++s.loop_count)
+            {
+                if (insert_visited(gb::yadro::util::make_hash(rand_params)))
+                {
+                    ++s.unique_param_count;
+                    auto new_target = std::apply(_target_fn, rand_params);
+
+                    if (opt_map_emplace(new_target, rand_params, max_history))
+                    {
+                        last_target_update = std::chrono::high_resolution_clock::now();
+                        ++s.improvement_count;
+                    }
+                }
+                else
+                {
+                    ++s.repetition_count;
+                }
+
+                // try next parameter set, get copies of two best parents
+                std::tuple<Types...> first_best{};
+                std::tuple<Types...> second_best{};
+                {
+                    std::lock_guard _(_m);
+                    first_best = _opt_map.begin()->second;
+                    second_best = _opt_map.size() > 1 ? (++_opt_map.begin())->second : first_best;
+                }
+                // get a new parameter set
+                do
+                {
+                    if (first_best != second_best)
+                    {
+                        if ((s.loop_count & 1) == 0)
+                        {
+                            rand_params = swap_parameters(first_best, second_best);
+                            if (rand_params != first_best)
+                                ++s.genetic_count;
+                        }
+                        else
+                        {
+                            rand_params = gradient_move(first_best, second_best);
+                            if (rand_params != first_best)
+                                ++s.gradient_count;
+                        }
+                    }
+
+                    if (auto mutated_params = mutate_parameters(rand_params); rand_params != mutated_params)
+                    {
+                        rand_params = mutated_params;
+                        ++s.mutation_count;
+                    }
+
+                } while (rand_params == first_best && std::chrono::high_resolution_clock::now() - start_time < duration);
+            }
+            return s;
         }
 
-        return std::tuple(s, _opt_map);
-    }
-    
-    //------------------------------------------------------------------------------------------
-    template<class Fn, class CompareFn, class ...Types>
-    template<class Rep, class Period>
-    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration, 
-        std::size_t max_history, std::size_t max_tries)
-    {
-        return optimize_in_pool(tp, acceptable_target, duration, max_history, max_tries);
-    }
-    //------------------------------------------------------------------------------------------
-    template<class Fn, class CompareFn, class ...Types>
-    template<class Rep, class Period>
-    auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
-    {
-        return optimize_in_pool(tp, std::nullopt, duration, max_history, max_tries);
+        //------------------------------------------------------------------------------------------
+        template<class Fn, class CompareFn, class ...Types>
+        template<class Rep, class Period>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
+        {
+            return std::tuple(optimize_one(std::nullopt, duration, max_history, max_tries), _opt_map);
+        }
+
+        //------------------------------------------------------------------------------------------
+        template<class Fn, class CompareFn, class ...Types>
+        template<class Rep, class Period>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
+        {
+            return std::tuple(optimize_one(acceptable_target, duration, max_history, max_tries), _opt_map);
+        }
+
+        //------------------------------------------------------------------------------------------
+        template<class Fn, class CompareFn, class ...Types>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_in_pool(gb::yadro::async::threadpool<>& tp, std::optional<target_t> acceptable_target,
+            auto&& duration, std::size_t max_history, std::size_t max_tries)
+        {
+            std::vector<std::future<stats>> futures;
+
+            for (std::size_t i = 0, thread_count = tp.max_thread_count(); i < thread_count; ++i)
+            {
+                futures.push_back(tp([&]
+                    {
+                        return optimize_one(acceptable_target, duration, max_history, max_tries);
+                    }));
+            }
+
+            stats s{};
+            for (auto&& f : futures)
+            {
+                s.add(f.get());
+            }
+
+            return std::tuple(s, _opt_map);
+        }
+
+        //------------------------------------------------------------------------------------------
+        template<class Fn, class CompareFn, class ...Types>
+        template<class Rep, class Period>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration,
+            std::size_t max_history, std::size_t max_tries)
+        {
+            return optimize_in_pool(tp, acceptable_target, duration, max_history, max_tries);
+        }
+        //------------------------------------------------------------------------------------------
+        template<class Fn, class CompareFn, class ...Types>
+        template<class Rep, class Period>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
+        {
+            return optimize_in_pool(tp, std::nullopt, duration, max_history, max_tries);
+        }
     }
 }
 
-namespace gb::yadro::algorithm::v2 {
+namespace gb::yadro::algorithm::conv {
+    // conventional implementation of genetic algorithm
+
     using namespace gb::yadro::util;
     using namespace gb::yadro::container;
+
     // =============================================================================
     // SECTION 1 — Concepts
     // =============================================================================
@@ -585,7 +589,6 @@ namespace gb::yadro::algorithm::v2 {
         { w.crossover(v, v, rng) } -> std::same_as<typename W::value_type>;
     };
 
-    // Shorthand: wrapper compatible with mt19937_64 (the internal RNG)
     template<typename W>
     concept GeneticWrapper = ValueWrapper<W, std::mt19937_64>;
 
@@ -607,7 +610,7 @@ namespace gb::yadro::algorithm::v2 {
 
         T      min_value;
         T      max_value;
-        double mutation_sigma_frac = 0.15; // for floats: σ = frac * range
+        double mutation_sigma_frac = 0.15;
 
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
@@ -617,20 +620,62 @@ namespace gb::yadro::algorithm::v2 {
                 return std::uniform_real_distribution<T>{min_value, max_value}(rng);
         }
 
+        //template<typename RNG>
+        //[[nodiscard]] T mutate(T value, RNG& rng) const {
+        //    if constexpr (std::is_integral_v<T>) {
+        //        if (std::uniform_real_distribution<double>{0, 1}(rng) < 0.1)
+        //            return random_value(rng);
+        //        T span = max_value - min_value;
+        //        T step_hi = std::max(T{ 1 }, static_cast<T>(span / 10));
+        //        T delta = std::uniform_int_distribution<T>{ -step_hi, step_hi }(rng);
+        //        return std::clamp(static_cast<T>(value + delta), min_value, max_value);
+        //    }
+        //    else {
+        //        double sigma = static_cast<double>(max_value - min_value) * mutation_sigma_frac;
+        //        T result = value + static_cast<T>(
+        //            std::normal_distribution<double>{0.0, sigma}(rng));
+        //        return std::clamp(result, min_value, max_value);
+        //    }
+        //}
+        
         template<typename RNG>
-        [[nodiscard]] T mutate(T value, RNG& rng) const {
-            if constexpr (std::is_integral_v<T>) {
-                if (std::uniform_real_distribution<double>{0, 1}(rng) < 0.1)
-                    return random_value(rng);                      // occasional full reset
-                T span = max_value - min_value;
-                T step_hi = std::max(T{ 1 }, static_cast<T>(span / 10));
-                T delta = std::uniform_int_distribution<T>{ -step_hi, step_hi }(rng);
-                return std::clamp(static_cast<T>(value + delta), min_value, max_value);
+        [[nodiscard]] T mutate(T value, RNG& rng) const
+        {
+            if constexpr (std::is_integral_v<T>)
+            {
+                // Rare full random mutation (keep branch – predictable)
+                if (std::uniform_real_distribution<double>{0.0, 1.0}(rng) < 0.1)
+                    return random_value(rng);
+
+                using Wide = int64_t;
+
+                Wide minv = static_cast<Wide>(min_value);
+                Wide maxv = static_cast<Wide>(max_value);
+                Wide val = static_cast<Wide>(value);
+
+                Wide span = maxv - minv;
+                Wide step_hi = span / 10;
+                step_hi |= (step_hi == 0);   // branchless max(step_hi,1)
+
+                Wide delta =
+                    std::uniform_int_distribution<Wide>(
+                        -step_hi, step_hi)(rng);
+
+                Wide result = val + delta;
+
+                // Branchless saturation
+                result = std::max(minv, result);
+                result = std::min(maxv, result);
+
+                return static_cast<T>(result);
             }
-            else {
+            else
+            {
                 double sigma = static_cast<double>(max_value - min_value) * mutation_sigma_frac;
+
                 T result = value + static_cast<T>(
                     std::normal_distribution<double>{0.0, sigma}(rng));
+
                 return std::clamp(result, min_value, max_value);
             }
         }
@@ -638,7 +683,6 @@ namespace gb::yadro::algorithm::v2 {
         template<typename RNG>
         [[nodiscard]] T crossover(T a, T b, RNG& rng) const {
             if constexpr (std::is_floating_point_v<T>) {
-                // SBX — tends to produce children near parents, distribution index η=2
                 constexpr double eta = 2.0;
                 double u = std::uniform_real_distribution<double>{ 0, 1 }(rng);
                 double beta = (u <= 0.5) ? std::pow(2.0 * u, 1.0 / (eta + 1.0))
@@ -649,18 +693,6 @@ namespace gb::yadro::algorithm::v2 {
             else {
                 return std::uniform_int_distribution<int>{0, 1}(rng) ? a : b;
             }
-        }
-
-        auto serialize(this auto&& self, auto&& archive)
-        {
-            // min_value and max_value define the search domain.
-            // mutation_sigma_frac tunes the Gaussian mutation width.
-            // All are arithmetic — serialized directly.
-            std::invoke(std::forward<decltype(archive)>(archive),
-                self.min_value,
-                self.max_value,
-                self.mutation_sigma_frac
-            );
         }
     };
 
@@ -674,7 +706,7 @@ namespace gb::yadro::algorithm::v2 {
     struct discrete_value_range {
         using value_type = T;
 
-        std::vector<T> allowed_values; ///< Must be non-empty; sort for neighbour mutation
+        std::vector<T> allowed_values;
 
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
@@ -686,7 +718,6 @@ namespace gb::yadro::algorithm::v2 {
         [[nodiscard]] T mutate(T value, RNG& rng) const {
             double p = std::uniform_real_distribution<double>{ 0,1 }(rng);
             if (p < 0.30) {
-                // Neighbour mutation: ±1 or ±2 steps in sorted order
                 auto it = std::ranges::lower_bound(allowed_values, value);
                 auto idx = static_cast<int>(it - allowed_values.begin());
                 int  d = std::uniform_int_distribution<int>{ -2, 2 }(rng);
@@ -705,10 +736,6 @@ namespace gb::yadro::algorithm::v2 {
 
     // =============================================================================
     // SECTION 3 — Container Wrapper
-    //
-    // Wraps a Container (e.g. std::vector<T>) where every element is governed
-    // by the same ElementWrapper.  container_size is fixed; for variable-length
-    // containers see DESIGN NOTES at the end of this file.
     // =============================================================================
     template<typename Container, GeneticWrapper ElementWrapper>
         requires std::is_arithmetic_v<typename ElementWrapper::value_type>
@@ -718,11 +745,9 @@ namespace gb::yadro::algorithm::v2 {
         using element_type = typename ElementWrapper::value_type;
         using value_type = Container;
 
-        size_t         container_size;   ///< Fixed number of elements
+        size_t         container_size;
         ElementWrapper element_wrapper;
-
-        // per-element mutation probability; negative → auto (1/size)
-        double per_element_mut_prob = -1.0;
+        double         per_element_mut_prob = -1.0;
 
         template<typename RNG>
         [[nodiscard]] value_type random_value(RNG& rng) const {
@@ -753,36 +778,28 @@ namespace gb::yadro::algorithm::v2 {
             value_type result;
             if constexpr (requires(value_type v, size_t n) { v.resize(n); })
                 result.resize(container_size);
-            // Single-point crossover at element level
             size_t cut = std::uniform_int_distribution<size_t>{ 0, container_size }(rng);
             auto ia = std::begin(a), ib = std::begin(b), ir = std::begin(result);
             for (size_t i = 0; i < container_size; ++i, ++ia, ++ib, ++ir)
                 *ir = (i < cut) ? *ia : *ib;
             return result;
         }
-
-        auto serialize(this auto&& self, auto&& archive)
-        {
-            // element_wrapper must itself have a serialize() method.
-            std::invoke(std::forward<decltype(archive)>(archive),
-                self.container_size,
-                self.element_wrapper,
-                self.per_element_mut_prob
-            );
-        }
     };
 
 
     // =============================================================================
-    // SECTION 4 — GA Configuration & Stats
+    // SECTION 4 — Configuration, Stats, Stop Reason
     // =============================================================================
 
+    // -----------------------------------------------------------------------------
+    // 4a. ga_config — genetic operator tuning
+    // -----------------------------------------------------------------------------
     struct ga_config {
         double mutation_rate = 0.15; ///< Per-gene mutation probability
         double crossover_rate = 0.80; ///< Probability of crossover (vs. clone)
         size_t tournament_size = 5;    ///< Tournament selection K
         double elitism_fraction = 0.05; ///< Fraction of best kept unchanged each gen
-        size_t memo_capacity = 1u << 20; ///< ShardedLockFreeMemoTable total entries
+        size_t memo_capacity = 1u << 20;
 
         auto serialize(this auto&& self, auto&& archive)
         {
@@ -796,34 +813,143 @@ namespace gb::yadro::algorithm::v2 {
         }
     };
 
+    // -----------------------------------------------------------------------------
+    // 4b. stopping_criteria
+    //
+    // Configures all four early-stopping conditions.
+    //
+    // Note: target_fitness (criterion 3) is typed on target_t and therefore lives
+    // as a public member of genetic_optimization_t, not here.
+    // -----------------------------------------------------------------------------
+    struct stopping_criteria {
+        // ── Criterion 1: Fitness Stagnation ──────────────────────────────────────
+        //
+        // Stop when no improvement is observed for
+        //   max(stagnation_absolute_floor, stagnation_fraction × max_tries)
+        // consecutive generations.
+        //
+        // The floor serves two purposes:
+        //   a) Avoids stopping prematurely when max_tries is a small value.
+        //   b) Provides a sensible bound when max_tries == SIZE_MAX (unbounded),
+        //      where a fractional computation would overflow.
+        double stagnation_fraction = 0.25;  ///< 20–30% of max_tries recommended
+        size_t stagnation_absolute_floor = 100;   ///< Minimum stagnation limit (generations)
+
+        // ── Criterion 2: Population Diversity / Cataclysm ────────────────────────
+        //
+        // Diversity = unique_chromosomes / population_size, measured by hashing
+        // each chromosome with xxhash128 and counting distinct 128-bit values.
+        //
+        // When diversity < diversity_threshold:
+        //   cataclysm_enabled == true  → fire a Mass Mutation (Cataclysm) event:
+        //                                keep top `cataclysm_survival_fraction` of
+        //                                the population intact; replace all others
+        //                                with fresh random chromosomes.  Stagnation
+        //                                counter is reset.  Execution continues.
+        //   cataclysm_enabled == false → stop immediately (stop_reason::diversity).
+        double diversity_threshold = 0.05; ///< Ratio below which action is taken
+        bool   cataclysm_enabled = true; ///< true=cataclysm, false=stop
+        double cataclysm_survival_fraction = 0.10; ///< Fraction of elites kept after cataclysm
+
+        // ── Criterion 3: Target Fitness ───────────────────────────────────────────
+        // (configured via genetic_optimization_t::target_fitness — see below)
+
+        // ── Criterion 4: Elite Convergence ────────────────────────────────────────
+        //
+        // Measures the normalised gap between the single best individual and the
+        // mean fitness of the top `elite_convergence_fraction` of the population:
+        //
+        //   gap = |mean_elite_fitness − best_fitness|
+        //         ─────────────────────────────────────
+        //          |best_fitness| + elite_convergence_guard
+        //
+        // When gap < elite_convergence_epsilon the elite has converged onto the
+        // current peak; further refinement is unlikely.
+        //
+        // Only active when target_t satisfies std::is_arithmetic_v.  Silently
+        // disabled at compile time for non-numeric fitness types (no runtime cost).
+        double elite_convergence_fraction = 0.10;  ///< Top fraction treated as "elite" here
+        double elite_convergence_epsilon = 1e-6;  ///< Relative gap threshold
+        double elite_convergence_guard = 1e-12; ///< Denominator guard near zero
+    
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.stagnation_fraction,
+                self.stagnation_absolute_floor,
+                self.diversity_threshold,
+                self.cataclysm_enabled,
+                self.cataclysm_survival_fraction,
+                self.elite_convergence_fraction,
+                self.elite_convergence_epsilon,
+                self.elite_convergence_guard
+            );
+        }
+    };
+
+    // -----------------------------------------------------------------------------
+    // 4c. stop_reason — returned by should_stop_or_cataclysm() each generation
+    // -----------------------------------------------------------------------------
+    enum class stop_reason : uint8_t {
+        none,            ///< Continue — no stopping condition met
+        deadline,        ///< Wall-clock duration exhausted (loop-header condition)
+        max_tries,       ///< Total evaluation budget exhausted (loop-header condition)
+        stagnation,      ///< Criterion 1: no improvement for stagnation_limit generations
+        diversity,       ///< Criterion 2: diversity below threshold, cataclysm disabled
+        target_reached,  ///< Criterion 3: best fitness reached or surpassed target
+        elite_converged, ///< Criterion 4: elite mean within epsilon of single best
+        cataclysm,       ///< Criterion 2 fired cataclysm — NOT terminal, execution continues
+    };
+
+    /// Returns true for reasons that should break the optimization loop.
+    [[nodiscard]] constexpr bool is_terminal(stop_reason r) noexcept {
+        return r != stop_reason::none && r != stop_reason::cataclysm;
+    }
+
+    // -----------------------------------------------------------------------------
+    // 4d. optimization_stats
+    //
+    // Extended with per-criterion diagnostic counters.  All new fields persist
+    // across successive optimize() calls, matching the semantics of the original
+    // counters (total_evaluations, generations, etc.).
+    // -----------------------------------------------------------------------------
     struct optimization_stats {
+        // ── Original fields ───────────────────────────────────────────────────────
         size_t total_evaluations = 0; ///< Actual fitness-function calls (cache misses)
-        size_t cache_hits = 0; ///< Evaluations skipped by memo table
+        size_t cache_hits = 0; ///< Evaluations skipped by the memo table
         size_t generations = 0;
         std::chrono::nanoseconds elapsed{ 0 };
 
+        // ── Stopping-criteria diagnostics ─────────────────────────────────────────
+        size_t    generations_without_improvement = 0; ///< Criterion 1: resets on improvement
+        size_t    cataclysm_count = 0; ///< Criterion 2: total events fired
+        double    last_diversity = 1.0;///< Criterion 2: diversity at last gen
+        stop_reason last_stop_reason = stop_reason::none; ///< Why the last run ended
+    
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
                 self.total_evaluations,
                 self.cache_hits,
                 self.generations,
-                self.elapsed
+                // Stopping-criteria diagnostic counters:
+                self.generations_without_improvement,
+                self.cataclysm_count,
+                self.last_diversity,
+                self.elapsed,
+                serialize_as<int>(self.last_stop_reason)
             );
         }
     };
 
+
     // =============================================================================
     // SECTION 5 — Optimization History
-    //
-    // Maintains the top max_size (chromosome, fitness) pairs seen so far,
-    // ordered best-first according to CompareFn.
-    // NOT thread-safe — call from a single thread (the main thread).
     // =============================================================================
     template<typename Chromosome, typename Target, typename CompareFn>
     class optimization_history {
     public:
-        using entry_t = std::pair<Target, Chromosome>; // (fitness, params)
+        using entry_t = std::pair<Target, Chromosome>;
 
         optimization_history() = default;
         explicit optimization_history(size_t max_size, CompareFn cmp)
@@ -833,18 +959,24 @@ namespace gb::yadro::algorithm::v2 {
         void try_insert(Target fitness, Chromosome chrom) {
             if (entries_.size() >= max_size_) {
                 if (!cmp_(fitness, entries_.back().first))
-                    return; // not better than current worst
+                    return;
                 entries_.pop_back();
             }
-            // Binary-search insertion keeps vector sorted best-first
             auto pos = std::lower_bound(entries_.begin(), entries_.end(), fitness,
                 [&](const entry_t& e, const Target& t) { return cmp_(e.first, t); });
             entries_.insert(pos, { std::move(fitness), std::move(chrom) });
         }
 
-        [[nodiscard]] bool              empty()   const noexcept { return entries_.empty(); }
-        [[nodiscard]] size_t            size()    const noexcept { return entries_.size(); }
-        [[nodiscard]] const entry_t& best()    const { return entries_.front(); }
+        void resize_limit(size_t new_max) {
+            max_size_ = new_max;
+            while (entries_.size() > max_size_)
+                entries_.pop_back();
+        }
+
+        [[nodiscard]] bool              empty()    const noexcept { return entries_.empty(); }
+        [[nodiscard]] size_t            size()     const noexcept { return entries_.size(); }
+        [[nodiscard]] size_t            max_size() const noexcept { return max_size_; }
+        [[nodiscard]] const entry_t& best()     const { return entries_.front(); }
         [[nodiscard]] const std::vector<entry_t>& all() const noexcept { return entries_; }
 
         auto serialize(this auto&& self, auto&& archive)
@@ -857,10 +989,11 @@ namespace gb::yadro::algorithm::v2 {
                 self.entries_
             );
         }
+    
     private:
         size_t               max_size_ = std::numeric_limits<size_t>::max();
         CompareFn            cmp_;
-        std::vector<entry_t> entries_; // sorted best-first
+        std::vector<entry_t> entries_;
     };
 
 
@@ -869,8 +1002,6 @@ namespace gb::yadro::algorithm::v2 {
     // =============================================================================
     namespace detail {
 
-        /// Thread-local mt19937_64 seeded from hardware entropy XORed with thread-id.
-        /// Each thread gets an independent stream; zero contention.
         inline std::mt19937_64& thread_rng() {
             thread_local std::mt19937_64 rng{
                 std::random_device{}() ^
@@ -879,7 +1010,6 @@ namespace gb::yadro::algorithm::v2 {
             return rng;
         }
 
-        /// Build a random chromosome by sampling from every wrapper.
         template<typename... Wrappers>
         auto random_chromosome(std::mt19937_64& rng,
             const std::tuple<Wrappers...>& wrappers)
@@ -889,7 +1019,6 @@ namespace gb::yadro::algorithm::v2 {
                 }, wrappers);
         }
 
-        /// Mutate each gene independently with probability mutation_rate.
         template<typename Chromosome, typename... Wrappers>
         Chromosome mutate_chromosome(std::mt19937_64& rng,
             Chromosome chrom,
@@ -906,7 +1035,6 @@ namespace gb::yadro::algorithm::v2 {
             return chrom;
         }
 
-        /// Element-wise crossover using each wrapper's crossover operator.
         template<typename Chromosome, typename... Wrappers>
         Chromosome crossover_chromosomes(std::mt19937_64& rng,
             const Chromosome& a,
@@ -919,7 +1047,6 @@ namespace gb::yadro::algorithm::v2 {
             }(std::index_sequence_for<Wrappers...>{});
         }
 
-        /// Tournament selection — returns index of winner in [0, fitnesses.size()).
         template<typename Target, typename CompareFn>
         size_t tournament_select(std::mt19937_64& rng,
             const std::vector<Target>& fitnesses,
@@ -938,6 +1065,303 @@ namespace gb::yadro::algorithm::v2 {
 
 
     // =============================================================================
+    // SECTION 6b — Reporting helpers (detail namespace, continued)
+    //
+    // These are free functions so they can be specialised per wrapper type without
+    // living inside the class template body.  They are all called from report(),
+    // which is the only caller — single-threaded, no locking needed.
+    // =============================================================================
+    namespace detail {
+
+        // -----------------------------------------------------------------------------
+        // RAII stream-state guard
+        // Saves flags + precision + fill on construction; restores on destruction.
+        // Prevents report() from permanently altering the caller's stream settings.
+        // -----------------------------------------------------------------------------
+        struct stream_state_guard {
+            std::ostream& os;
+            std::ios::fmtflags   flags;
+            std::streamsize      precision;
+            char                 fill;
+
+            explicit stream_state_guard(std::ostream& o)
+                : os(o), flags(o.flags()), precision(o.precision()), fill(o.fill()) {
+            }
+
+            ~stream_state_guard() {
+                os.flags(flags);
+                os.precision(precision);
+                os.fill(fill);
+            }
+
+            stream_state_guard(const stream_state_guard&) = delete;
+            stream_state_guard& operator=(const stream_state_guard&) = delete;
+        };
+
+        // -----------------------------------------------------------------------------
+        // Report layout constants
+        // -----------------------------------------------------------------------------
+        constexpr int kReportWidth = 72;  ///< Total line width (chars)
+        constexpr int kLabelWidth = 20;  ///< Left-column label width
+        constexpr int kValueWidth = 12;  ///< Right-column value width
+        constexpr int kMaxParamWidth = 48;  ///< Max chars for chromosome display
+
+        inline std::string report_rule(char c = '=') {
+            return std::string(kReportWidth, c);
+        }
+        inline std::string report_thin_rule(char c = '-') {
+            return " " + std::string(kReportWidth - 2, c);
+        }
+
+        // -----------------------------------------------------------------------------
+        // format_elapsed — adaptive human-readable duration
+        // -----------------------------------------------------------------------------
+        inline std::string format_elapsed(std::chrono::nanoseconds ns) {
+            using namespace std::chrono;
+            std::ostringstream s;
+            auto total_ns = ns.count();
+            if (total_ns < 1'000) {
+                s << total_ns << " ns";
+            }
+            else if (total_ns < 1'000'000) {
+                s << std::fixed << std::setprecision(2) << total_ns / 1e3 << " µs";
+            }
+            else if (total_ns < 1'000'000'000LL) {
+                s << std::fixed << std::setprecision(3) << total_ns / 1e6 << " ms";
+            }
+            else if (total_ns < 60'000'000'000LL) {
+                s << std::fixed << std::setprecision(3) << total_ns / 1e9 << " s";
+            }
+            else {
+                auto total_s = static_cast<long long>(total_ns / 1'000'000'000LL);
+                auto mins = total_s / 60;
+                auto secs = total_s % 60;
+                s << mins << "m " << std::setw(2) << std::setfill('0') << secs << "s";
+            }
+            return s.str();
+        }
+
+        // -----------------------------------------------------------------------------
+        // format_size_t — SIZE_MAX → "unlimited", otherwise decimal with thousands sep
+        // -----------------------------------------------------------------------------
+        inline std::string format_size(size_t v) {
+            if (v == std::numeric_limits<size_t>::max()) return "unlimited";
+            // Insert thousands separators manually (no locale dependency)
+            std::string raw = std::to_string(v);
+            std::string result;
+            result.reserve(raw.size() + raw.size() / 3);
+            int count = 0;
+            for (auto it = raw.rbegin(); it != raw.rend(); ++it, ++count) {
+                if (count > 0 && count % 3 == 0) result.push_back('\'');
+                result.push_back(*it);
+            }
+            std::ranges::reverse(result);
+            return result;
+        }
+
+        // -----------------------------------------------------------------------------
+        // stop_reason_name / stop_reason_description
+        // -----------------------------------------------------------------------------
+        inline std::string_view stop_reason_name(stop_reason r) noexcept {
+            switch (r) {
+            case stop_reason::none:           return "none (still running / not started)";
+            case stop_reason::deadline:       return "deadline";
+            case stop_reason::max_tries:      return "max_tries";
+            case stop_reason::stagnation:     return "stagnation";
+            case stop_reason::diversity:      return "diversity";
+            case stop_reason::target_reached: return "target_reached";
+            case stop_reason::elite_converged:return "elite_converged";
+            case stop_reason::cataclysm:      return "cataclysm (non-terminal)";
+            default:                          return "unknown";
+            }
+        }
+
+        inline std::string_view stop_reason_description(stop_reason r) noexcept {
+            switch (r) {
+            case stop_reason::none:
+                return "optimize() has not been called, or no termination condition "
+                    "was met before returning.";
+            case stop_reason::deadline:
+                return "The wall-clock duration budget was exhausted.  The population "
+                    "at this point represents the best solution found within the "
+                    "allotted time.";
+            case stop_reason::max_tries:
+                return "The total fitness-evaluation budget (max_tries) was exhausted.  "
+                    "Every allowed evaluation was performed.";
+            case stop_reason::stagnation:
+                return "Criterion 1 - no improvement to the best fitness was observed "
+                    "for the configured number of consecutive generations.  The "
+                    "search has likely converged to a local optimum; consider "
+                    "increasing mutation_rate or running a new optimize() call.";
+            case stop_reason::diversity:
+                return "Criterion 2 - population diversity (unique / total) fell below "
+                    "the threshold and cataclysm was disabled.  The population has "
+                    "converged to a single basin.";
+            case stop_reason::target_reached:
+                return "Criterion 3 - the best individual reached or surpassed the "
+                    "configured target fitness.  The known optimum has been found.";
+            case stop_reason::elite_converged:
+                return "Criterion 4 - the normalised fitness gap between the single "
+                    "best individual and the elite mean fell below epsilon.  The "
+                    "elite group has converged onto the current peak; further "
+                    "refinement is unlikely without a larger mutation perturbation.";
+            case stop_reason::cataclysm:
+                return "A Mass Mutation event was the last action taken (non-terminal).";
+            default:
+                return "Unknown stop reason.";
+            }
+        }
+
+        // -----------------------------------------------------------------------------
+        // format_gene — stream a single chromosome gene to a string
+        //   • arithmetic scalar → decimal / scientific depending on magnitude
+        //   • range (vector etc.) → [e0, e1, e2, ...] capped at 8 elements
+        // -----------------------------------------------------------------------------
+        template<typename T>
+        std::string format_gene(const T& v) {
+            std::ostringstream s;
+            if constexpr (std::is_floating_point_v<T>) {
+                double d = static_cast<double>(v);
+                if (std::abs(d) >= 1e6 || (d != 0.0 && std::abs(d) < 1e-3))
+                    s << std::scientific << std::setprecision(5) << v;
+                else
+                    s << std::fixed << std::setprecision(6) << v;
+            }
+            else if constexpr (std::is_arithmetic_v<T>) {
+                s << v;
+            }
+            else if constexpr (requires { std::begin(v); std::end(v); }) {
+                // Container type — print up to 8 elements then "..."
+                s << '[';
+                size_t count = 0;
+                constexpr size_t kMaxElems = 8;
+                for (const auto& el : v) {
+                    if (count > 0) s << ", ";
+                    if (count == kMaxElems) { s << "..."; break; }
+                    s << format_gene(el);
+                    ++count;
+                }
+                s << ']';
+            }
+            else {
+                s << "?";   // non-streamable type; extend format_gene to handle it
+            }
+            return s.str();
+        }
+
+        // -----------------------------------------------------------------------------
+        // print_chromosome — prints every gene from a std::tuple to a string.
+        // If the result would exceed kMaxParamWidth chars, it is truncated with "…".
+        // -----------------------------------------------------------------------------
+        template<typename... GeneTypes>
+        std::string format_chromosome(const std::tuple<GeneTypes...>& chrom) {
+            std::ostringstream s;
+            s << "(";
+            std::apply([&s](const auto&... genes) {
+                size_t i = 0;
+                ((s << (i++ ? ", " : "") << format_gene(genes)), ...);
+                }, chrom);
+            s << ")";
+            std::string result = s.str();
+            if (result.size() > static_cast<size_t>(kMaxParamWidth)) {
+                result.resize(static_cast<size_t>(kMaxParamWidth) - 1);
+                result += "…";
+            }
+            return result;
+        }
+
+        // -----------------------------------------------------------------------------
+        // describe_wrapper — one overload per wrapper kind, generic fallback.
+        // Writes a single description line; the caller owns indentation.
+        // -----------------------------------------------------------------------------
+        template<typename T>
+        void describe_wrapper(const min_max_value_range<T>& w, std::ostream& os) {
+            os << std::left;
+            if constexpr (std::is_floating_point_v<T>) {
+                os << std::setw(10) << "float"
+                    << "  continuous   ["
+                    << std::fixed << std::setprecision(4) << std::setw(10) << w.min_value
+                    << ", "
+                    << std::fixed << std::setprecision(4) << std::setw(10) << w.max_value
+                    << "]  sigma_frac=" << std::fixed << std::setprecision(3) << w.mutation_sigma_frac;
+            }
+            else {
+                os << std::setw(10) << "int"
+                    << "  continuous   ["
+                    << std::setw(10) << w.min_value
+                    << ", "
+                    << std::setw(10) << w.max_value
+                    << "]";
+            }
+        }
+
+        template<typename T>
+        void describe_wrapper(const discrete_value_range<T>& w, std::ostream& os) {
+            os << std::left << std::setw(10) << (std::is_floating_point_v<T> ? "float" : "int")
+                << "  discrete     {";
+            constexpr size_t kMaxShow = 6;
+            for (size_t i = 0; i < std::min(w.allowed_values.size(), kMaxShow); ++i) {
+                if (i > 0) os << ", ";
+                os << w.allowed_values[i];
+            }
+            if (w.allowed_values.size() > kMaxShow) os << ", ...";
+            os << "}  (" << w.allowed_values.size() << " values)";
+        }
+
+        template<typename Container, typename ElementWrapper>
+        void describe_wrapper(const container_range<Container, ElementWrapper>& w,
+            std::ostream& os)
+        {
+            os << std::left << std::setw(10) << "container"
+                << "  size=" << w.container_size << "  element: ";
+            describe_wrapper(w.element_wrapper, os);
+            if (w.per_element_mut_prob >= 0.0)
+                os << "  p_mut=" << std::fixed << std::setprecision(3) << w.per_element_mut_prob;
+            else
+                os << "  p_mut=1/size";
+        }
+
+        // Generic fallback for user-defined wrappers.
+        template<GeneticWrapper W>
+            requires (!requires { W::min_value; })  // not already matched above
+        && (!requires { W::allowed_values; })
+            && (!requires { W::container_size; })
+            void describe_wrapper(const W&, std::ostream& os) {
+            os << "(custom wrapper)";
+        }
+
+        // Tuple visitor: calls describe_wrapper for every element with its index.
+        template<typename WrapperTuple>
+        void describe_all_wrappers(const WrapperTuple& wrappers, std::ostream& os) {
+            [&] <size_t... Is>(std::index_sequence<Is...>) {
+                ((os << "  [" << Is << "]  ",
+                    describe_wrapper(std::get<Is>(wrappers), os),
+                    os << "\n"), ...);
+            }(std::make_index_sequence<std::tuple_size_v<WrapperTuple>>{});
+        }
+
+        // -----------------------------------------------------------------------------
+        // report_label — prints " label                : " left-column label
+        // -----------------------------------------------------------------------------
+        inline std::ostream& report_label(std::ostream& os, std::string_view label) {
+            return os << "  " << std::left << std::setw(kLabelWidth) << label << ": ";
+        }
+
+        // Same but with a note suffix on the right
+        inline void report_row(std::ostream& os,
+            std::string_view label,
+            std::string_view value,
+            std::string_view note = {}) {
+            os << "  " << std::left << std::setw(kLabelWidth) << label << ": "
+                << std::right << std::setw(kValueWidth) << value;
+            if (!note.empty()) os << "  (" << note << ")";
+            os << "\n";
+        }
+
+    } // namespace detail (continued)
+
+
+    // =============================================================================
     // SECTION 7 — genetic_optimization_t
     // =============================================================================
 
@@ -951,15 +1375,19 @@ namespace gb::yadro::algorithm::v2 {
         using history_t = optimization_history<chromosome_t, target_t, CompareFn>;
 
         // -------------------------------------------------------------------------
-        // GA tuning — modify before calling optimize()
+        // Public configuration — modify before calling optimize()
         // -------------------------------------------------------------------------
-        ga_config config;
+        ga_config         config;
+        stopping_criteria stop_criteria;
+
+        /// Criterion 3: known optimum.
+        /// Set to stop as soon as the best individual reaches this value.
+        /// Condition: !compare_(target_fitness, best)
+        ///            i.e. target is no longer strictly better than best.
+        std::optional<target_t> target_fitness;
 
         // -------------------------------------------------------------------------
         // Constructor
-        //   target_fn     : the expensive fitness function
-        //   compare       : comparator; compare(a,b)==true means a is a better fit
-        //   type_wrappers : one wrapper per parameter
         // -------------------------------------------------------------------------
         genetic_optimization_t(Fn target_fn, CompareFn compare, Wrapper... type_wrappers)
             : target_fn_(std::move(target_fn))
@@ -969,22 +1397,13 @@ namespace gb::yadro::algorithm::v2 {
         {
         }
 
-        // Prevent accidental copying (memo table and state are non-trivial)
         genetic_optimization_t(const genetic_optimization_t&) = delete;
         genetic_optimization_t& operator=(const genetic_optimization_t&) = delete;
         genetic_optimization_t(genetic_optimization_t&&) = default;
 
-        // -------------------------------------------------------------------------
+        // =========================================================================
         // Single-threaded optimize
-        //
-        // Evaluates fitness on the calling thread.
-        // Use this when the fitness function is fast (< ~1µs) and thread-pool
-        // overhead would dominate.
-        //
-        // Returns: {cumulative_stats, cumulative_history}
-        //   optimize() may be called repeatedly; state (population, history, stats)
-        //   accumulates across calls.  Call clear() to restart.
-        // -------------------------------------------------------------------------
+        // =========================================================================
         template<typename Rep, typename Period>
         auto optimize(std::chrono::duration<Rep, Period> duration,
             std::size_t population_size,
@@ -999,15 +1418,23 @@ namespace gb::yadro::algorithm::v2 {
 
             history_.resize_limit(max_history);
             init_population(population_size, rng);
-            evaluate_all_single();                        // fill nullopt entries
+            evaluate_all_single();
 
             const size_t elite_n = elite_count(population_size);
+            const size_t stagnation_limit = compute_stagnation_limit(max_tries);
 
-            while (clock::now() < deadline &&
-                total_attempts() < max_tries)
+            stop_reason reason = stop_reason::none;
+
+            while (clock::now() < deadline && total_attempts() < max_tries)
             {
-                sort_population();
+                sort_population(elite_n);
                 feed_history_from_population();
+
+                reason = should_stop_or_cataclysm(stagnation_limit, rng);
+                if (is_terminal(reason))
+                    break;
+                // cataclysm (non-terminal): population has been partially reset,
+                // fall through to breed so the fresh genes are evaluated next round.
 
                 auto next = breed_next_generation(population_size, elite_n, rng);
                 population_ = std::move(next);
@@ -1015,26 +1442,14 @@ namespace gb::yadro::algorithm::v2 {
                 ++stats_.generations;
             }
 
-            stats_.elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(
+            record_stop(reason, clock::now() >= deadline, total_attempts() >= max_tries,
                 clock::now() - t0);
-
             return { stats_, history_ };
         }
 
-        // -------------------------------------------------------------------------
+        // =========================================================================
         // Multi-threaded optimize
-        //
-        // Submits fitness evaluations to `tp` (one task per unevaluated chromosome).
-        // Genetic operators (selection, crossover, mutation) remain on the calling
-        // thread — they are fast and RNG-heavy, not worth parallelising.
-        //
-        // Thread safety of fitness function: the function is called concurrently
-        // from multiple threads.  The memoisation table is lock-free.  Ensure your
-        // fitness function is itself thread-safe (or stateless).
-        //
-        // The bounded_priority_queue accumulates results lock-free per-thread; it is
-        // drained into history_ after all tasks for the generation complete.
-        // -------------------------------------------------------------------------
+        // =========================================================================
         template<typename Rep, typename Period, typename ThreadPool>
         auto optimize(ThreadPool& tp,
             std::chrono::duration<Rep, Period> duration,
@@ -1059,94 +1474,395 @@ namespace gb::yadro::algorithm::v2 {
             history_.resize_limit(max_history);
             init_population(population_size, rng);
 
-            // Shared bounded-priority-queue collects best results lock-free.
-            // We create a new one each optimize() call; history_ is cumulative.
-            bounded_priority_queue<bpq_item, bpq_cmp> bpq{
-                max_history, bpq_cmp{compare_} };
+            bounded_priority_queue<bpq_item, bpq_cmp> bpq{ max_history, bpq_cmp{compare_} };
 
             evaluate_all_parallel(tp, bpq);
 
             const size_t elite_n = elite_count(population_size);
+            const size_t stagnation_limit = compute_stagnation_limit(max_tries);
 
-            while (clock::now() < deadline &&
-                total_attempts() < max_tries)
+            stop_reason reason = stop_reason::none;
+
+            while (clock::now() < deadline && total_attempts() < max_tries)
             {
                 sort_population();
 
-                // Drain BPQ into persistent history (single-threaded; workers done)
                 for (auto& [fit, chrom] : bpq.drain())
                     history_.try_insert(fit, chrom);
 
-                // Breed next generation (fast, no locking needed)
+                reason = should_stop_or_cataclysm(stagnation_limit, rng);
+                if (is_terminal(reason))
+                    break;
+
                 auto next = breed_next_generation(population_size, elite_n, rng);
                 population_ = std::move(next);
 
-                // Re-create BPQ for next generation
-                bpq = bounded_priority_queue<bpq_item, bpq_cmp>{
-                    max_history, bpq_cmp{compare_} };
+                // TODO: reset bpq here and feed it from the new population, or keep it across generations?
+                //auto bpq{ bounded_priority_queue<bpq_item, bpq_cmp>{
+                //    max_history, bpq_cmp{compare_} } };
+                //bpq.reset();
 
                 evaluate_all_parallel(tp, bpq);
                 ++stats_.generations;
             }
 
-            // Drain final generation into history
             for (auto& [fit, chrom] : bpq.drain())
                 history_.try_insert(fit, chrom);
 
-            stats_.elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(
+            record_stop(reason, clock::now() >= deadline, total_attempts() >= max_tries,
                 clock::now() - t0);
-
             return { stats_, history_ };
         }
 
         // -------------------------------------------------------------------------
-        // clear() — reset to initial state; next optimize() starts from scratch
+        // clear() — full reset; next optimize() starts from scratch
         // -------------------------------------------------------------------------
         void clear() {
             population_.clear();
             stats_ = {};
             history_ = history_t{ std::numeric_limits<size_t>::max(), compare_ };
+            prev_best_ = std::nullopt;
             fn_call_count_.store(0, std::memory_order_relaxed);
             total_eval_requests_.store(0, std::memory_order_relaxed);
         }
 
         // -------------------------------------------------------------------------
-        // Accessors for inspection between optimize() calls
+        // Accessors
         // -------------------------------------------------------------------------
-        [[nodiscard]] const history_t& history()    const { return history_; }
-        [[nodiscard]] const optimization_stats& stats()     const { return stats_; }
-        [[nodiscard]] size_t                    pop_size()  const { return population_.size(); }
+        [[nodiscard]] const history_t& history()  const { return history_; }
+        [[nodiscard]] const optimization_stats& stats()    const { return stats_; }
+        [[nodiscard]] size_t                    pop_size() const { return population_.size(); }
 
+        // =========================================================================
+        // report() - write a human-readable formatted summary to os
+        //
+        // Covers:
+        //   • Search space: one line per parameter with wrapper type and bounds
+        //   • GA configuration: all tuning knobs with computed derived values
+        //   • Stopping criteria: all four criteria with active thresholds
+        //   • Runtime statistics: elapsed, generations, evaluations, cache,
+        //       throughput, cataclysm count, stagnation progress
+        //   • Stop reason: name + full prose explanation
+        //   • Results table: top-K history entries with rank, fitness, chromosome
+        //
+        // Stream state (flags, precision, fill) is saved and fully restored.
+        // Safe to call multiple times; idempotent.  Not thread-safe (call after
+        // all optimize() tasks have completed, from a single thread).
+        // =========================================================================
+        void report(std::ostream& os) const {
+            using detail::report_rule;
+            using detail::report_thin_rule;
+            using detail::report_row;
+            using detail::report_label;
+            using detail::format_elapsed;
+            using detail::format_size;
+            using detail::kReportWidth;
+            using detail::kValueWidth;
+            using detail::kLabelWidth;
+
+            // Save and restore all stream formatting so callers are unaffected.
+            detail::stream_state_guard guard{ os };
+
+            constexpr int param_col = kLabelWidth + kValueWidth + 6; // for aligned notes
+
+            // ── Banner ────────────────────────────────────────────────────────────
+            os << "\n" << report_rule() << "\n"
+                << " GENETIC OPTIMIZATION REPORT\n"
+                << report_rule() << "\n";
+
+            // ── Search space ──────────────────────────────────────────────────────
+            constexpr size_t num_params = sizeof...(Wrapper);
+            os << "\n SEARCH SPACE  (" << num_params << " parameter"
+                << (num_params != 1 ? "s" : "") << ")\n"
+                << report_thin_rule() << "\n";
+            detail::describe_all_wrappers(wrappers_, os);
+
+            // ── GA configuration ─────────────────────────────────────────────────
+            os << "\n GA CONFIGURATION\n" << report_thin_rule() << "\n";
+            {
+                const size_t pop_n = population_.size();
+                const size_t elite_n = pop_n > 0
+                    ? std::max(size_t{ 1 }, static_cast<size_t>(pop_n * config.elitism_fraction))
+                    : 0;
+
+                report_row(os, "Population size",
+                    format_size(pop_n));
+
+                {
+                    std::ostringstream v;
+                    v << std::fixed << std::setprecision(3) << config.mutation_rate;
+                    report_row(os, "Mutation rate", v.str());
+                }
+                {
+                    std::ostringstream v;
+                    v << std::fixed << std::setprecision(3) << config.crossover_rate;
+                    report_row(os, "Crossover rate", v.str());
+                }
+                report_row(os, "Tournament size", format_size(config.tournament_size));
+                {
+                    std::ostringstream v, note;
+                    v << std::fixed << std::setprecision(1)
+                        << (config.elitism_fraction * 100.0) << "%";
+                    if (pop_n > 0)
+                        note << elite_n << " individual" << (elite_n != 1 ? "s" : "");
+                    report_row(os, "Elitism fraction", v.str(), note.str());
+                }
+                report_row(os, "Memo capacity",
+                    format_size(config.memo_capacity), "entries");
+            }
+
+            // ── Stopping criteria ─────────────────────────────────────────────────
+            os << "\n STOPPING CRITERIA\n" << report_thin_rule() << "\n";
+            {
+                // Criterion 1 — stagnation
+                {
+                    std::ostringstream v;
+                    v << std::fixed << std::setprecision(1)
+                        << (stop_criteria.stagnation_fraction * 100.0)
+                        << "% of max_tries";
+                    std::ostringstream note;
+                    note << "floor: " << stop_criteria.stagnation_absolute_floor << " gen";
+                    report_row(os, "[1] Stagnation", v.str(), note.str());
+                }
+
+                // Criterion 2 — diversity / cataclysm
+                {
+                    std::ostringstream v, note;
+                    v << std::fixed << std::setprecision(3)
+                        << stop_criteria.diversity_threshold;
+                    note << (stop_criteria.cataclysm_enabled ? "cataclysm" : "stop")
+                        << ", "
+                        << std::fixed << std::setprecision(1)
+                        << (stop_criteria.cataclysm_survival_fraction * 100.0)
+                        << "% survive";
+                    report_row(os, "[2] Diversity thr.", v.str(), note.str());
+                }
+
+                // Criterion 3 — target fitness
+                if (target_fitness.has_value()) {
+                    std::ostringstream v;
+                    v << std::setprecision(6) << *target_fitness;
+                    report_row(os, "[3] Target fitness", v.str(), "known optimum set");
+                }
+                else {
+                    report_row(os, "[3] Target fitness", "not set", "criterion disabled");
+                }
+
+                // Criterion 4 — elite convergence (only for arithmetic target_t)
+                if constexpr (std::is_arithmetic_v<target_t>) {
+                    std::ostringstream v, note;
+                    v << std::scientific << std::setprecision(2)
+                        << stop_criteria.elite_convergence_epsilon;
+                    note << std::fixed << std::setprecision(1)
+                        << (stop_criteria.elite_convergence_fraction * 100.0)
+                        << "% elite group";
+                    report_row(os, "[4] Elite conv. eps", v.str(), note.str());
+                }
+                else {
+                    report_row(os, "[4] Elite conv.", "n/a",
+                        "disabled: target_t is not arithmetic");
+                }
+            }
+
+            // ── Runtime statistics ────────────────────────────────────────────────
+            os << "\n RUNTIME STATISTICS\n" << report_thin_rule() << "\n";
+            {
+                const auto& s = stats_;
+
+                report_row(os, "Elapsed", format_elapsed(s.elapsed));
+                report_row(os, "Generations", format_size(s.generations));
+
+                // Evaluations and cache
+                report_row(os, "Evaluations", format_size(s.total_evaluations),
+                    "actual fitness calls");
+                {
+                    const size_t total_requests = s.total_evaluations + s.cache_hits;
+                    std::ostringstream note;
+                    if (total_requests > 0) {
+                        note << std::fixed << std::setprecision(1)
+                            << (100.0 * s.cache_hits / static_cast<double>(total_requests))
+                            << "% of requests";
+                    }
+                    else {
+                        note << "no requests yet";
+                    }
+                    report_row(os, "Cache hits", format_size(s.cache_hits), note.str());
+                }
+
+                // Throughput (evals / second) — only meaningful when elapsed > 0
+                {
+                    const double elapsed_s = static_cast<double>(s.elapsed.count()) / 1e9;
+                    if (elapsed_s > 0.0 && s.total_evaluations > 0) {
+                        std::ostringstream v;
+                        v << std::fixed << std::setprecision(0)
+                            << (s.total_evaluations / elapsed_s);
+                        report_row(os, "Throughput", v.str(), "evaluations / second");
+                    }
+                    else {
+                        report_row(os, "Throughput", "n/a");
+                    }
+                }
+
+                report_row(os, "Cataclysm events", format_size(s.cataclysm_count));
+
+                // Stagnation: show as "current / limit" with a small ASCII progress bar
+                {
+                    // Re-compute the limit using the same formula as the optimizer.
+                    // We don't store max_tries in stats, so we show the floor as a
+                    // lower-bound reference.  If the run ended by stagnation the
+                    // counter will be exactly at the limit.
+                    const size_t floor_limit = stop_criteria.stagnation_absolute_floor;
+                    std::ostringstream v, note;
+                    v << s.generations_without_improvement
+                        << " gen";
+                    note << "floor limit: " << floor_limit << " gen";
+                    report_row(os, "Stagnation (now)", v.str(), note.str());
+                }
+
+                // Last measured diversity
+                {
+                    std::ostringstream v;
+                    v << std::fixed << std::setprecision(4) << s.last_diversity;
+                    std::ostringstream note;
+                    note << "threshold: "
+                        << std::fixed << std::setprecision(3)
+                        << stop_criteria.diversity_threshold;
+                    report_row(os, "Last diversity", v.str(), note.str());
+                }
+            }
+
+            // ── Stop reason ───────────────────────────────────────────────────────
+            os << "\n STOP REASON: "
+                << detail::stop_reason_name(stats_.last_stop_reason) << "\n"
+                << report_thin_rule() << "\n";
+            {
+                // Word-wrap the description at kReportWidth - 4 chars, indented 4.
+                constexpr int wrap_width = kReportWidth - 4;
+                std::string_view desc = detail::stop_reason_description(stats_.last_stop_reason);
+                int col = 0;
+                os << "    ";
+                for (size_t i = 0; i < desc.size(); ++i) {
+                    char c = desc[i];
+                    if (c == ' ' && col >= wrap_width) {
+                        os << "\n    ";
+                        col = 0;
+                        continue;
+                    }
+                    os << c;
+                    ++col;
+                }
+                os << "\n";
+            }
+
+            // ── Results table ─────────────────────────────────────────────────────
+            os << "\n RESULTS  ("
+                << history_.size() << " of "
+                << (history_.size() < history_.max_size()
+                    ? std::to_string(history_.size())
+                    : format_size(history_.max_size()))
+                << " stored)\n"
+                << report_thin_rule() << "\n";
+
+            if (history_.empty()) {
+                os << "  (no results - optimize() has not been called or produced"
+                    << " no evaluations)\n";
+            }
+            else {
+                // Column widths: rank(5) + fitness(16) + parameters(rest)
+                constexpr int rank_w = 5;
+                constexpr int fitness_w = 16;
+                const int     param_w = kReportWidth - rank_w - fitness_w - 6;
+
+                os << "  " << std::left
+                    << std::setw(rank_w) << "Rank"
+                    << "  " << std::setw(fitness_w) << "Fitness"
+                    << "  " << "Parameters (size = " << num_params << ")\n";
+                os << "  " << std::string(rank_w, '-')
+                    << "  " << std::string(fitness_w, '-')
+                    << "  " << std::string(std::max(0, param_w), '-') << "\n";
+
+                const auto& entries = history_.all();
+                const size_t show = std::min(entries.size(), size_t{ 10 }); // top 10
+                for (size_t i = 0; i < show; ++i) {
+                    const auto& [fitness, chrom] = entries[i];
+
+                    // Fitness: scientific for very large/small, fixed otherwise
+                    std::ostringstream fit_str;
+                    if constexpr (std::is_floating_point_v<target_t>) {
+                        double d = static_cast<double>(fitness);
+                        if (std::abs(d) >= 1e6 || (d != 0.0 && std::abs(d) < 1e-4))
+                            fit_str << std::scientific << std::setprecision(6) << fitness;
+                        else
+                            fit_str << std::fixed << std::setprecision(8) << fitness;
+                    }
+                    else {
+                        fit_str << fitness;
+                    }
+
+                    std::string param_str = detail::format_chromosome(chrom);
+                    if (static_cast<int>(param_str.size()) > param_w) {
+                        param_str.resize(static_cast<size_t>(param_w) - 1);
+                        param_str += "...)";
+                    }
+
+                    os << "  " << std::right << std::setw(rank_w) << (i + 1)
+                        << "  " << std::left << std::setw(fitness_w) << fit_str.str()
+                        << "  " << param_str << "\n";
+                }
+
+                if (entries.size() > show)
+                    os << "  ... (" << (entries.size() - show) << " more entries)\n";
+            }
+
+            os << report_rule() << "\n\n";
+        }
+
+        //---------------------------------------------------------------------------
+        // serialize — save / load all resumable state through `archive`
+        //
+        // Invariant: after load, the object is in exactly the state it would be in
+        // had the previous optimize() run never been interrupted.  The first call to
+        // optimize() after load continues from the restored population.
+        //
+        // Prerequisites for load:
+        //   • Construct with the SAME Fn, CompareFn, and Wrappers as the saved run.
+        //   • The memo table is rebuilt lazily on the first evaluation call.
+        //---------------------------------------------------------------------------
         auto serialize(this auto&& self, auto&& archive)
         {
             // ── 1. GA tuning knobs ────────────────────────────────────────────────
-            // config is a plain struct of arithmetic members — serialized directly.
             std::invoke(std::forward<decltype(archive)>(archive), self.config);
 
-            // ── 2. Cumulative statistics ──────────────────────────────────────────
-            // stats_ contains size_t counters and a std::chrono::nanoseconds elapsed.
-            // elapsed is serialized via a rep-integer temporary (see serialize()).
+            // ── 2. Stopping criteria configuration ───────────────────────────────
+            // Persisted so that the same thresholds are active after a resume.
+            std::invoke(std::forward<decltype(archive)>(archive), self.stop_criteria);
+
+            // ── 3. Cumulative statistics ──────────────────────────────────────────
+            // Includes generations_without_improvement, cataclysm_count,
+            // last_diversity, last_stop_reason, and elapsed (via serialize_duration).
             std::invoke(std::forward<decltype(archive)>(archive), self.stats_);
 
-            // ── 3. Best-result history ────────────────────────────────────────────
-            // history_ holds max_size_ (size_t) and entries_ (sorted vector of
-            // pair<target_t, chromosome_t>).  compare_ is not in the serialized
-            // stream — it remains bound from the constructor and stays valid.
+            // ── 4. Best-result history ────────────────────────────────────────────
             std::invoke(std::forward<decltype(archive)>(archive), self.history_);
 
-            // ── 4. Live population ────────────────────────────────────────────────
-            // population_ is std::vector<pair<chromosome_t, optional<target_t>>>.
-            //   chromosome_t = tuple<Wrapper::value_type...>   (arithmetic or vector)
-            //   optional<target_t>: nullopt for newly bred individuals that have not
-            //     yet been evaluated, or a value for elites carried from last gen.
-            //     On load, nullopt entries will be evaluated on the first optimize()
-            //     call, exactly as they would have been in the original run.
+            // ── 5. Live population ────────────────────────────────────────────────
+            // vector<pair<chromosome_t, optional<target_t>>>.
+            // nullopt entries are re-evaluated on the first post-load optimize() call.
             std::invoke(std::forward<decltype(archive)>(archive), self.population_);
 
-            // ── 5. Atomic evaluation counters ────────────────────────────────────
-            // fn_call_count_ and total_eval_requests_ are mutable std::atomic<size_t>.
-            std::invoke(std::forward<decltype(archive)>(archive), self.fn_call_count_);
-            std::invoke(std::forward<decltype(archive)>(archive), self.total_eval_requests_);
+            // ── 6. Criterion 3: target fitness — optional<target_t> ──────────────
+            // Must be persisted so the stopping condition fires correctly after resume.
+            std::invoke(std::forward<decltype(archive)>(archive), self.target_fitness);
+
+            // ── 7. Stagnation baseline — optional<target_t> ──────────────────────
+            // Tracks the best fitness seen so far for stagnation detection.
+            // Without this, the first post-load generation would always look like
+            // an improvement (prev_best_ would be nullopt → forced reset).
+            std::invoke(std::forward<decltype(archive)>(archive), self.prev_best_);
+
+            // ── 8. Atomic evaluation counters ────────────────────────────────────
+            std::invoke(std::forward<decltype(archive)>(archive), self.fn_call_count_, 
+                self.total_eval_requests_);
 
             // ── 6. Memo table — intentionally not serialized ──────────────────────
             // The memo table is a pure performance cache.  Reasons for exclusion:
@@ -1169,29 +1885,252 @@ namespace gb::yadro::algorithm::v2 {
         }
 
     private:
-        // -------------------------------------------------------------------------
-        // Types
-        // -------------------------------------------------------------------------
+        // =========================================================================
+        // Private types
+        // =========================================================================
         using individual_t = std::pair<chromosome_t, std::optional<target_t>>;
-
-        // -------------------------------------------------------------------------
-        // Memo table
-        //
-        // ShardedLockFreeMemoTable<xxhash128, Fn, target_t, 128>
-        //
-        // We wrap target_fn_ in a std::function that also increments fn_call_count_
-        // so we can report cache hits = total_requests - actual_calls.
-        //
-        // The table is initialised lazily (first call to evaluate_chromosome) so
-        // that config.memo_capacity is respected even if changed after construction.
-        //
-        // If target_t == void, use the void-specialisation of ShardedLockFreeMemoTable.
-        // -------------------------------------------------------------------------
         using memo_fn_t = std::function<target_t(typename Wrapper::value_type...)>;
-        using memo_table_t = ShardedLockFreeMemoTable<xxhash128, memo_fn_t, target_t, /*NumShards=*/128>;
 
-        // Lazy-initialised via ensure_memo_table()
-        mutable std::optional<memo_table_t> memo_table_;
+        // =========================================================================
+        // STOPPING CRITERIA IMPLEMENTATION
+        // =========================================================================
+
+        // -------------------------------------------------------------------------
+        // compute_stagnation_limit
+        //
+        // Returns max(floor, fraction × max_tries).
+        // When max_tries == SIZE_MAX we use only the floor to avoid overflow.
+        // -------------------------------------------------------------------------
+        [[nodiscard]] size_t compute_stagnation_limit(size_t max_tries) const noexcept {
+            const size_t floor = stop_criteria.stagnation_absolute_floor;
+            if (max_tries == std::numeric_limits<size_t>::max())
+                return floor;
+            const auto fraction_limit = static_cast<size_t>(
+                stop_criteria.stagnation_fraction * static_cast<double>(max_tries));
+            return std::max(floor, fraction_limit);
+        }
+
+        // -------------------------------------------------------------------------
+        // measure_diversity
+        //
+        // Hashes every chromosome with xxhash128 and counts distinct 128-bit values.
+        // Returns unique_count / population_size in [0, 1].
+        //
+        // Hash collisions are astronomically rare (2^-64 per pair) and acceptable
+        // in this statistical context — the same guarantee already provided by
+        // sharded_lockfree_memo_table.
+        // -------------------------------------------------------------------------
+        [[nodiscard]] double measure_diversity() const {
+            if (population_.empty()) return 1.0;
+
+            // Combine both halves of the 128-bit hash into a single 64-bit key for
+            // use with unordered_set.  The mixing constant is a Knuth multiplier.
+            struct HashKey {
+                uint64_t low64;
+                uint64_t high64;
+                bool operator==(const HashKey&) const noexcept = default;
+            };
+            struct KeyHasher {
+                size_t operator()(const HashKey& k) const noexcept {
+                    return static_cast<size_t>(
+                        k.low64 ^ (k.high64 * 0x9e3779b97f4a7c15ULL));
+                }
+            };
+
+            std::unordered_set<HashKey, KeyHasher> seen;
+            seen.reserve(population_.size());
+
+            for (const auto& [chrom, _] : population_) {
+                hash128_t h = std::apply([](const auto&... genes) {
+                    return xxhash128{}(genes...);
+                    }, chrom);
+                seen.insert({ h.low, h.high });
+            }
+
+            return static_cast<double>(seen.size())
+                / static_cast<double>(population_.size());
+        }
+
+        // -------------------------------------------------------------------------
+        // update_stagnation
+        //
+        // Compares current_best against prev_best_ using CompareFn:
+        //   • Strict improvement → reset counter, update prev_best_
+        //   • No improvement     → increment counter
+        //
+        // prev_best_ persists across optimize() calls so that stagnation counting
+        // is continuous even when optimize() is called multiple times.
+        // -------------------------------------------------------------------------
+        void update_stagnation(const target_t& current_best) {
+            if (!prev_best_.has_value() || compare_(current_best, *prev_best_)) {
+                prev_best_ = current_best;
+                stats_.generations_without_improvement = 0;
+            }
+            else {
+                ++stats_.generations_without_improvement;
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // compute_elite_convergence_gap
+        //
+        // Only compiled when target_t is arithmetic (constrained by `requires`).
+        //
+        // Returns |mean_elite_fitness − best_fitness| / (|best_fitness| + guard).
+        // The "elite" group here is the top elite_convergence_fraction of the
+        // population (already sorted best-first), independent of config.elitism_
+        // fraction used by the breeding operator.
+        // -------------------------------------------------------------------------
+        [[nodiscard]] double compute_elite_convergence_gap() const
+            requires std::is_arithmetic_v<target_t>
+        {
+            if (population_.empty() || !population_.front().second)
+                return std::numeric_limits<double>::max();
+
+            const size_t n = population_.size();
+            const size_t elite_n = std::max(size_t{ 2 },
+                static_cast<size_t>(stop_criteria.elite_convergence_fraction * n));
+            const size_t count = std::min(elite_n, n);
+
+            double sum = 0.0;
+            size_t valid = 0;
+            for (size_t i = 0; i < count; ++i) {
+                if (population_[i].second) {
+                    sum += static_cast<double>(*population_[i].second);
+                    ++valid;
+                }
+            }
+            if (valid < 2) return std::numeric_limits<double>::max();
+
+            const double mean_elite = sum / static_cast<double>(valid);
+            const double best = static_cast<double>(*population_.front().second);
+            const double denom = std::abs(best) + stop_criteria.elite_convergence_guard;
+
+            return std::abs(mean_elite - best) / denom;
+        }
+
+        // -------------------------------------------------------------------------
+        // trigger_cataclysm  (Criterion 2 response — Mass Mutation)
+        //
+        // Keeps the top cataclysm_survival_fraction of individuals (best-first,
+        // already sorted) with their evaluated fitness intact.
+        // Replaces every other slot with a freshly randomised, unevaluated
+        // chromosome so that the next evaluate_all_*() pass fills them.
+        //
+        // Side effects:
+        //   • stats_.cataclysm_count++
+        //   • stats_.generations_without_improvement reset to 0
+        //   • prev_best_ reset to nullopt → stagnation baseline starts fresh after
+        //     cataclysm (the new random territory may produce a previously unseen best)
+        // -------------------------------------------------------------------------
+        void trigger_cataclysm(std::mt19937_64& rng) {
+            const size_t n = population_.size();
+            const size_t survivors = std::max(size_t{ 1 },
+                static_cast<size_t>(stop_criteria.cataclysm_survival_fraction * n));
+
+            for (size_t i = survivors; i < n; ++i) {
+                population_[i].first = detail::random_chromosome(rng, wrappers_);
+                population_[i].second = std::nullopt;  // re-evaluate next round
+            }
+
+            ++stats_.cataclysm_count;
+            stats_.generations_without_improvement = 0;
+            prev_best_ = std::nullopt;  // fresh stagnation baseline post-cataclysm
+        }
+
+        // -------------------------------------------------------------------------
+        // should_stop_or_cataclysm
+        //
+        // The central per-generation decision function.
+        // Called AFTER sort_population() and BEFORE breeding.
+        //
+        // Returns:
+        //   stop_reason::none          → continue normally
+        //   stop_reason::cataclysm     → cataclysm was fired; continue (not terminal)
+        //   stop_reason::{terminal}    → break the optimization loop
+        //
+        // Evaluation order:
+        //   1. Target reached  — most definitive; check first.
+        //   2. Elite converged — cheap arithmetic; compile-time disabled for
+        //                        non-arithmetic target_t.
+        //   3. Stagnation      — counter comparison; O(1).
+        //   4. Diversity       — O(N) hash scan; most expensive, check last.
+        //
+        // Each criterion is independent.  In edge cases where two criteria would
+        // fire in the same generation, the first one in evaluation order wins.
+        // -------------------------------------------------------------------------
+        [[nodiscard]] stop_reason
+            should_stop_or_cataclysm(size_t stagnation_limit, std::mt19937_64& rng)
+        {
+            if (population_.empty() || !population_.front().second)
+                return stop_reason::none;
+
+            const target_t& best = *population_.front().second;
+
+            // Update stagnation tracker with this generation's best before any check.
+            update_stagnation(best);
+
+            // ── Criterion 1: Target fitness ───────────────────────────────────────
+            // Stop when best has reached or surpassed the known optimum:
+            //   !compare_(target, best)  ↔  target is no longer strictly better than best
+            if (target_fitness.has_value() && !compare_(*target_fitness, best))
+                return stop_reason::target_reached;
+
+            // ── Criterion 2: Elite convergence ────────────────────────────────────
+            // Disabled at compile time for non-arithmetic target types.
+            if constexpr (std::is_arithmetic_v<target_t>) {
+                if (compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon)
+                    return stop_reason::elite_converged;
+            }
+
+            // ── Criterion 3: Stagnation ───────────────────────────────────────────
+            if (stats_.generations_without_improvement >= stagnation_limit)
+                return stop_reason::stagnation;
+
+            // ── Criterion 4: Diversity / Cataclysm ───────────────────────────────
+            const double diversity = measure_diversity();
+            stats_.last_diversity = diversity;  // always record latest measurement
+
+            if (diversity < stop_criteria.diversity_threshold) {
+                if (stop_criteria.cataclysm_enabled) {
+                    trigger_cataclysm(rng);
+                    return stop_reason::cataclysm;   // non-terminal — continue
+                }
+                return stop_reason::diversity;       // terminal
+            }
+
+            return stop_reason::none;
+        }
+
+        // -------------------------------------------------------------------------
+        // record_stop — write final stop reason and elapsed into stats_
+        // -------------------------------------------------------------------------
+        template<typename Duration>
+        void record_stop(stop_reason inner_reason,
+            bool hit_deadline, bool hit_max_tries,
+            Duration elapsed)
+        {
+            if (is_terminal(inner_reason)) {
+                stats_.last_stop_reason = inner_reason;
+            }
+            else if (hit_deadline) {
+                stats_.last_stop_reason = stop_reason::deadline;
+            }
+            else if (hit_max_tries) {
+                stats_.last_stop_reason = stop_reason::max_tries;
+            }
+            else {
+                stats_.last_stop_reason = stop_reason::none;
+            }
+            stats_.elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
+        }
+
+        // =========================================================================
+        // Memo table
+        // =========================================================================
+        mutable std::optional<
+            sharded_lockfree_memo_table<xxhash128, memo_fn_t, target_t, /*NumShards=*/128>
+        > memo_table_;
 
         void ensure_memo_table() const {
             if (!memo_table_) {
@@ -1204,7 +2143,6 @@ namespace gb::yadro::algorithm::v2 {
             }
         }
 
-        // Evaluate a chromosome — uses memo table; thread-safe.
         [[nodiscard]] target_t evaluate_chromosome(const chromosome_t& chrom) const {
             ensure_memo_table();
             total_eval_requests_.fetch_add(1, std::memory_order_relaxed);
@@ -1213,12 +2151,11 @@ namespace gb::yadro::algorithm::v2 {
                 }, chrom);
         }
 
-        // -------------------------------------------------------------------------
+        // =========================================================================
         // Population helpers
-        // -------------------------------------------------------------------------
+        // =========================================================================
 
         void init_population(size_t target_size, std::mt19937_64& rng) {
-            // Grow if needed, shrink if oversized (rare across multiple calls)
             while (population_.size() < target_size)
                 population_.push_back({ detail::random_chromosome(rng, wrappers_), std::nullopt });
             if (population_.size() > target_size)
@@ -1234,30 +2171,26 @@ namespace gb::yadro::algorithm::v2 {
 
         template<typename ThreadPool, typename BPQ>
         void evaluate_all_parallel(ThreadPool& tp, BPQ& bpq) {
-            // Launch one task per unevaluated individual; capture by value.
             std::vector<std::pair<size_t, std::future<target_t>>> futures;
             futures.reserve(population_.size());
 
             for (size_t i = 0; i < population_.size(); ++i) {
-                if (population_[i].second) continue;     // already evaluated (elite)
+                if (population_[i].second) continue;
                 chromosome_t chrom = population_[i].first;
                 auto fut = tp([this, chrom, &bpq]() mutable -> target_t {
                     target_t result = evaluate_chromosome(chrom);
-                    // Lock-free insert into thread-local BPQ slot
-                    bpq.insert({ result, chrom });
+                    bpq.insert(std::pair{ result, chrom });
                     return result;
                     });
                 futures.emplace_back(i, std::move(fut));
             }
 
-            // Harvest results — .get() preserves any exceptions from fitness fn
             for (auto& [idx, fut] : futures)
                 population_[idx].second = fut.get();
 
             sync_stats();
         }
 
-        // Copy atomic counters into the stats struct (call after each eval batch)
         void sync_stats() {
             size_t calls = fn_call_count_.load(std::memory_order_relaxed);
             size_t requests = total_eval_requests_.load(std::memory_order_relaxed);
@@ -1265,13 +2198,19 @@ namespace gb::yadro::algorithm::v2 {
             stats_.cache_hits = (requests > calls) ? (requests - calls) : 0;
         }
 
-        void sort_population() {
-            std::ranges::sort(population_, [this](const individual_t& a,
+        void sort_population(size_t nth) {
+            auto comp = [this](const individual_t& a,
                 const individual_t& b) {
-                    if (!a.second) return false;
-                    if (!b.second) return true;
-                    return compare_(*a.second, *b.second);  // best-first
-                });
+                    return a.second && (!b.second ||
+                        compare_(*a.second, *b.second));
+                };
+
+            auto first = population_.begin();
+            auto middle = first + nth;
+            auto last = population_.end();
+
+            std::ranges::nth_element(first, middle, last, comp);
+            std::ranges::sort(first, middle, comp);
         }
 
         void feed_history_from_population() {
@@ -1288,25 +2227,36 @@ namespace gb::yadro::algorithm::v2 {
             return total_eval_requests_.load(std::memory_order_relaxed);
         }
 
-        // Build the next generation using elitism + tournament + crossover/mutation.
-        // Called on the main thread; uses the thread-local RNG.
         [[nodiscard]] std::vector<individual_t>
             breed_next_generation(size_t pop_size, size_t elite_n, std::mt19937_64& rng) const
         {
-            // Extract fitness vector for tournament selection (best-first sorted)
             std::vector<target_t> fitnesses;
             fitnesses.reserve(population_.size());
             for (const auto& [chrom, fit] : population_)
                 if (fit) fitnesses.push_back(*fit);
 
+            struct ChromosomeHasher {
+                size_t operator()(const chromosome_t& chrom) const noexcept {
+                    return std::apply([](auto&& ...values)
+                        {
+                            return xxhash128{}(values...).reduce(); // reduce hash to 64 bits
+                        }, chrom);
+                }
+            };
+
+            std::unordered_set < chromosome_t, ChromosomeHasher > unique_chromosomes;
             std::vector<individual_t> next;
             next.reserve(pop_size);
 
-            // Elites carried over with their already-evaluated fitness
             for (size_t i = 0; i < elite_n && i < population_.size(); ++i)
-                next.push_back(population_[i]);          // fitness kept — no re-eval
+            {
+                if (unique_chromosomes.count(population_[i].first) == 0)
+                {
+                    unique_chromosomes.insert(population_[i].first);
+                    next.push_back(population_[i]);
+                }
+            }
 
-            // Offspring
             std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
             while (next.size() < pop_size) {
                 size_t p1 = detail::tournament_select(rng, fitnesses,
@@ -1323,26 +2273,34 @@ namespace gb::yadro::algorithm::v2 {
                 }
                 child = detail::mutate_chromosome(rng, std::move(child),
                     wrappers_, config.mutation_rate);
-                next.push_back({ std::move(child), std::nullopt });
+                if (unique_chromosomes.count(child) == 0)
+                {
+                    unique_chromosomes.insert(child);
+                    next.push_back({ std::move(child), std::nullopt });
+                }
             }
             return next;
         }
 
-        // -------------------------------------------------------------------------
+        // =========================================================================
         // Data members
-        // -------------------------------------------------------------------------
+        // =========================================================================
         Fn                          target_fn_;
         CompareFn                   compare_;
         std::tuple<Wrapper...>      wrappers_;
 
-        // Persistent across multiple optimize() calls:
+        // Persistent state across optimize() calls:
         std::vector<individual_t>   population_;
         optimization_stats          stats_;
         history_t                   history_;
 
-        // Atomic counters — updated concurrently by worker threads
-        mutable std::atomic<size_t> fn_call_count_{ 0 };       // actual fn calls
-        mutable std::atomic<size_t> total_eval_requests_{ 0 }; // requests to evaluate_chromosome
+        // Stagnation baseline — tracks the best fitness seen so far.
+        // Persists across optimize() calls; reset by clear() and trigger_cataclysm().
+        std::optional<target_t>     prev_best_;
+
+        // Atomic counters — written concurrently by worker threads:
+        mutable std::atomic<size_t> fn_call_count_{ 0 };
+        mutable std::atomic<size_t> total_eval_requests_{ 0 };
     };
 
 
@@ -1360,4 +2318,4 @@ namespace gb::yadro::algorithm::v2 {
             std::move(fn), std::move(cmp), std::move(wrappers)...};
     }
 
-} // namespace genetic
+}
