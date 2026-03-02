@@ -706,7 +706,7 @@ namespace gb::yadro::algorithm::conv {
         template<typename RNG>
         [[nodiscard]] T mutate(T value, RNG& rng) const {
             double p = std::uniform_real_distribution<double>{ 0.0, 1.0 }(rng);
-            if (p < 0.30) {
+            if (p < 0.70) {   // 70% local creep, 30% random reset
                 auto it = std::ranges::lower_bound(allowed_values, value);
                 auto idx = static_cast<int>(it - allowed_values.begin());
                 int  d = std::uniform_int_distribution<int>{ -2, 2 }(rng);
