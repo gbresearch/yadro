@@ -789,7 +789,19 @@ namespace gb::yadro::algorithm::conv {
             value_type result;
             if constexpr (requires(value_type v, size_t n) { v.resize(n); })
                 result.resize(container_size);
-            size_t cut = std::uniform_int_distribution<size_t>{ 0, container_size }(rng);
+
+            if (container_size <= 1) {
+                // Degenerate container: delegate to element-level crossover so
+                // the single gene is properly recombined rather than cloned.
+                if (container_size == 1)
+                    *std::begin(result) =
+                    element_wrapper.crossover(*std::begin(a), *std::begin(b), rng);
+                return result;
+            }
+
+            // Restrict cut to [1, container_size-1] so the result is never a
+            // verbatim clone of either parent.
+            size_t cut = std::uniform_int_distribution<size_t>{ 1, container_size - 1 }(rng);
             auto ia = std::begin(a), ib = std::begin(b), ir = std::begin(result);
             for (size_t i = 0; i < container_size; ++i, ++ia, ++ib, ++ir)
                 *ir = (i < cut) ? *ia : *ib;
@@ -869,7 +881,10 @@ namespace gb::yadro::algorithm::conv {
         double diversity_threshold = 0.05; ///< Ratio below which action is taken
         bool   cataclysm_enabled = true; ///< true=cataclysm, false=stop
         double cataclysm_survival_fraction = 0.10; ///< Fraction of elites kept after cataclysm
-
+        /// Maximum number of cataclysm events before the search is terminated.
+        /// Prevents infinite cycling when the landscape has no recoverable basin.
+        /// Default: unlimited (preserves previous behaviour).
+        size_t max_cataclysm_count = std::numeric_limits<size_t>::max();
         // ── Criterion 3: Target Fitness ───────────────────────────────────────────
         // (configured via genetic_optimization_t::target_fitness)
 
@@ -899,6 +914,7 @@ namespace gb::yadro::algorithm::conv {
                 self.diversity_threshold,
                 self.cataclysm_enabled,
                 self.cataclysm_survival_fraction,
+                self.max_cataclysm_count,   
                 self.elite_convergence_fraction,
                 self.elite_convergence_epsilon,
                 self.elite_convergence_guard
@@ -1477,21 +1493,30 @@ namespace gb::yadro::algorithm::conv {
             const size_t stagnation_limit = compute_stagnation_limit(max_tries);
             stop_reason  reason = stop_reason::none;
 
-            while (clock::now() < deadline && total_attempts() < max_tries)
-            {
-                sort_population(elite_n);
-                feed_history_from_population();
-
-                reason = should_stop_or_cataclysm(stagnation_limit, rng);
-                if (is_terminal(reason))
-                    break;
-
-                population_ = breed_next_generation(population_size, elite_n, rng);
-                evaluate_all_parallel(tp);
+            try {
+                while (clock::now() < deadline && total_attempts() < max_tries)
                 {
-                    std::lock_guard lk(stats_mutex_);
-                    ++stats_.generations;
+                    sort_population(elite_n);
+                    feed_history_from_population();
+                    reason = should_stop_or_cataclysm(stagnation_limit, rng);
+                    if (is_terminal(reason))
+                        break;
+                    population_ = breed_next_generation(population_size, elite_n, rng);
+                    evaluate_all_parallel(tp);         // may throw
+                    {
+                        std::lock_guard lk(stats_mutex_);
+                        ++stats_.generations;
+                    }
                 }
+            }
+            catch (...) {
+                // Record elapsed time and a neutral stop reason before propagating
+                // so that stats() / report() reflect what actually happened.
+                record_stop(stop_reason::none,
+                    clock::now() >= deadline,
+                    total_attempts() >= max_tries,
+                    clock::now() - t0);
+                throw;
             }
 
             record_stop(reason,
@@ -1970,14 +1995,23 @@ namespace gb::yadro::algorithm::conv {
                 std::lock_guard lk(stats_mutex_);
                 stats_.last_diversity = diversity;
             }
+
             if (diversity < stop_criteria.diversity_threshold) {
                 if (stop_criteria.cataclysm_enabled) {
+                    // Check cap before triggering; treat exhaustion as a
+                    // terminal diversity stop so the caller gets a clean exit.
+                    size_t current_count;
+                    {
+                        std::lock_guard lk(stats_mutex_);
+                        current_count = stats_.cataclysm_count;
+                    }
+                    if (current_count >= stop_criteria.max_cataclysm_count)
+                        return stop_reason::diversity; // terminal — cap reached
                     trigger_cataclysm(rng);
-                    return stop_reason::cataclysm;   // non-terminal — continue
+                    return stop_reason::cataclysm; // non-terminal — continue
                 }
-                return stop_reason::diversity;       // terminal
+                return stop_reason::diversity; // terminal
             }
-
             // ── Criterion 4: Elite convergence  (only reached when population is healthy)
             if constexpr (std::is_arithmetic_v<target_t>) {
                 if (compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon)
@@ -2086,7 +2120,6 @@ namespace gb::yadro::algorithm::conv {
         template<typename ThreadPool>
         void evaluate_all_parallel(ThreadPool& tp) {
             eval_futures_.clear();
-
             for (size_t i = 0; i < population_.size(); ++i) {
                 if (population_[i].second) continue;
                 chromosome_t chrom = population_[i].first;
@@ -2095,11 +2128,24 @@ namespace gb::yadro::algorithm::conv {
                     });
                 eval_futures_.emplace_back(i, std::move(fut));
             }
-
-            for (auto& [idx, fut] : eval_futures_)
-                population_[idx].second = fut.get();
-
+            // Drain all futures before rethrowing any exception so that
+            // (a) sync_stats() always sees the final evaluation counts, and
+            // (b) no future is abandoned while its task may still be running.
+            std::exception_ptr first_exc;
+            for (auto& [idx, fut] : eval_futures_) {
+                try {
+                    population_[idx].second = fut.get();
+                }
+                catch (...) {
+                    if (!first_exc)
+                        first_exc = std::current_exception();
+                    // Leave individual unevaluated; optimize() will not
+                    // proceed to breed and will record the stop below.
+                }
+            }
             sync_stats();
+            if (first_exc)
+                std::rethrow_exception(first_exc);
         }
 
         // FIX #17: All writes to stats_ are guarded by stats_mutex_.
