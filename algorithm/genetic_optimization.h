@@ -613,10 +613,10 @@ namespace gb::yadro::algorithm::conv {
 
         min_max_value_range(T min_value, T max_value, double mutation_sigma_frac = 0.15, double eta = 2,
             double diversity_epsilon = 0.)
-            : min_value(min_value), max_value(max_value), mutation_sigma_frac(mutation_sigma_frac), 
-            eta(eta), diversity_epsilon(diversity_epsilon)
+            // make sure min_value <= max_value, swap if not
+            : min_value(std::min(min_value, max_value)), max_value(std::max(min_value, max_value)), 
+            mutation_sigma_frac(mutation_sigma_frac), eta(eta), diversity_epsilon(diversity_epsilon)
         {
-            std::tie(min_value, max_value) = std::minmax(min_value, max_value);
         }
 
         template<typename RNG>
@@ -634,7 +634,8 @@ namespace gb::yadro::algorithm::conv {
             {
                 if (std::uniform_real_distribution<double>{0.0, 1.0}(rng) < 0.1)
                     return random_value(rng);
-
+                
+                // TODO: must check for overflow and narrowing conversions when T is unsigned
                 using Wide = int64_t;
                 Wide minv = static_cast<Wide>(min_value);
                 Wide maxv = static_cast<Wide>(max_value);
@@ -753,13 +754,12 @@ namespace gb::yadro::algorithm::conv {
         }
 
     private:
-        void normalize() const {
+        void normalize() {
             if (allowed_values.empty())
                 throw std::invalid_argument("discrete_value_range: allowed_values must not be empty");
-            auto& vals = const_cast<discrete_value_range&>(*this).allowed_values;
-            std::sort(vals.begin(), vals.end());
-            auto last = std::unique(vals.begin(), vals.end());
-            vals.erase(last, vals.end());
+            std::sort(allowed_values.begin(), allowed_values.end());
+            auto last = std::unique(allowed_values.begin(), allowed_values.end());
+            allowed_values.erase(last, allowed_values.end());
         }
     };
 
