@@ -604,9 +604,17 @@ namespace gb::yadro::algorithm::conv {
         T      max_value;
         double mutation_sigma_frac;
         double eta;   ///< SBX distribution index (float crossover only)
+        /// Grid resolution used by measure_diversity() to decide whether two
+        /// chromosomes are "the same".  0.0 (default) means exact comparison,
+        /// which preserves the previous behaviour.  For floating-point genes a
+        /// value such as 1e-4 prevents near-duplicate individuals from counting
+        /// as distinct and causing premature cataclysm suppression.
+        double diversity_epsilon;
 
-        min_max_value_range(T min_value, T max_value, double mutation_sigma_frac = 0.15, double eta = 2)
-            : min_value(min_value), max_value(max_value), mutation_sigma_frac(mutation_sigma_frac)
+        min_max_value_range(T min_value, T max_value, double mutation_sigma_frac = 0.15, double eta = 2,
+            double diversity_epsilon = 0.)
+            : min_value(min_value), max_value(max_value), mutation_sigma_frac(mutation_sigma_frac), 
+            eta(eta), diversity_epsilon(diversity_epsilon)
         {
             std::tie(min_value, max_value) = std::minmax(min_value, max_value);
         }
@@ -671,13 +679,26 @@ namespace gb::yadro::algorithm::conv {
             }
         }
 
+        /// Snap a gene value to the nearest diversity grid point.
+        /// Called by measure_diversity() via the detail::quantize_gene helper.
+        [[nodiscard]] T quantize_for_diversity(T value) const noexcept {
+            if constexpr (std::is_floating_point_v<T>) {
+                if (diversity_epsilon > 0.0)
+                    return static_cast<T>(
+                        std::round(static_cast<double>(value) / diversity_epsilon)
+                        * diversity_epsilon);
+            }
+            return value;
+        }
+
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
                 self.min_value,
                 self.max_value,
                 self.mutation_sigma_frac,
-                self.eta                    // NEW — was not serialized before
+                self.eta,
+                self.diversity_epsilon
             );
         }
     };
@@ -721,6 +742,9 @@ namespace gb::yadro::algorithm::conv {
             return std::uniform_int_distribution<int>{0, 1}(rng) ? a : b;
         }
 
+        /// Discrete values are already exact — no quantization needed.
+        [[nodiscard]] T quantize_for_diversity(T value) const noexcept { return value; }
+
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
@@ -740,12 +764,30 @@ namespace gb::yadro::algorithm::conv {
     };
 
     // =============================================================================
-    // SECTION 3 — Container Wrapper  (unchanged)
+    // SECTION 3 — Container Wrapper
     // =============================================================================
+    namespace detail
+    {
+        /// Apply a wrapper's quantize_for_diversity() if it exposes one;
+        /// otherwise return the value unchanged.  This allows custom wrappers
+        /// that pre-date this interface to continue working without modification.
+        template<typename W>
+        [[nodiscard]] auto quantize_gene(const W& wrapper,
+            const typename W::value_type& v)
+            -> typename W::value_type
+        {
+            if constexpr (requires { wrapper.quantize_for_diversity(v); })
+                return wrapper.quantize_for_diversity(v);
+            else
+                return v;
+        }
+
+    }
+
     template<typename Container, GeneticWrapper ElementWrapper>
         requires std::is_arithmetic_v<typename ElementWrapper::value_type>
     && std::same_as<typename Container::value_type, typename ElementWrapper::value_type>
-        class container_range
+        class container_range   
     {
         using element_type = typename ElementWrapper::value_type;
         using value_type = Container;
@@ -779,6 +821,14 @@ namespace gb::yadro::algorithm::conv {
             for (auto& el : value)
                 if (coin(rng) < prob)
                     el = element_wrapper.mutate(el, rng);
+            return value;
+        }
+
+        /// Quantize each container element using the element wrapper's own
+        /// diversity_epsilon (if it has one).
+        [[nodiscard]] value_type quantize_for_diversity(value_type value) const {
+            for (auto& el : value)
+                el = detail::quantize_gene(element_wrapper, el);
             return value;
         }
 
@@ -978,20 +1028,19 @@ namespace gb::yadro::algorithm::conv {
         }
 
         void try_insert(Target fitness, Chromosome chrom) {
-            // Reject chromosomes already present in the history.
-            // Linear scan is acceptable: history is small (typically ≤ 1000 entries)
-            // and duplicates are common only during population collapse, which cataclysm
-            // now intercepts before they flood the history.
-            for (const auto& [f, c] : entries_)
-                if (c == chrom) return;
-
+            // O(1) duplicate check via hash set
+            const uint64_t h = make_chrom_hash(chrom);
+            if (chrom_hashes_.count(h)) return;
             if (entries_.size() >= max_size_) {
                 if (!cmp_(fitness, entries_.back().first))
                     return;
+                // Remove the evicted entry from the hash set before popping it.
+                chrom_hashes_.erase(make_chrom_hash(entries_.back().second));
                 entries_.pop_back();
             }
             auto pos = std::lower_bound(entries_.begin(), entries_.end(), fitness,
                 [&](const entry_t& e, const Target& t) { return cmp_(e.first, t); });
+            chrom_hashes_.insert(h);
             entries_.insert(pos, { std::move(fitness), std::move(chrom) });
         }
 
@@ -999,6 +1048,7 @@ namespace gb::yadro::algorithm::conv {
             max_size_ = new_max;
             while (entries_.size() > max_size_)
                 entries_.pop_back();
+            rebuild_hash_set(); // resync after bulk truncation
         }
 
         [[nodiscard]] bool           empty()    const noexcept { return entries_.empty(); }
@@ -1013,12 +1063,39 @@ namespace gb::yadro::algorithm::conv {
                 self.max_size_,
                 self.entries_
             );
+
+            // chrom_hashes_ is derived from entries_ and is not persisted.
+            // Rebuild it here so both save and load leave the object consistent.
+            if constexpr (gb::yadro::archive::is_iarchive_v<std::remove_cvref_t<decltype(archive)>>)
+                self.rebuild_hash_set();
         }
 
-    private:
+    private:    
         size_t               max_size_ = std::numeric_limits<size_t>::max();
         CompareFn            cmp_;
         std::vector<entry_t> entries_;
+        std::unordered_set<uint64_t> chrom_hashes_;
+
+        // Hash a tuple chromosome by chaining per-element xxhash128 calls,
+        // mixing in the element position so (a,b) ≠ (b,a).
+        [[nodiscard]] static uint64_t make_chrom_hash(const Chromosome& c) {
+            hash128_t acc{ 0, 0 };
+            std::apply([&acc](const auto&... genes) {
+                size_t pos = 0;
+                ((acc = xxhash128::hash_value(
+                    genes,
+                    acc.low ^ (++pos * 0x9e3779b97f4a7c15ULL))), ...);
+                }, c);
+            return acc.low ^ (acc.high * 0x9e3779b97f4a7c15ULL);
+        }
+
+        // Rebuild chrom_hashes_ from entries_ (used after truncation or deserialize).
+        void rebuild_hash_set() {
+            chrom_hashes_.clear();
+            chrom_hashes_.reserve(entries_.size());
+            for (const auto& [f, c] : entries_)
+                chrom_hashes_.insert(make_chrom_hash(c));
+        }
     };
 
 
@@ -1035,6 +1112,32 @@ namespace gb::yadro::algorithm::conv {
             return rng;
         }
 
+        // Apply one wrapper's mutation to a single gene value.
+        //
+        // For container_range wrappers the outer mutation_rate gate is bypassed:
+        // container_range::mutate() handles per-element probability internally, and
+        // the outer gate would compound multiplicatively to give an effective rate of
+        // mutation_rate / container_size — far too low for large containers.
+        //
+        // For all other wrappers the standard coin-flip gate is applied first.
+        template<typename W>
+        [[nodiscard]] typename W::value_type apply_mutation(
+            const W& wrapper,
+            typename W::value_type value,
+            std::mt19937_64& rng,
+            double mutation_rate)
+        {
+            if constexpr (requires(const W & w) { w.per_element_mut_prob; }) {
+                // Container wrapper: per-element gating is entirely internal.
+                return wrapper.mutate(std::move(value), rng);
+            }
+            else {
+                if (std::uniform_real_distribution<double>{0.0, 1.0}(rng) < mutation_rate)
+                    return wrapper.mutate(std::move(value), rng);
+                return value;
+            }
+        }
+
         template<typename... Wrappers>
         auto random_chromosome(std::mt19937_64& rng, const std::tuple<Wrappers...>& wrappers)
         {
@@ -1049,16 +1152,16 @@ namespace gb::yadro::algorithm::conv {
             const std::tuple<Wrappers...>& wrappers,
             double mutation_rate)
         {
-            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
             [&] <size_t... Is>(std::index_sequence<Is...>) {
-                ((coin(rng) < mutation_rate
-                    ? void(std::get<Is>(chrom) =
-                        std::get<Is>(wrappers).mutate(std::get<Is>(chrom), rng))
-                    : void()), ...);
+                ((std::get<Is>(chrom) = apply_mutation(
+                    std::get<Is>(wrappers),
+                    std::move(std::get<Is>(chrom)),
+                    rng,
+                    mutation_rate)), ...);
             }(std::index_sequence_for<Wrappers...>{});
             return chrom;
         }
-
+            
         template<typename Chromosome, typename... Wrappers>
         Chromosome crossover_chromosomes(std::mt19937_64& rng,
             const Chromosome& a,
@@ -1501,7 +1604,8 @@ namespace gb::yadro::algorithm::conv {
                     reason = should_stop_or_cataclysm(stagnation_limit, rng);
                     if (is_terminal(reason))
                         break;
-                    population_ = breed_next_generation(population_size, elite_n, rng);
+                    
+                    population_ = breed_next_generation(tp, population_size, elite_n);
                     evaluate_all_parallel(tp);         // may throw
                     {
                         std::lock_guard lk(stats_mutex_);
@@ -1894,12 +1998,21 @@ namespace gb::yadro::algorithm::conv {
             diversity_hashes_.clear();
             diversity_hashes_.reserve(population_.size());
             for (const auto& [chrom, _] : population_) {
+                // Quantize each gene before hashing so that two chromosomes
+                // that differ only by less than diversity_epsilon on every
+                // floating-point gene are treated as identical.
+                auto qchrom = [&]<size_t... Is>(std::index_sequence<Is...>) {
+                    return std::make_tuple(
+                        detail::quantize_gene(std::get<Is>(wrappers_),
+                            std::get<Is>(chrom))...);
+                }(std::index_sequence_for<Wrapper...>{});
                 hash128_t h = std::apply([](const auto&... genes) {
                     return xxhash128{}(genes...);
-                    }, chrom);
+                    }, qchrom);
                 // Fold 128-bit hash to 64 bits with a Knuth multiplier mix.
                 diversity_hashes_.push_back(h.low ^ (h.high * 0x9e3779b97f4a7c15ULL));
             }
+
             std::sort(diversity_hashes_.begin(), diversity_hashes_.end());
             const size_t unique_count = static_cast<size_t>(
                 std::unique(diversity_hashes_.begin(), diversity_hashes_.end())
@@ -2075,6 +2188,12 @@ namespace gb::yadro::algorithm::conv {
                 });
         }
 
+        // NOTE: This function is only ever called from evaluate_all_single()
+        // and evaluate_all_parallel() — never from outside optimize().
+        // The atomics fn_call_count_ and total_eval_requests_ therefore have
+        // no concurrent writers other than the thread-pool worker threads
+        // already accounted for in sync_stats(); no additional locking is needed.
+
         [[nodiscard]] target_t evaluate_chromosome(const chromosome_t& chrom) const {
             ensure_memo_table();
             total_eval_requests_.fetch_add(1, std::memory_order_relaxed);
@@ -2227,6 +2346,84 @@ namespace gb::yadro::algorithm::conv {
                     wrappers_, config.mutation_rate);
                 next.push_back({ std::move(child), std::nullopt });
             }
+            return next;
+        }
+
+        // Parallel counterpart to breed_next_generation(pop_size, elite_n, rng).
+        // Offspring generation is split across worker threads; each thread uses
+        // its own detail::thread_rng() so there is no shared mutable RNG state.
+        template<typename ThreadPool>
+        [[nodiscard]] std::vector<individual_t>
+            breed_next_generation(ThreadPool& tp, size_t pop_size, size_t elite_n)
+        {
+            std::vector<target_t> fitnesses;
+            fitnesses.reserve(population_.size());
+            for (const auto& [chrom, fit] : population_) {
+                assert(fit.has_value() &&
+                    "breed_next_generation: all individuals must be evaluated beforehand");
+                fitnesses.push_back(*fit);
+            }
+
+            std::vector<individual_t> next(pop_size);
+
+            // Carry elites forward (always single-threaded; no contention).
+            for (size_t i = 0; i < elite_n && i < population_.size(); ++i)
+                next[i] = population_[i];
+
+            const size_t num_offspring = pop_size - elite_n;
+            if (num_offspring == 0) return next;
+
+            // Divide offspring into roughly hardware_concurrency chunks so that
+            // per-task overhead stays low.
+            const size_t num_chunks = std::max(size_t{ 1 },
+                std::min(num_offspring,
+                    static_cast<size_t>(std::thread::hardware_concurrency())));
+            const size_t chunk_size =
+                (num_offspring + num_chunks - 1) / num_chunks;
+
+            std::vector<std::future<void>> chunk_futures;
+            chunk_futures.reserve(num_chunks);
+
+            for (size_t chunk = 0; chunk < num_chunks; ++chunk) {
+                const size_t begin = chunk * chunk_size;
+                const size_t end = std::min(begin + chunk_size, num_offspring);
+                if (begin >= end) break;
+
+                chunk_futures.push_back(
+                    tp([this, &next, &fitnesses, begin, end, elite_n]() {
+                        // Each task gets its own per-thread RNG — no shared state.
+                        auto& rng = detail::thread_rng();
+                        std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
+                        for (size_t i = begin; i < end; ++i) {
+                            size_t p1 = detail::tournament_select(
+                                rng, fitnesses, config.tournament_size, compare_);
+                            chromosome_t child;
+                            if (coin(rng) < config.crossover_rate) {
+                                size_t p2 = detail::tournament_select(
+                                    rng, fitnesses, config.tournament_size, compare_);
+                                child = detail::crossover_chromosomes(rng,
+                                    population_[p1].first, population_[p2].first,
+                                    wrappers_);
+                            }
+                            else {
+                                child = population_[p1].first;
+                            }
+                            child = detail::mutate_chromosome(
+                                rng, std::move(child), wrappers_, config.mutation_rate);
+                            next[elite_n + i] = { std::move(child), std::nullopt };
+                        }
+                        }));
+            }
+
+            // Drain all chunk futures before rethrowing any exception so that
+            // partial results are visible and no task is abandoned in-flight.
+            std::exception_ptr first_exc;
+            for (auto& fut : chunk_futures) {
+                try { fut.get(); }
+                catch (...) { if (!first_exc) first_exc = std::current_exception(); }
+            }
+            if (first_exc) std::rethrow_exception(first_exc);
+
             return next;
         }
 
