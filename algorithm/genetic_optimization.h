@@ -656,7 +656,14 @@ namespace gb::yadro::algorithm::conv {
                 double u = std::uniform_real_distribution<double>{ 0.0, 1.0 }(rng);
                 double beta = (u <= 0.5) ? std::pow(2.0 * u, inv_eta1)
                     : std::pow(0.5 / (1.0 - u), inv_eta1);
-                double child = 0.5 * ((1.0 + beta) * a + (1.0 - beta) * b);
+                // SBX produces two complementary children:
+                //   c1 = 0.5*((1+β)a + (1-β)b)
+                //   c2 = 0.5*((1-β)a + (1+β)b)
+                // Returning only c1 introduces a directional bias when a ≠ b.
+                // Pick one at random so the operator is symmetric.
+                double child = std::uniform_int_distribution<int>{ 0, 1 }(rng)
+                    ? 0.5 * ((1.0 + beta) * a + (1.0 - beta) * b)
+                    : 0.5 * ((1.0 - beta) * a + (1.0 + beta) * b);
                 return std::clamp(static_cast<T>(child), min_value, max_value);
             }
             else {
