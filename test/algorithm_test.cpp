@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+ï»¿//-----------------------------------------------------------------------------
 //  Copyright (C) 2011-2024, Gene Bushuyev
 //  
 //  Boost Software License - Version 1.0 - August 17th, 2003
@@ -31,7 +31,6 @@
 #include "../archive/archive.h"
 #include "../algorithm/gbalgorithm.h"
 #include <iostream>
-#include <thread>
 
 namespace
 {
@@ -45,13 +44,13 @@ namespace
     {
         using namespace std::chrono_literals;
 
-        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
+        fast::genetic_optimization_t optimizer([&](auto x, auto y, auto z, auto v)
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
             std::less<>{},
             std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
 
-        auto [stat, opt_map] = optimizer.optimize(100ms, 5);
-
+        auto [stat, opt_map] = optimizer.optimize(20ms, 5);
+        
         // only testing in optimized build, debug build can be too slow and tests would fail randomly
 #if defined(NDEBUG)
         gbassert(opt_map.size() == 5);
@@ -67,6 +66,74 @@ namespace
             std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
         }
 #endif
+    }
+
+    GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::async)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        conv::genetic_optimization_t opt([&](auto x, auto y, auto z, auto v)
+            { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
+            std::less<double>{},
+            min_max_value_range<unsigned>{0, 10},
+            min_max_value_range<std::int64_t>{-10, 10},
+            min_max_value_range<float>{-10, 10},
+            min_max_value_range<double>{-10, 10}
+        );
+
+        // ---- Stopping criteria
+        // Criterion 1: stagnation
+        opt.stop_criteria.stagnation_fraction = 0.25;  // 25% of max_tries
+        opt.stop_criteria.stagnation_absolute_floor = 100;   // at least 100 generations
+
+        // Criterion 2: diversity / cataclysm
+        opt.stop_criteria.diversity_threshold = 0.05;
+        opt.stop_criteria.cataclysm_enabled = true;
+        opt.stop_criteria.cataclysm_survival_fraction = 0.15;
+
+        // Criterion 3: known optimum (Rosenbrock min is 0.0 at (1,1))
+        opt.target_fitness = 1e-15;
+
+        // Criterion 4: elite convergence
+        opt.stop_criteria.elite_convergence_fraction = 0.10;
+        opt.stop_criteria.elite_convergence_epsilon = 1e-10;
+
+        // first optimization run to populate history and test multithreading
+        gb::yadro::async::threadpool<> tp(4);
+        opt.optimize(tp,
+            /* time budget */    10ms,
+            /*population_size=*/ 100,
+            /*max_history=*/     5,
+            /*max_tries=*/       200'000
+        );
+#if defined(GB_DEBUGGING)
+        SetConsoleOutputCP(CP_UTF8);
+        opt.report(std::cout);
+#endif
+        // second optimization run to test history and stopping criteria
+        auto [stats, history] = opt.optimize(
+            /* time budget */    20ms,
+            /*population_size=*/ 100,
+            /*max_history=*/     5
+        );
+#if defined(GB_DEBUGGING)
+        SetConsoleOutputCP(CP_UTF8);
+        opt.report(std::cout);
+#endif
+#if defined(NDEBUG)
+        gbassert(history.size() == 5);
+        gbassert(history.best().first <= opt.target_fitness);
+#endif
+        // serialize to memory archive
+        gb::yadro::archive::omem_archive<> oma;
+        oma(opt);
+        opt.soft_reset();
+        // deserialize from memory archive
+        gb::yadro::archive::imem_archive ima(std::move(oma));
+        ima(opt);
+        std::stringstream restored_report_stream;
+        gbassert(stats == opt.stats());
     }
 
     //--------------------------------------------------------------------------------------------
@@ -414,8 +481,8 @@ namespace
     GB_TEST(algorithm, student_test, std::launch::async)
     {
         // === Short Sample Test (n = 6) ===
-        // Mean: 10 ± 0.148413
-        //    Standard Deviation : 0.141421 ± 0.258576
+        // Mean: 10 Â± 0.148413
+        //    Standard Deviation : 0.141421 Â± 0.258576
         std::vector<double> short_data = { 10.1, 10.2, 9.9, 10.0, 9.8, 10.0 };
 
         student_t short_sample(short_data, 0.95);
@@ -427,8 +494,8 @@ namespace
         gbassert(almost_equal(err_stddev_s, 0.258576, 0.0001));
 
         //    === Long Sample Test(n = 100) ===
-        //    Mean : 10 ± 0.0398843
-        //    Standard Deviation : 0.201008 ± 0.0570195
+        //    Mean : 10 Â± 0.0398843
+        //    Standard Deviation : 0.201008 Â± 0.0570195
         std::vector<double> long_data;
         for (int i = 0; i < 100; ++i) {
             double val = 10.0 + ((i % 2 == 0) ? 0.2 : -0.2);  // Small oscillating variation

@@ -1006,6 +1006,9 @@ namespace gb::yadro::algorithm::conv {
         size_t elite_perturbation_count = 0;
         double last_diversity = 1.0;
         stop_reason last_stop_reason = stop_reason::none;
+        
+        auto operator<=>(const optimization_stats&) const = default;
+
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
@@ -1253,7 +1256,7 @@ namespace gb::yadro::algorithm::conv {
             std::ostringstream s;
             auto total_ns = ns.count();
             if (total_ns < 1'000) { s << total_ns << " ns"; }
-            else if (total_ns < 1'000'000) { s << std::fixed << std::setprecision(2) << total_ns / 1e3 << " µs"; }
+            else if (total_ns < 1'000'000) { s << std::fixed << std::setprecision(2) << total_ns / 1e3 << " µs"; } // requires SetConsoleOutputCP(CP_UTF8);
             else if (total_ns < 1'000'000'000LL) { s << std::fixed << std::setprecision(3) << total_ns / 1e6 << " ms"; }
             else if (total_ns < 60'000'000'000LL) { s << std::fixed << std::setprecision(3) << total_ns / 1e9 << " s"; }
             else {
