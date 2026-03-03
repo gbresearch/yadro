@@ -955,6 +955,11 @@ namespace gb::yadro::algorithm::conv {
         double elite_convergence_fraction = 0.10;  ///< Top fraction treated as "elite" here
         double elite_convergence_epsilon = 1e-6;  ///< Relative gap threshold
         double elite_convergence_guard = 1e-12; ///< Denominator guard near zero
+        /// How many elite-perturbation events are allowed before the
+        /// elite_converged stop becomes terminal.
+        /// Default 1: one second chance; set to 0 to restore the original
+        /// immediate-stop behaviour; set to max() for unlimited retries.
+        size_t max_elite_perturbation_count = 1;
 
         auto serialize(this auto&& self, auto&& archive)
         {
@@ -967,7 +972,8 @@ namespace gb::yadro::algorithm::conv {
                 self.max_cataclysm_count,   
                 self.elite_convergence_fraction,
                 self.elite_convergence_epsilon,
-                self.elite_convergence_guard
+                self.elite_convergence_guard,
+                self.max_elite_perturbation_count
             );
         }
     };
@@ -980,11 +986,14 @@ namespace gb::yadro::algorithm::conv {
         diversity,       ///< Criterion 2: diversity below threshold, cataclysm disabled
         target_reached,  ///< Criterion 3: best fitness reached or surpassed target
         elite_converged, ///< Criterion 4: elite mean within epsilon of single best
-        cataclysm        ///< Criterion 2 fired cataclysm — NOT terminal, execution continues
+        cataclysm,        ///< Criterion 2 fired cataclysm — NOT terminal, execution continues
+        elite_perturbation,  // non-terminal, like cataclysm for elites
     };
 
     [[nodiscard]] constexpr bool is_terminal(stop_reason r) noexcept {
-        return r != stop_reason::none && r != stop_reason::cataclysm;
+        return r != stop_reason::none
+            && r != stop_reason::cataclysm
+            && r != stop_reason::elite_perturbation;
     }
 
     struct optimization_stats {
@@ -992,12 +1001,11 @@ namespace gb::yadro::algorithm::conv {
         size_t cache_hits = 0;
         size_t generations = 0;
         std::chrono::nanoseconds elapsed{ 0 };
-
-        size_t      generations_without_improvement = 0;
-        size_t      cataclysm_count = 0;
-        double      last_diversity = 1.0;
+        size_t generations_without_improvement = 0;
+        size_t cataclysm_count = 0;
+        size_t elite_perturbation_count = 0;
+        double last_diversity = 1.0;
         stop_reason last_stop_reason = stop_reason::none;
-
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
@@ -1006,13 +1014,13 @@ namespace gb::yadro::algorithm::conv {
                 self.generations,
                 self.generations_without_improvement,
                 self.cataclysm_count,
+                self.elite_perturbation_count,
                 self.last_diversity,
                 self.elapsed,
                 serialize_as<int>(self.last_stop_reason)
             );
         }
     };
-
 
     // =============================================================================
     // SECTION 5 — Optimization History
@@ -1285,6 +1293,7 @@ namespace gb::yadro::algorithm::conv {
             case stop_reason::target_reached:  return "target_reached";
             case stop_reason::elite_converged: return "elite_converged";
             case stop_reason::cataclysm:       return "cataclysm (non-terminal)";
+            case stop_reason::elite_perturbation:  return "elite_perturbation (non-terminal)";
             default:                           return "unknown";
             }
         }
@@ -1320,6 +1329,12 @@ namespace gb::yadro::algorithm::conv {
                     "refinement is unlikely without a larger mutation perturbation.";
             case stop_reason::cataclysm:
                 return "A Mass Mutation event was the last action taken (non-terminal).";
+            case stop_reason::elite_perturbation:
+                return "Criterion 4 fired but the perturbation budget was not yet "
+                    "exhausted. The elite group (except the single best individual) "
+                    "was replaced with random chromosomes to escape a potential local "
+                    "basin. The search continues. Becomes terminal once "
+                    "max_elite_perturbation_count is reached.";
             default:
                 return "Unknown stop reason.";
             }
@@ -1544,7 +1559,7 @@ namespace gb::yadro::algorithm::conv {
                 sort_population(elite_n);
                 feed_history_from_population();
 
-                reason = should_stop_or_cataclysm(stagnation_limit, rng);
+                reason = should_stop_or_cataclysm(stagnation_limit, elite_n, rng);
                 if (is_terminal(reason))
                     break;
 
@@ -1601,7 +1616,7 @@ namespace gb::yadro::algorithm::conv {
                 {
                     sort_population(elite_n);
                     feed_history_from_population();
-                    reason = should_stop_or_cataclysm(stagnation_limit, rng);
+                    reason = should_stop_or_cataclysm(stagnation_limit, elite_n, rng);
                     if (is_terminal(reason))
                         break;
                     
@@ -1842,6 +1857,7 @@ namespace gb::yadro::algorithm::conv {
                     }
                 }
                 report_row(os, "Cataclysm events", format_size(s.cataclysm_count));
+                report_row(os, "Elite perturbations", format_size(s.elite_perturbation_count)); 
                 {
                     std::ostringstream v, note;
                     v << s.generations_without_improvement << " gen";
@@ -2067,6 +2083,23 @@ namespace gb::yadro::algorithm::conv {
             }
         }
 
+        // Replace all elite slots except the single best with fresh random
+        // chromosomes, then reset the stagnation counter.  The best individual
+        // is preserved so the history best is never regressed.
+        void trigger_elite_perturbation(size_t elite_n, std::mt19937_64& rng) {
+            // population_ is assumed sorted (best first) at call site.
+            for (size_t i = 1; i < elite_n && i < population_.size(); ++i) {
+                population_[i].first = detail::random_chromosome(rng, wrappers_);
+                population_[i].second = std::nullopt;
+            }
+            prev_best_ = std::nullopt;
+            {
+                std::lock_guard lk(stats_mutex_);
+                ++stats_.elite_perturbation_count;
+                stats_.generations_without_improvement = 0;
+            }
+        }
+
         // FIX #1/#14: Criterion numbers in comments match stopping_criteria config order.
         //             Runtime evaluation order differs (3→4→1→2) for performance;
         //             this is documented below.
@@ -2074,7 +2107,7 @@ namespace gb::yadro::algorithm::conv {
         // FIX #1:     update_stagnation logic is inlined and runs AFTER the target
         //             check, so the winning generation does not inflate the counter.
         [[nodiscard]] stop_reason
-            should_stop_or_cataclysm(size_t stagnation_limit, std::mt19937_64& rng)
+            should_stop_or_cataclysm(size_t stagnation_limit, size_t elite_n, std::mt19937_64& rng)
         {
             if (population_.empty() || !population_.front().second)
                 return stop_reason::none;
@@ -2128,18 +2161,26 @@ namespace gb::yadro::algorithm::conv {
             
             // ── Criterion 4: Elite convergence (only reached when population is healthy)
             //
-            // Criterion 4 is suppressed when a target fitness is configured but has not
-            // yet been reached. In that case the elite may be on a sub-optimal plateau
-            // (all members identical in fitness space) and the near-zero normalized gap
-            // is a false signal. Criterion 3 is the correct and sufficient terminator
-            // once a target is known; elite convergence is only meaningful as a stop
-            // condition when no external target exists.
+            // When the elite has converged but the budget allows it, perturb the
+            // elite rather than stopping immediately. The rationale: convergence is
+            // an ambiguous signal — the elite may be in a local basin while the rest
+            // of the population is still diverse. Perturbation empirically
+            // distinguishes a true optimum (no improvement follows) from a plateau
+            // (improvement resumes). Only after the perturbation budget is exhausted
+            // is the signal treated as terminal.
             if constexpr (std::is_arithmetic_v<target_t>) {
-                const bool target_pending = target_fitness.has_value()
-                    && compare_(*target_fitness, best); // target still strictly better than best
-                if (!target_pending &&
-                    compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon)
-                    return stop_reason::elite_converged;
+                if (compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon) {
+                    size_t perturbation_count;
+                    {
+                        std::lock_guard lk(stats_mutex_);
+                        perturbation_count = stats_.elite_perturbation_count;
+                    }
+                    if (perturbation_count < stop_criteria.max_elite_perturbation_count) {
+                        trigger_elite_perturbation(elite_n, rng);
+                        return stop_reason::elite_perturbation; // non-terminal — continue
+                    }
+                    return stop_reason::elite_converged; // terminal — budget exhausted
+                }
             }
 
             // ── Criterion 1: Stagnation  (O(1) counter comparison) ───────────────────
