@@ -2125,9 +2125,20 @@ namespace gb::yadro::algorithm::conv {
                 }
                 return stop_reason::diversity; // terminal
             }
-            // ── Criterion 4: Elite convergence  (only reached when population is healthy)
+            
+            // ── Criterion 4: Elite convergence (only reached when population is healthy)
+            //
+            // Criterion 4 is suppressed when a target fitness is configured but has not
+            // yet been reached. In that case the elite may be on a sub-optimal plateau
+            // (all members identical in fitness space) and the near-zero normalized gap
+            // is a false signal. Criterion 3 is the correct and sufficient terminator
+            // once a target is known; elite convergence is only meaningful as a stop
+            // condition when no external target exists.
             if constexpr (std::is_arithmetic_v<target_t>) {
-                if (compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon)
+                const bool target_pending = target_fitness.has_value()
+                    && compare_(*target_fitness, best); // target still strictly better than best
+                if (!target_pending &&
+                    compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon)
                     return stop_reason::elite_converged;
             }
 
