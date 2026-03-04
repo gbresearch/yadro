@@ -565,6 +565,622 @@ namespace gb::yadro::algorithm
     }
 }
 
+// ============================================================================
+// GENETIC ALGORITHM OPTIMIZER — gb::yadro::algorithm::conv
+// ============================================================================
+//
+// OVERVIEW
+// --------
+// This header implements a generational genetic algorithm (GA) optimizer that
+// finds the global optimum of an arbitrary scalar fitness function over a
+// mixed search space of integer, floating-point, and container-typed parameters.
+//
+// The algorithm is expressed as a single class template,
+//
+//     genetic_optimization_t<Fn, CompareFn, Wrapper...>
+//
+// that is almost always constructed via the factory helper:
+//
+//     auto opt = make_optimizer(fitness_fn, compare_fn, wrapper0, wrapper1, ...);
+//
+// The optimizer supports both single-threaded and thread-pool-parallel
+// evaluation, optional memoization of the fitness function, four independent
+// stopping criteria, a cataclysm event for diversity recovery, and an elite-
+// perturbation mechanism for escaping false-convergence on fitness plateaux.
+//
+// ============================================================================
+// ALGORITHM OUTLINE
+// ============================================================================
+//
+//  1. INITIALISATION
+//     A population of `population_size` individuals is created.  Each
+//     individual is a chromosome: a std::tuple<Gene0, Gene1, ...> where each
+//     gene is drawn uniformly from its wrapper's domain.  If a warm-restart
+//     population already exists (from a previous optimize() call) it is
+//     reused; excess individuals are trimmed best-first, and missing slots
+//     are filled randomly.
+//
+//  2. EVALUATION
+//     Every unevaluated individual's fitness is computed by calling the user-
+//     supplied fitness function.  Results are cached in a sharded lock-free
+//     memo table (128 shards, xxHash128 keys) so that identical chromosomes
+//     never re-invoke the fitness function across generations or optimize()
+//     calls.
+//
+//  3. SORTING & HISTORY
+//     The population is partially sorted: the elite prefix (controlled by
+//     elitism_fraction) is sorted best-first; the remainder is left in
+//     unspecified order.  Every evaluated individual is offered to the
+//     optimization_history, which maintains a sorted list of the N best
+//     distinct chromosomes ever seen.  Duplicate chromosomes are rejected in
+//     O(1) via a companion hash set.
+//
+//  4. STOPPING CHECK  (see "STOPPING CRITERIA" section below)
+//     Four criteria plus the external budget limits (deadline, max_tries) are
+//     checked in order.  Non-terminal events (cataclysm, elite perturbation)
+//     continue the loop; terminal events break it.
+//
+//  5. BREEDING
+//     A new population is produced:
+//
+//     a. ELITISM — the top elite_n individuals are copied verbatim into the
+//        next generation, preserving their known fitness.
+//
+//     b. SELECTION — remaining slots are filled by repeated tournament
+//        selection: tournament_size candidates are drawn at random and the
+//        best one is selected as a parent.
+//
+//     c. CROSSOVER — with probability crossover_rate the child is produced
+//        by recombining two tournament-selected parents; otherwise the single
+//        selected parent is cloned.  Recombination is gene-wise via the
+//        wrapper's crossover() method.
+//
+//     d. MUTATION — each gene in the child is independently mutated with
+//        probability mutation_rate (outer gate).  For container_range genes
+//        the outer gate is bypassed; mutation probability is instead applied
+//        per element inside the container (inner gate).
+//
+//  6. LOOP — go to step 2 until a stopping criterion is met or the budget is
+//     exhausted.
+//
+// ============================================================================
+// GENE WRAPPERS
+// ============================================================================
+//
+// A wrapper encodes one gene: its domain, how to sample it randomly, how to
+// mutate it, and how to recombine two values.  Three built-in wrappers are
+// provided; custom wrappers satisfying the GeneticWrapper concept can be
+// substituted freely.
+//
+// ── min_max_value_range<T> ────────────────────────────────────────────────
+//
+//   Continuous range over an arithmetic type T (int, float, double, …).
+//
+//   Fields
+//   ┌─────────────────────────┬──────────────────┬────────────────────────────────────┐
+//   │ Field                   │ Default          │ Meaning                            │
+//   ├─────────────────────────┼──────────────────┼────────────────────────────────────┤
+//   │ min_value               │ (required)       │ Inclusive lower bound              │
+//   │ max_value               │ (required)       │ Inclusive upper bound              │
+//   │ mutation_sigma_frac     │ 0.15             │ Float mutation: Gaussian σ as a    │
+//   │                         │                  │ fraction of the range width.       │
+//   │                         │                  │ σ = (max−min) × sigma_frac.        │
+//   │                         │                  │ Has no effect on integer genes.    │
+//   │ eta                     │ 2.0              │ SBX distribution index (float      │
+//   │                         │                  │ crossover only).  Controls how     │
+//   │                         │                  │ strongly offspring cluster near    │
+//   │                         │                  │ their parents.  Larger η → tighter │
+//   │                         │                  │ clustering; smaller η → more       │
+//   │                         │                  │ spread.  Typical range: [1, 5].    │
+//   │ diversity_epsilon       │ 0.0              │ Tolerance for the diversity        │
+//   │                         │                  │ measurement.  Two float gene       │
+//   │                         │                  │ values that differ by less than    │
+//   │                         │                  │ this are treated as identical when │
+//   │                         │                  │ measuring population diversity.    │
+//   │                         │                  │ 0.0 means exact comparison.        │
+//   └─────────────────────────┴──────────────────┴────────────────────────────────────┘
+//
+//   Integer mutation strategy
+//     90%: add a random step in [−span/10, +span/10], clamped to bounds.
+//     10%: sample a completely random value (escape local basin).
+//
+//   Float mutation strategy
+//     Draw from N(0, σ) and clamp.  σ = (max−min) × mutation_sigma_frac.
+//
+//   Float crossover strategy
+//     Simulated Binary Crossover (SBX).  Both children c1 and c2 are
+//     computed and one is chosen at random, making the operator symmetric.
+//     β is drawn from the polynomial distribution parameterised by η.
+//
+//   Integer crossover strategy
+//     Uniform: randomly return one of the two parent values.
+//
+//   Tuning guidance
+//     • Increase mutation_sigma_frac (→ 0.30) when the search is too slow
+//       to escape local optima.  Decrease it (→ 0.05) when fine-grained
+//       convergence is needed near a known optimum.
+//     • Increase eta (→ 5) to exploit around the current best individual;
+//       decrease it (→ 1) to explore the range more broadly.
+//     • Set diversity_epsilon to approximately 1% of the range width to
+//       prevent near-duplicate chromosomes from inflating the diversity
+//       metric and thereby masking premature convergence.
+//
+// ── discrete_value_range<T> ───────────────────────────────────────────────
+//
+//   Categorical selection from an explicit sorted list of allowed values.
+//
+//   Fields
+//   ┌─────────────────────────┬──────────────────┬────────────────────────────────────┐
+//   │ Field                   │ Default          │ Meaning                            │
+//   ├─────────────────────────┼──────────────────┼────────────────────────────────────┤
+//   │ allowed_values          │ (required)       │ Sorted vector of legal gene values │
+//   └─────────────────────────┴──────────────────┴────────────────────────────────────┘
+//
+//   Mutation strategy
+//     70%: move to an adjacent value (index ± [0,2], clamped).
+//     30%: sample a uniformly random value from the list.
+//
+//   Crossover strategy
+//     Uniform: randomly return one of the two parent values.
+//
+//   Tuning guidance
+//     • allowed_values must be sorted for the adjacency step to be meaningful.
+//     • Use this wrapper for parameters that have a natural ordering but are
+//       only valid at specific levels (e.g., layer counts, bit widths, enum
+//       values with a metric interpretation).
+//
+// ── container_range<Container, ElementWrapper> ───────────────────────────
+//
+//   A fixed-size vector of genes all sharing the same ElementWrapper.  Use
+//   this when the number of parameters is too large or too variable to
+//   enumerate as separate tuple elements.
+//
+//   Fields
+//   ┌─────────────────────────┬──────────────────┬────────────────────────────────────┐
+//   │ Field                   │ Default          │ Meaning                            │
+//   ├─────────────────────────┼──────────────────┼────────────────────────────────────┤
+//   │ container_size          │ (required)       │ Number of elements                 │
+//   │ element_wrapper         │ (required)       │ Wrapper applied to each element    │
+//   │ per_element_mut_prob    │ -1.0             │ Probability that any single        │
+//   │                         │                  │ element is mutated in a given      │
+//   │                         │                  │ generation.  −1.0 means 1/size     │
+//   │                         │                  │ (on average one element per call). │
+//   └─────────────────────────┴──────────────────┴────────────────────────────────────┘
+//
+//   IMPORTANT — two-level gating does NOT apply here.  The outer mutation_rate
+//   coin-flip that governs all other wrappers is bypassed for container_range.
+//   Mutation probability is controlled entirely by per_element_mut_prob.
+//   This is intentional: the outer gate would compound to give an effective
+//   per-element rate of mutation_rate / container_size, which is negligibly
+//   small for large containers.
+//
+//   Crossover strategy
+//     Single-point crossover at a uniformly random cut in [1, size−1],
+//     guaranteeing that neither child is a verbatim clone of a parent.
+//     For container_size == 1 crossover is delegated to the element wrapper.
+//
+//   Tuning guidance
+//     • Set per_element_mut_prob to 1/size (default) for roughly one mutation
+//       per individual per generation — equivalent to the standard GA rate.
+//     • Increase toward 1.0 when the container encodes a highly correlated
+//       structure (e.g., neural network weights) and broader exploration is
+//       needed.
+//     • Decrease toward 0.01 when fine-grained per-element tuning is desired
+//       without disturbing the rest of the container.
+//
+// ============================================================================
+// GA CONFIGURATION  (ga_config)
+// ============================================================================
+//
+//   ┌──────────────────────┬──────────────┬──────────────────────────────────────────┐
+//   │ Field                │ Default      │ Meaning and tuning guidance              │
+//   ├──────────────────────┼──────────────┼──────────────────────────────────────────┤
+//   │ mutation_rate        │ 0.15         │ Probability that each tuple gene is      │
+//   │                      │              │ mutated in a given breeding step.        │
+//   │                      │              │ Does NOT apply to container_range genes. │
+//   │                      │              │ Typical range: [0.05, 0.30].            │
+//   │                      │              │ Increase if the search stagnates early;  │
+//   │                      │              │ decrease if good solutions are found but │
+//   │                      │              │ not refined.                             │
+//   ├──────────────────────┼──────────────┼──────────────────────────────────────────┤
+//   │ crossover_rate       │ 0.80         │ Probability that a child is produced by  │
+//   │                      │              │ recombining two parents rather than       │
+//   │                      │              │ cloning one.  Typical range: [0.6, 0.9]. │
+//   │                      │              │ Lower values shift the algorithm toward   │
+//   │                      │              │ a mutation-only hill climber.             │
+//   ├──────────────────────┼──────────────┼──────────────────────────────────────────┤
+//   │ tournament_size      │ 5            │ Number of candidates randomly drawn for  │
+//   │                      │              │ each parent selection.  Larger values     │
+//   │                      │              │ apply stronger selection pressure toward  │
+//   │                      │              │ the current best, reducing diversity.    │
+//   │                      │              │ Typical range: [2, 10].                  │
+//   │                      │              │ Use 2 for diverse, exploratory searches; │
+//   │                      │              │ use 7–10 to converge quickly when the    │
+//   │                      │              │ landscape is unimodal.                   │
+//   ├──────────────────────┼──────────────┼──────────────────────────────────────────┤
+//   │ elitism_fraction     │ 0.05         │ Fraction of population_size that is      │
+//   │                      │              │ carried forward unchanged each generation.│
+//   │                      │              │ At least 1 individual is always kept.    │
+//   │                      │              │ Typical range: [0.02, 0.15].             │
+//   │                      │              │ Higher values protect good solutions but  │
+//   │                      │              │ reduce effective population diversity.    │
+//   ├──────────────────────┼──────────────┼──────────────────────────────────────────┤
+//   │ memo_capacity        │ 1 048 576    │ Maximum number of entries in the         │
+//   │                      │              │ chromosome→fitness cache.  Set to 0 to   │
+//   │                      │              │ disable memoization.  Larger values       │
+//   │                      │              │ benefit expensive fitness functions with  │
+//   │                      │              │ many repeated chromosomes.  Each entry    │
+//   │                      │              │ uses approximately sizeof(chromosome) +   │
+//   │                      │              │ sizeof(fitness) + 16 bytes overhead.     │
+//   └──────────────────────┴──────────────┴──────────────────────────────────────────┘
+//
+// ============================================================================
+// STOPPING CRITERIA  (stopping_criteria)
+// ============================================================================
+//
+// Four independent criteria are evaluated inside the main loop after each
+// generation.  They are checked in the order: 3 → stagnation-update → 2 → 4 → 1,
+// chosen for performance and to prevent cataclysm from masking criterion 4.
+//
+// The external budget limits (deadline, max_tries) are checked by the loop
+// condition itself and always take precedence.
+//
+// ── Criterion 1 — Fitness Stagnation ─────────────────────────────────────
+//
+//   Fires when no improvement to the best fitness has been observed for a
+//   configurable number of consecutive generations.
+//
+//   ┌──────────────────────────────┬────────────┬───────────────────────────────────┐
+//   │ Field                        │ Default    │ Meaning                           │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ stagnation_fraction          │ 0.25       │ The stagnation limit is computed   │
+//   │                              │            │ as max(floor, fraction × max_tries)│
+//   │                              │            │ This means the search is allowed   │
+//   │                              │            │ to stagnate for up to 25% of its  │
+//   │                              │            │ total evaluation budget before     │
+//   │                              │            │ stopping.                          │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ stagnation_absolute_floor    │ 100        │ Minimum stagnation limit in        │
+//   │                              │            │ generations, regardless of         │
+//   │                              │            │ max_tries.  Prevents the criterion │
+//   │                              │            │ from firing too early when         │
+//   │                              │            │ max_tries is small.                │
+//   └──────────────────────────────┴────────────┴───────────────────────────────────┘
+//
+//   Tuning guidance
+//     • Increase stagnation_fraction (→ 0.40) for multi-modal landscapes
+//       where the algorithm must explore several basins before finding the
+//       global optimum.
+//     • Increase stagnation_absolute_floor when population_size is large:
+//       large populations take more generations to converge.
+//     • Cataclysm (criterion 2) resets the stagnation counter on firing,
+//       so the effective stagnation window restarts after each recovery event.
+//     • If max_tries is not set (unlimited), stagnation_fraction has no
+//       effect; only the floor applies.
+//
+// ── Criterion 2 — Population Diversity / Cataclysm ───────────────────────
+//
+//   Measures population diversity as unique_chromosomes / total_population,
+//   where uniqueness is determined by xxHash128 of the (optionally quantized)
+//   chromosome.  When diversity falls below the threshold, either a cataclysm
+//   is triggered (non-terminal) or the search stops (terminal).
+//
+//   ┌──────────────────────────────┬────────────┬───────────────────────────────────┐
+//   │ Field                        │ Default    │ Meaning                           │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ diversity_threshold          │ 0.05       │ Fraction below which the          │
+//   │                              │            │ population is considered collapsed.│
+//   │                              │            │ 0.05 means >95% of individuals    │
+//   │                              │            │ are identical.                    │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ cataclysm_enabled            │ true       │ When true: trigger a cataclysm    │
+//   │                              │            │ event and continue.  When false:  │
+//   │                              │            │ stop immediately.                 │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ cataclysm_survival_fraction  │ 0.10       │ Fraction of population that       │
+//   │                              │            │ survives a cataclysm event.       │
+//   │                              │            │ The top fraction × population_size │
+//   │                              │            │ individuals are kept; all others   │
+//   │                              │            │ are replaced with random           │
+//   │                              │            │ chromosomes.                      │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ max_cataclysm_count          │ SIZE_MAX   │ Maximum number of cataclysm events│
+//   │                              │            │ before a diversity collapse        │
+//   │                              │            │ terminates the search.  SIZE_MAX  │
+//   │                              │            │ means unlimited (previous default  │
+//   │                              │            │ behaviour).                        │
+//   └──────────────────────────────┴────────────┴───────────────────────────────────┘
+//
+//   Tuning guidance
+//     • Lower diversity_threshold (→ 0.01) if cataclysm fires too often on
+//       a landscape that naturally converges to a narrow valley.
+//     • Raise diversity_threshold (→ 0.15) to trigger recovery earlier,
+//       at the cost of more aggressive disruption.
+//     • Reduce cataclysm_survival_fraction (→ 0.05) for highly multi-modal
+//       landscapes where a fresh start is preferable.  Increase it (→ 0.20)
+//       to preserve more accumulated structure.
+//     • Set max_cataclysm_count to a small number (3–5) when the time budget
+//       is tight and infinite looping is undesirable.
+//     • diversity_epsilon on float wrappers directly affects this metric.
+//       Without it, two chromosomes that differ by a tiny float rounding
+//       error count as distinct, inflating diversity to 1.0 and preventing
+//       the criterion from ever firing.
+//
+// ── Criterion 3 — Target Fitness ─────────────────────────────────────────
+//
+//   Fires immediately when the best individual's fitness reaches or surpasses
+//   a known target.  This is the most definitive terminator and is evaluated
+//   first in the loop.
+//
+//   Configured via:
+//
+//     opt.target_fitness = 1e-8;   // stop when best fitness ≤ 1e-8 (minimising)
+//
+//   When set, criterion 4 (elite convergence) is suppressed while the target
+//   has not yet been reached.  This prevents a premature stop on a fitness
+//   plateau that has not reached the known optimum.
+//
+//   Tuning guidance
+//     • Set target_fitness whenever a known optimum exists (e.g., zero for
+//       an error minimization problem).  The search will stop as soon as it
+//       is reached rather than running to the deadline.
+//     • Leave unset when no target is known; the other criteria govern
+//       termination.
+//     • target_fitness uses the same CompareFn as the optimizer.  For
+//       minimization (std::less), the criterion fires when
+//       best_fitness ≤ target.  For maximization (std::greater), it fires
+//       when best_fitness ≥ target.
+//
+// ── Criterion 4 — Elite Convergence ──────────────────────────────────────
+//
+//   Monitors the normalized gap between the single best individual and the
+//   mean fitness of the top elite_convergence_fraction of the population:
+//
+//       gap = |mean_elite − best| / (|best| + elite_convergence_guard)
+//
+//   When gap < elite_convergence_epsilon the elite has converged.  Rather
+//   than stopping immediately, up to max_elite_perturbation_count recovery
+//   events are allowed: all elite slots except the single best are replaced
+//   with fresh random chromosomes, giving the search a chance to escape a
+//   local basin.  Only after the perturbation budget is exhausted does the
+//   criterion terminate the search.
+//
+//   Only available when the fitness type is arithmetic (int, float, double).
+//
+//   ┌──────────────────────────────┬────────────┬───────────────────────────────────┐
+//   │ Field                        │ Default    │ Meaning                           │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ elite_convergence_fraction   │ 0.10       │ Top fraction of the population    │
+//   │                              │            │ that forms the "elite group" for  │
+//   │                              │            │ the gap calculation.              │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ elite_convergence_epsilon    │ 1e-6       │ Normalized gap threshold below    │
+//   │                              │            │ which convergence is declared.    │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ elite_convergence_guard      │ 1e-12      │ Added to the denominator to       │
+//   │                              │            │ prevent division by zero when     │
+//   │                              │            │ best == 0.                        │
+//   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
+//   │ max_elite_perturbation_count │ 1          │ Number of elite-perturbation      │
+//   │                              │            │ recovery attempts before the      │
+//   │                              │            │ criterion becomes terminal.       │
+//   │                              │            │ 0 restores immediate-stop         │
+//   │                              │            │ behaviour.  SIZE_MAX means the    │
+//   │                              │            │ criterion can never terminate the  │
+//   │                              │            │ search (rely on stagnation or     │
+//   │                              │            │ deadline instead).                │
+//   └──────────────────────────────┴────────────┴───────────────────────────────────┘
+//
+//   Tuning guidance
+//     • Tighten elite_convergence_epsilon (→ 1e-10) when very precise
+//       convergence is needed and the fitness function is smooth.
+//     • Loosen it (→ 1e-4) for noisy fitness functions where the elite
+//       never truly agrees but the search has effectively converged.
+//     • Increase max_elite_perturbation_count (→ 3–5) for rugged landscapes
+//       with many local optima.  Each perturbation costs approximately
+//       elite_n fitness evaluations.
+//     • Set max_elite_perturbation_count = SIZE_MAX and rely on the
+//       stagnation criterion (1) for final termination when the landscape
+//       is poorly understood.
+//
+// ============================================================================
+// STOPPING CRITERION EVALUATION ORDER AND INTERACTIONS
+// ============================================================================
+//
+//  Runtime evaluation order inside should_stop_or_cataclysm():
+//
+//    1. Criterion 3 (target) — most definitive; exit immediately if met.
+//    2. Stagnation counter update — must run after criterion 3 so the winning
+//       generation does not inflate the counter.
+//    3. Criterion 2 (diversity / cataclysm) — must run before criterion 4 to
+//       prevent a collapsed population from generating a false elite-converged
+//       signal.
+//    4. Criterion 4 (elite convergence) — only meaningful when the population
+//       is still diverse.  Suppressed while criterion 3 is pending.
+//    5. Criterion 1 (stagnation) — cheapest (O(1) counter check); runs last.
+//
+//  External budget checks (loop condition):
+//    - deadline: clock::now() >= deadline
+//    - max_tries: total_eval_requests >= max_tries
+//
+//  Non-terminal stop_reason values (search continues after these):
+//    - stop_reason::cataclysm          — diversity recovery triggered
+//    - stop_reason::elite_perturbation — elite recovery triggered
+//
+//  Terminal stop_reason values:
+//    - stop_reason::deadline, max_tries, stagnation, diversity,
+//      target_reached, elite_converged
+//
+// ============================================================================
+// OPTIMIZE() — PUBLIC API
+// ============================================================================
+//
+//  Single-threaded overload:
+//
+//    auto [stats, history] = opt.optimize(
+//        std::chrono::seconds(10),   // wall-clock budget
+//        200,                         // population_size
+//        50,                          // max_history  (default: unlimited)
+//        100'000);                    // max_tries    (default: unlimited)
+//
+//  Multi-threaded overload (thread pool must expose a callable operator()(fn)):
+//
+//    auto [stats, history] = opt.optimize(
+//        thread_pool,
+//        std::chrono::seconds(10),
+//        200,
+//        50,
+//        100'000);
+//
+//    Parallelism covers both fitness evaluation and offspring breeding.
+//    Each worker thread uses its own per-thread RNG (detail::thread_rng()),
+//    seeded from std::random_device XOR std::hash<std::thread::id>.  No
+//    shared mutable RNG state exists between worker threads.
+//
+//  Parameters
+//    duration          Time budget.  The optimizer will not start a new
+//                      generation after this deadline, but an in-progress
+//                      generation will complete.
+//    population_size   Number of individuals.  Typical range: 50–500.
+//                      Larger populations improve exploration at the cost of
+//                      more fitness evaluations per generation.
+//    max_history       Maximum number of distinct best chromosomes retained
+//                      in the returned history.  Default: unlimited.
+//    max_tries         Maximum total fitness evaluations (including cache
+//                      misses only; cache hits do not count).  Default:
+//                      unlimited.
+//
+//  Return value
+//    std::pair<optimization_stats, optimization_history<...>>
+//    The history is a snapshot taken at the end of the run and is safe to
+//    use after the optimizer object is destroyed.
+//
+// ── Warm restart ──────────────────────────────────────────────────────────
+//
+//   Call optimize() multiple times on the same object to continue from the
+//   current population:
+//
+//     opt.optimize(5s, 200);   // first run
+//     opt.config.mutation_rate = 0.05;
+//     opt.optimize(5s, 200);   // refine with lower mutation
+//
+//   The memo table persists across calls, so previously evaluated chromosomes
+//   are never re-evaluated.
+//
+//   soft_reset()  — clears population, stats, and history; keeps memo table.
+//   clear()       — full reset including the memo table.
+//
+// ── Thread safety ─────────────────────────────────────────────────────────
+//
+//   optimize() is NOT re-entrant.  Call it from one thread at a time.
+//   report() IS safe to call concurrently with optimize() (two separate
+//   mutexes, one for stats, one for history).  The snapshot may be one
+//   generation stale.
+//
+// ============================================================================
+// POPULATION SIZING GUIDELINES
+// ============================================================================
+//
+//   The optimal population size depends on the number of parameters, the
+//   complexity of the landscape, and the available evaluation budget.
+//
+//     # parameters    Suggested population_size
+//     ────────────    ─────────────────────────
+//     1–3             30 – 80
+//     4–10            80 – 200
+//     11–30           200 – 500
+//     > 30            500+, or consider container_range
+//
+//   As a rule of thumb, aim for at least 5–10× the number of parameters.
+//   Very cheap fitness functions can afford large populations; expensive ones
+//   should use smaller populations with more generations.
+//
+// ============================================================================
+// MEMOIZATION
+// ============================================================================
+//
+//   The memo table caches fitness(chromosome) → target across all calls to
+//   evaluate_chromosome().  It is implemented as a sharded lock-free hash map
+//   with 128 shards and xxHash128 keys.  Collisions are resolved by full-key
+//   equality; false cache hits are not possible.
+//
+//   The memo table is NOT serialized.  After loading a serialized optimizer
+//   the first optimize() call will re-evaluate the entire population.
+//
+//   The cache-hit rate reported by optimization_stats is computed as
+//   (total_eval_requests − actual_fn_calls) / total_eval_requests.
+//   A high hit rate (> 50%) indicates that population_size is large relative
+//   to the search space's effective dimensionality, or that the mutation rate
+//   is low enough for many children to re-discover previously seen chromosomes.
+//
+// ============================================================================
+// SERIALIZATION
+// ============================================================================
+//
+//   All configuration, statistics, history, and the live population are
+//   serialized.  The memo table is intentionally excluded (its layout depends
+//   on memo_capacity and hardware) and is cleared on load.
+//
+//   The serialize() method follows the "passive archive" pattern:
+//
+//     auto archive = my_archive_writer{};
+//     opt.serialize(archive);
+//
+//   The archive callable receives each field by reference.  Both reading
+//   and writing are dispatched through the same method; the distinction is
+//   made by the archive type.
+//
+// ============================================================================
+// COMPLETE USAGE EXAMPLE
+// ============================================================================
+//
+//   // Minimize f(a, b, x, y) = (a−2)² + (b+1)² + x² + y²
+//   // Known optimum: f(2, −1, 0, 0) = 0.
+//
+//   auto opt = make_optimizer(
+//       [](int a, int b, double x, double y) {
+//           return std::pow(a-2, 2) + std::pow(b+1, 2) + x*x + y*y;
+//       },
+//       std::less<double>{},               // minimise
+//       min_max_value_range<int>  { 0, 10 },
+//       min_max_value_range<int>  { -10, 10 },
+//       min_max_value_range<double>{ -10.0, 10.0,
+//                                    /*sigma_frac=*/0.10,
+//                                    /*eta=*/2.0,
+//                                    /*diversity_epsilon=*/1e-4 },
+//       min_max_value_range<double>{ -10.0, 10.0, 0.10, 2.0, 1e-4 }
+//   );
+//
+//   // Configure stopping criteria
+//   opt.target_fitness = 1e-10;
+//   opt.stop_criteria.stagnation_absolute_floor     = 150;
+//   opt.stop_criteria.diversity_threshold            = 0.05;
+//   opt.stop_criteria.cataclysm_survival_fraction   = 0.10;
+//   opt.stop_criteria.max_cataclysm_count           = 5;
+//   opt.stop_criteria.elite_convergence_epsilon      = 1e-10;
+//   opt.stop_criteria.max_elite_perturbation_count  = 3;
+//
+//   // Configure GA behaviour
+//   opt.config.mutation_rate     = 0.15;
+//   opt.config.crossover_rate    = 0.80;
+//   opt.config.tournament_size   = 5;
+//   opt.config.elitism_fraction  = 0.05;
+//   opt.config.memo_capacity     = 1u << 20;
+//
+//   // Run (single-threaded, 5-second budget, pop 200, keep 20 best results)
+//   auto [stats, history] = opt.optimize(std::chrono::seconds(5), 200, 20);
+//
+//   // Inspect results
+//   opt.report(std::cout);
+//
+//   if (!history.empty()) {
+//       auto [fitness, chromosome] = history.best();
+//       auto [a, b, x, y] = chromosome;
+//       std::cout << "Best: f(" << a << ", " << b << ", "
+//                 << x << ", " << y << ") = " << fitness << "\n";
+//   }
+//
+// ============================================================================
 namespace gb::yadro::algorithm::conv {
     // conventional implementation of genetic algorithm
 
