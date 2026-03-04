@@ -1231,8 +1231,31 @@ namespace gb::yadro::algorithm::conv {
             double diversity_epsilon = 0.)
             // make sure min_value <= max_value, swap if not
             : min_value(std::min(min_value, max_value)), max_value(std::max(min_value, max_value)), 
-            mutation_sigma_frac(mutation_sigma_frac), eta(eta), diversity_epsilon(diversity_epsilon)
+            mutation_sigma_frac(mutation_sigma_frac), eta(eta), diversity_epsilon(diversity_epsilon),
+            normal_dist{ 0.0, static_cast<double>(this->max_value - this->min_value) * mutation_sigma_frac }
         {
+            if (mutation_sigma_frac <= 0.0 || mutation_sigma_frac > 1.0)
+                throw std::invalid_argument("mutation_sigma_frac must be in the range (0, 1)");
+            if (eta <= 0.0)
+                throw std::invalid_argument("eta must be positive");
+            if (diversity_epsilon < 0.0 || diversity_epsilon >(max_value - min_value))
+                throw std::invalid_argument("diversity_epsilon must be in the range (0, max_value - min_value)");
+        }
+
+        auto& set_mutation_parameters(double mutation_sigma_frac, double eta, double diversity_epsilon)
+        {
+            if (mutation_sigma_frac <= 0.0 || mutation_sigma_frac > 1.0)
+                throw std::invalid_argument("mutation_sigma_frac must be in the range (0, 1)");
+            if (eta <= 0.0)
+                throw std::invalid_argument("eta must be positive");
+            if (diversity_epsilon < 0.0 || diversity_epsilon >(max_value - min_value))
+                throw std::invalid_argument("diversity_epsilon must be in the range (0, max_value - min_value)");
+
+            this->mutation_sigma_frac = mutation_sigma_frac;
+            this->eta = eta;
+            this->diversity_epsilon = diversity_epsilon;
+            normal_dist = std::normal_distribution<double>{ 0.0, static_cast<double>(max_value - min_value) * mutation_sigma_frac };
+            return *this;
         }
 
         template<typename RNG>
@@ -1248,7 +1271,7 @@ namespace gb::yadro::algorithm::conv {
         {
             if constexpr (std::is_integral_v<T>)
             {
-                if (std::uniform_real_distribution<double>{0.0, 1.0}(rng) < 0.1)
+                if (real_flip(rng) < 0.1)
                     return random_value(rng);
                 
                 // TODO: must check for overflow and narrowing conversions when T is unsigned
@@ -1266,9 +1289,7 @@ namespace gb::yadro::algorithm::conv {
             }
             else
             {
-                double sigma = static_cast<double>(max_value - min_value) * mutation_sigma_frac;
-                T result = value + static_cast<T>(
-                    std::normal_distribution<double>{0.0, sigma}(rng));
+                T result = value + static_cast<T>(normal_dist(rng));
                 return std::clamp(result, min_value, max_value);
             }
         }
@@ -1278,7 +1299,7 @@ namespace gb::yadro::algorithm::conv {
             if constexpr (std::is_floating_point_v<T>) {
                 // Precompute the shared exponent to avoid calling pow twice.
                 const double inv_eta1 = 1.0 / (eta + 1.0);
-                double u = std::uniform_real_distribution<double>{ 0.0, 1.0 }(rng);
+                double u = real_flip(rng);
                 double beta = (u <= 0.5) ? std::pow(2.0 * u, inv_eta1)
                     : std::pow(0.5 / (1.0 - u), inv_eta1);
                 // SBX produces two complementary children:
@@ -1318,6 +1339,9 @@ namespace gb::yadro::algorithm::conv {
                 self.diversity_epsilon
             );
         }
+        private:
+            mutable std::normal_distribution<double> normal_dist;
+            mutable std::uniform_real_distribution<double> real_flip{ 0.0, 1.0 };
     };
 
     // -----------------------------------------------------------------------------
@@ -1327,7 +1351,6 @@ namespace gb::yadro::algorithm::conv {
         requires std::is_arithmetic_v<T>
     struct discrete_value_range {
         using value_type = T;
-        std::vector<T> allowed_values; // sorted, unique, non-empty
 
         discrete_value_range() = default;
         explicit discrete_value_range(std::vector<T> vals)
@@ -1335,28 +1358,40 @@ namespace gb::yadro::algorithm::conv {
             normalize();
         }
 
+        auto& set_mutation_params(double local_mutation_prob, int local_mutation_radius) {
+            this->local_mutation_prob = local_mutation_prob;
+            this->local_mutation_radius = local_mutation_radius;
+            return *this;
+        }
+
+        auto& get_allowed_values() const noexcept { return allowed_values; }
+        auto& get_value(std::size_t index) const { return allowed_values[index]; }
+        auto size() const noexcept { return allowed_values.size(); }
+
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
-            size_t i = std::uniform_int_distribution<size_t>{ 0, allowed_values.size() - 1 }(rng);
+            size_t i = std::uniform_int_distribution<size_t>{ 0, allowed_values.size() - 1 }(rng);  
             return allowed_values[i];
         }
 
         template<typename RNG>
         [[nodiscard]] T mutate(T value, RNG& rng) const {
-            double p = std::uniform_real_distribution<double>{ 0.0, 1.0 }(rng);
-            if (p < 0.70) {   // 70% local creep, 30% random reset
+            std::bernoulli_distribution creep(local_mutation_prob);
+            if (creep(rng)) {   // 70% local creep, 30% random reset
                 auto it = std::ranges::lower_bound(allowed_values, value);
-                auto idx = static_cast<int>(it - allowed_values.begin());
-                int  d = std::uniform_int_distribution<int>{ -2, 2 }(rng);
-                int  ni = std::clamp(idx + d, 0, static_cast<int>(allowed_values.size()) - 1);
-                return allowed_values[static_cast<size_t>(ni)];
+                auto idx = std::distance(allowed_values.begin(), it);
+                auto  offset = std::uniform_int_distribution<std::ptrdiff_t>{ -local_mutation_radius, local_mutation_radius }(rng);
+                auto  ni = std::clamp(static_cast<std::size_t>(static_cast<std::ptrdiff_t>(idx) + offset),
+                    std::size_t{ 0 }, allowed_values.size() - 1);
+                return allowed_values[ni];
             }
             return random_value(rng);
         }
 
         template<typename RNG>
         [[nodiscard]] T crossover(T a, T b, RNG& rng) const {
-            return std::uniform_int_distribution<int>{0, 1}(rng) ? a : b;
+            static thread_local std::bernoulli_distribution dist(0.5);
+            return dist(rng) ? a : b;
         }
 
         /// Discrete values are already exact — no quantization needed.
@@ -1370,6 +1405,10 @@ namespace gb::yadro::algorithm::conv {
         }
 
     private:
+        std::vector<T> allowed_values; // sorted, unique, non-empty
+        double local_mutation_prob = 0.70; // probability of local creep vs random reset
+        int local_mutation_radius = 2; // max index distance for local creep
+
         void normalize() {
             if (allowed_values.empty())
                 throw std::invalid_argument("discrete_value_range: allowed_values must not be empty");
@@ -2050,12 +2089,12 @@ namespace gb::yadro::algorithm::conv {
             os << std::left << std::setw(10) << (std::is_floating_point_v<T> ? "float" : "int")
                 << "  discrete     {";
             constexpr size_t kMaxShow = 6;
-            for (size_t i = 0; i < std::min(w.allowed_values.size(), kMaxShow); ++i) {
+            for (size_t i = 0; i < std::min(w.size(), kMaxShow); ++i) {
                 if (i > 0) os << ", ";
-                os << w.allowed_values[i];
+                os << w.get_value(i);
             }
-            if (w.allowed_values.size() > kMaxShow) os << ", ...";
-            os << "}  (" << w.allowed_values.size() << " values)";
+            if (w.size() > kMaxShow) os << ", ...";
+            os << "}  (" << w.size() << " values)";
         }
 
         template<typename Container, typename ElementWrapper>
