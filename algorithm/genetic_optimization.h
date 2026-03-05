@@ -41,6 +41,10 @@
 #include <utility>
 #include <optional>
 #include <filesystem>
+#include <limits>
+#include <stdexcept>
+#include <concepts>
+#include <type_traits>  
 
 #include "../util/gbutil.h"
 #include "../util/hash_util.h"
@@ -1212,51 +1216,48 @@ namespace gb::yadro::algorithm::conv {
     //     Integers: uniform crossover + bounded random-walk mutation.
     // -----------------------------------------------------------------------------
     template<typename T>
-        requires std::is_arithmetic_v<T>
+        requires (std::is_arithmetic_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>)
     struct min_max_value_range {
         using value_type = T;
+        // Default for the probability of replacing an integer gene with a random value. 
+        static constexpr double default_mutation_sigma_frac = 0.15;
+        static constexpr double default_eta = 2.0;
+        static constexpr double default_diversity_epsilon = 0.0;
+        static constexpr double default_random_reset_prob = 0.1;
 
-        T      min_value;
-        T      max_value;
-        double mutation_sigma_frac;
-        double eta;   ///< SBX distribution index (float crossover only)
-        /// Grid resolution used by measure_diversity() to decide whether two
-        /// chromosomes are "the same".  0.0 (default) means exact comparison,
-        /// which preserves the previous behaviour.  For floating-point genes a
-        /// value such as 1e-4 prevents near-duplicate individuals from counting
-        /// as distinct and causing premature cataclysm suppression.
-        double diversity_epsilon;
-
-        min_max_value_range(T min_value, T max_value, double mutation_sigma_frac = 0.15, double eta = 2,
-            double diversity_epsilon = 0.)
-            // make sure min_value <= max_value, swap if not
-            : min_value(std::min(min_value, max_value)), max_value(std::max(min_value, max_value)), 
-            mutation_sigma_frac(mutation_sigma_frac), eta(eta), diversity_epsilon(diversity_epsilon),
-            normal_dist{ 0.0, static_cast<double>(this->max_value - this->min_value) * mutation_sigma_frac }
+        min_max_value_range(T min_value, T max_value,
+            double mutation_sigma_frac = default_mutation_sigma_frac,
+            double eta = default_eta,
+            double diversity_epsilon = default_diversity_epsilon,
+            double random_reset_prob = default_random_reset_prob)
+            : min_value(std::min(min_value, max_value)),
+            max_value(std::max(min_value, max_value)),
+            mutation_sigma_frac(mutation_sigma_frac),
+            eta(eta),
+            diversity_epsilon(diversity_epsilon),
+            random_reset_prob(random_reset_prob)
         {
-            if (mutation_sigma_frac <= 0.0 || mutation_sigma_frac > 1.0)
-                throw std::invalid_argument("mutation_sigma_frac must be in the range (0, 1)");
-            if (eta <= 0.0)
-                throw std::invalid_argument("eta must be positive");
-            if (diversity_epsilon < 0.0 || diversity_epsilon >(max_value - min_value))
-                throw std::invalid_argument("diversity_epsilon must be in the range (0, max_value - min_value)");
+            validate_params(this->mutation_sigma_frac, this->eta, this->diversity_epsilon, this->random_reset_prob);
         }
 
-        auto& set_mutation_parameters(double mutation_sigma_frac, double eta, double diversity_epsilon)
+        auto& set_mutation_parameters(double mutation_sigma_frac = default_mutation_sigma_frac,
+            double eta = default_eta,
+            double diversity_epsilon = default_diversity_epsilon,
+            double random_reset_prob = default_random_reset_prob) 
         {
-            if (mutation_sigma_frac <= 0.0 || mutation_sigma_frac > 1.0)
-                throw std::invalid_argument("mutation_sigma_frac must be in the range (0, 1)");
-            if (eta <= 0.0)
-                throw std::invalid_argument("eta must be positive");
-            if (diversity_epsilon < 0.0 || diversity_epsilon >(max_value - min_value))
-                throw std::invalid_argument("diversity_epsilon must be in the range (0, max_value - min_value)");
-
+            validate_params(mutation_sigma_frac, eta, diversity_epsilon, random_reset_prob);
             this->mutation_sigma_frac = mutation_sigma_frac;
             this->eta = eta;
             this->diversity_epsilon = diversity_epsilon;
-            normal_dist = std::normal_distribution<double>{ 0.0, static_cast<double>(max_value - min_value) * mutation_sigma_frac };
+            this->random_reset_prob = random_reset_prob;
             return *this;
         }
+
+        [[nodiscard]] auto get_min_value() const noexcept { return min_value; }
+        [[nodiscard]] auto get_max_value() const noexcept { return max_value; }
+        [[nodiscard]] auto get_mutation_sigma_frac() const noexcept { return mutation_sigma_frac; }
+        [[nodiscard]] auto get_eta() const noexcept { return eta; }
+        [[nodiscard]] auto get_diversity_epsilon() const noexcept { return diversity_epsilon; }
 
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
@@ -1269,27 +1270,65 @@ namespace gb::yadro::algorithm::conv {
         template<typename RNG>
         [[nodiscard]] T mutate(T value, RNG& rng) const
         {
+            if (min_value == max_value) return min_value;
+
             if constexpr (std::is_integral_v<T>)
             {
-                if (real_flip(rng) < 0.1)
-                    return random_value(rng);
-                
-                // TODO: must check for overflow and narrowing conversions when T is unsigned
-                using Wide = int64_t;
-                Wide minv = static_cast<Wide>(min_value);
-                Wide maxv = static_cast<Wide>(max_value);
-                Wide val = static_cast<Wide>(value);
-                Wide span = maxv - minv;
-                Wide step_hi = span / 10;
-                step_hi |= (step_hi == 0);
+                static_assert(sizeof(T) <= sizeof(std::uint64_t), "integral types wider than 64-bit are not supported");
 
-                Wide delta = std::uniform_int_distribution<Wide>(-step_hi, step_hi)(rng);
-                Wide result = std::clamp(val + delta, minv, maxv);
-                return static_cast<T>(result);
+                if (std::bernoulli_distribution{ random_reset_prob }(rng)) return random_value(rng);
+
+                if constexpr (std::is_unsigned_v<T>) {
+                    using U = std::make_unsigned_t<T>;
+                    const U minv = min_value, maxv = max_value;
+                    const U val = std::clamp(value, min_value, max_value);
+                    const U span = maxv - minv;
+
+                    U step_hi = span / U{ 10 };
+                    if (step_hi == 0) step_hi = 1;
+
+                    const U step = std::uniform_int_distribution<U>(0, step_hi)(rng);
+                    if (std::bernoulli_distribution(0.5)(rng)) {
+                        const U room = maxv - val;
+                        return static_cast<T>(step > room ? maxv : static_cast<U>(val + step));
+                    }
+                    else {
+                        const U room = val - minv;
+                        return static_cast<T>(step > room ? minv : static_cast<U>(val - step));
+                    }
+                }
+                else {
+                    using S = std::int64_t;
+                    using U = std::uint64_t;
+
+                    const S minv = static_cast<S>(min_value);
+                    const S maxv = static_cast<S>(max_value);
+                    const S val_s = static_cast<S>(std::clamp(value, min_value, max_value));
+
+                    // Compute signed difference first to avoid unsigned underflow
+                    const S diff = maxv - minv;           // non-negative by construction
+                    const U span = static_cast<U>(diff);
+
+                    U step_hi_u = span / U{ 10 };
+                    if (step_hi_u == 0) step_hi_u = 1;
+                    // limit to S max to safely cast to S later
+                    step_hi_u = std::min(step_hi_u, static_cast<U>(std::numeric_limits<S>::max()));
+
+                    const S step = std::uniform_int_distribution<S>(0, static_cast<S>(step_hi_u))(rng);
+                    if (std::bernoulli_distribution(0.5)(rng)) {
+                        const U room = static_cast<U>(maxv - val_s);
+                        return static_cast<T>(static_cast<U>(step) > room ? maxv : static_cast<S>(val_s + step));
+                    }
+                    else {
+                        const U room = static_cast<U>(val_s - minv);
+                        return static_cast<T>(static_cast<U>(step) > room ? minv : static_cast<S>(val_s - step));
+                    }
+                }
             }
             else
             {
-                T result = value + static_cast<T>(normal_dist(rng));
+                auto span = static_cast<double>(max_value) - static_cast<double>(min_value);
+                T result = value + static_cast<T>(std::normal_distribution<double>{ 0.0, span* mutation_sigma_frac}(rng));
                 return std::clamp(result, min_value, max_value);
             }
         }
@@ -1299,7 +1338,7 @@ namespace gb::yadro::algorithm::conv {
             if constexpr (std::is_floating_point_v<T>) {
                 // Precompute the shared exponent to avoid calling pow twice.
                 const double inv_eta1 = 1.0 / (eta + 1.0);
-                double u = real_flip(rng);
+                double u = std::uniform_real_distribution<double>{ 0.0, 1.0 }(rng);
                 double beta = (u <= 0.5) ? std::pow(2.0 * u, inv_eta1)
                     : std::pow(0.5 / (1.0 - u), inv_eta1);
                 // SBX produces two complementary children:
@@ -1307,24 +1346,28 @@ namespace gb::yadro::algorithm::conv {
                 //   c2 = 0.5*((1-β)a + (1+β)b)
                 // Returning only c1 introduces a directional bias when a ≠ b.
                 // Pick one at random so the operator is symmetric.
-                double child = std::uniform_int_distribution<int>{ 0, 1 }(rng)
+                double child = std::bernoulli_distribution(0.5)(rng)
                     ? 0.5 * ((1.0 + beta) * a + (1.0 - beta) * b)
                     : 0.5 * ((1.0 - beta) * a + (1.0 + beta) * b);
                 return std::clamp(static_cast<T>(child), min_value, max_value);
             }
             else {
-                return std::uniform_int_distribution<int>{0, 1}(rng) ? a : b;
+                return std::bernoulli_distribution(0.5)(rng) ? a : b;
             }
         }
 
-        /// Snap a gene value to the nearest diversity grid point.
-        /// Called by measure_diversity() via the detail::quantize_gene helper.
+        // Snap a gene value to the nearest diversity grid point.
+        // Called by measure_diversity() via the detail::quantize_gene helper.
         [[nodiscard]] T quantize_for_diversity(T value) const noexcept {
             if constexpr (std::is_floating_point_v<T>) {
                 if (diversity_epsilon > 0.0)
-                    return static_cast<T>(
-                        std::round(static_cast<double>(value) / diversity_epsilon)
-                        * diversity_epsilon);
+                {
+                    const double base = static_cast<double>(min_value);
+                    const double x = static_cast<double>(value);
+                    const double snapped =
+                        base + std::round((x - base) / diversity_epsilon) * diversity_epsilon;
+                    return std::clamp(static_cast<T>(snapped), min_value, max_value);
+                }
             }
             return value;
         }
@@ -1338,10 +1381,40 @@ namespace gb::yadro::algorithm::conv {
                 self.eta,
                 self.diversity_epsilon
             );
+
+            if (gb::yadro::archive::is_iarchive_v<decltype(archive)>)
+            {
+                // only when loading do we need to validate, since the constructor already does that
+                self.validate_params(self.mutation_sigma_frac, self.eta, self.diversity_epsilon);
+            }
         }
+
         private:
-            mutable std::normal_distribution<double> normal_dist;
-            mutable std::uniform_real_distribution<double> real_flip{ 0.0, 1.0 };
+            T      min_value;
+            T      max_value;
+            double mutation_sigma_frac;
+            double eta;   ///< SBX distribution index (float crossover only)
+            /// Grid resolution used by measure_diversity() to decide whether two
+            /// chromosomes are "the same".  0.0 (default) means exact comparison,
+            /// which preserves the previous behaviour.  For floating-point genes a
+            /// value such as 1e-4 prevents near-duplicate individuals from counting
+            /// as distinct and causing premature cataclysm suppression.
+            double diversity_epsilon;
+            /// Probability of replacing an integer gene with a uniformly random value. 
+            double random_reset_prob;
+
+            constexpr void validate_params(double sigma, double eta_in, double eps, double reset_prob) const {
+                const double span =
+                    static_cast<double>(max_value) - static_cast<double>(min_value);
+                if (sigma < 0.0 || sigma > 1.0)
+                    throw std::invalid_argument("mutation_sigma_frac must be in the range [0, 1]");
+                if (eta_in <= 0.0)
+                    throw std::invalid_argument("eta must be positive");
+                if (eps < 0.0 || eps > span)
+                    throw std::invalid_argument("diversity_epsilon must be in the range [0, max_value - min_value]");
+                if (reset_prob < 0.0 || reset_prob > 1.0) 
+                    throw std::invalid_argument("random_reset_prob must be in the range [0, 1]");
+            }
     };
 
     // -----------------------------------------------------------------------------
@@ -1456,6 +1529,8 @@ namespace gb::yadro::algorithm::conv {
         container_range(size_t container_size, ElementWrapper element_wrapper, double per_element_mut_prob = -1.0)
             : container_size(container_size), element_wrapper(std::move(element_wrapper)), per_element_mut_prob(per_element_mut_prob) {
         }
+        
+        auto get_container_size() const noexcept { return container_size; }
 
         template<typename RNG>
         [[nodiscard]] value_type random_value(RNG& rng) const {
@@ -2068,18 +2143,18 @@ namespace gb::yadro::algorithm::conv {
             if constexpr (std::is_floating_point_v<T>) {
                 os << std::setw(10) << "float"
                     << "  continuous   ["
-                    << std::fixed << std::setprecision(4) << std::setw(10) << w.min_value
+                    << std::fixed << std::setprecision(4) << std::setw(10) << w.get_min_value()
                     << ", "
-                    << std::fixed << std::setprecision(4) << std::setw(10) << w.max_value
-                    << "]  sigma_frac=" << std::fixed << std::setprecision(3) << w.mutation_sigma_frac
-                    << "  eta=" << std::fixed << std::setprecision(2) << w.eta;
+                    << std::fixed << std::setprecision(4) << std::setw(10) << w.get_max_value()
+                    << "]  sigma_frac=" << std::fixed << std::setprecision(3) << w.get_mutation_sigma_frac()
+                    << "  eta=" << std::fixed << std::setprecision(2) << w.get_eta();
             }
             else {
                 os << std::setw(10) << "int"
                     << "  continuous   ["
-                    << std::setw(10) << w.min_value
+                    << std::setw(10) << w.get_min_value()
                     << ", "
-                    << std::setw(10) << w.max_value
+                    << std::setw(10) << w.get_max_value()
                     << "]";
             }
         }
@@ -2111,9 +2186,9 @@ namespace gb::yadro::algorithm::conv {
         }
 
         template<GeneticWrapper W>
-            requires (!requires { W::min_value; })
-        && (!requires { W::allowed_values; })
-            && (!requires { W::container_size; })
+            requires (!requires { std::declval<const W>().get_min_value; })
+        && (!requires { std::declval<const W>().get_allowed_values; })
+            && (!requires { std::declval<const W>().get_container_size; })
             void describe_wrapper(const W&, std::ostream& os) {
             os << "(custom wrapper)";
         }
