@@ -76,7 +76,7 @@ namespace
         conv::genetic_optimization_t opt([&](auto x, auto y, auto z, auto v)
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
             std::less<double>{},
-            min_max_value_range<unsigned>{0, 10},
+            discrete_value_range<int>({0, -1, 1, -2, 2, 3, 4, 10}).set_mutation_params(0.7, 2),
             min_max_value_range<std::int64_t>{-10, 10},
             min_max_value_range<float>{-10, 10},
             min_max_value_range<double>{-10, 10}
@@ -92,7 +92,7 @@ namespace
         opt.stop_criteria.cataclysm_enabled = true;
         opt.stop_criteria.cataclysm_survival_fraction = 0.15;
 
-        // Criterion 3: known optimum (Rosenbrock min is 0.0 at (1,1))
+        // Criterion 3: known optimum
         opt.target_fitness = 1e-15;
 
         // Criterion 4: elite convergence
@@ -113,7 +113,7 @@ namespace
 #endif
         // second optimization run to test history and stopping criteria
         auto [stats, history] = opt.optimize(
-            /* time budget */    20ms,
+            /* time budget */    10ms,
             /*population_size=*/ 100,
             /*max_history=*/     5
         );
@@ -124,6 +124,73 @@ namespace
 #if defined(NDEBUG)
         gbassert(history.size() == 5);
         gbassert(history.best().first <= opt.target_fitness);
+#endif
+        // serialize to memory archive
+        gb::yadro::archive::omem_archive<> oma;
+        oma(opt);
+        opt.soft_reset();
+        // deserialize from memory archive
+        gb::yadro::archive::imem_archive ima(std::move(oma));
+        ima(opt);
+        std::stringstream restored_report_stream;
+        gbassert(stats == opt.stats());
+    }
+
+    GB_TEST(algorithm, genetic_optimization_test_adaptive, std::launch::async)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        conv::genetic_optimization_t opt([&](auto x, auto y, auto z, auto v)
+            { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
+            std::less<double>{},
+            discrete_value_range<int>({ 0, -1, 1, -2, 2, 3, 4, 10 }).set_mutation_params(0.7, 2),
+            min_max_value_range<std::int64_t>{-10, 10},
+            min_max_value_range<float>{-10, 10},
+            min_max_value_range<double>{-10, 10}
+        );
+
+        // ---- Stopping criteria
+        // Criterion 1: stagnation
+        opt.stop_criteria.stagnation_fraction = 0.25;  // 25% of max_tries
+        opt.stop_criteria.stagnation_absolute_floor = 100;   // at least 100 generations
+
+        // Criterion 2: diversity / cataclysm
+        opt.stop_criteria.diversity_threshold = 0.05;
+        opt.stop_criteria.cataclysm_enabled = true;
+        opt.stop_criteria.cataclysm_survival_fraction = 0.15;
+
+        // Criterion 3: no known optimum specified, so no stopping based on target fitness
+
+        // Criterion 4: elite convergence
+        opt.stop_criteria.elite_convergence_fraction = 0.10;
+        opt.stop_criteria.elite_convergence_epsilon = 1e-10;
+
+        // first optimization run to populate history and test multithreading
+        gb::yadro::async::threadpool<> tp(4);
+        opt.optimize(tp, 4,
+            /* time budget */    10ms,
+            /*population_size=*/ 100,
+            /*max_history=*/     5,
+            /*max_tries=*/       200'000
+        );
+#if defined(GB_DEBUGGING)
+        SetConsoleOutputCP(CP_UTF8);
+        opt.report(std::cout);
+#endif
+        // second optimization run to test history and stopping criteria
+        auto [stats, history] = opt.optimize(4,
+            /* time budget */    10ms,
+            /*population_size=*/ 100,
+            /*max_history=*/     5
+        );
+#if defined(GB_DEBUGGING)
+        SetConsoleOutputCP(CP_UTF8);
+        opt.report(std::cout);
+#endif
+#if defined(NDEBUG)
+        gbassert(history.size() == 5);
+        gbassert(history.best().first <= 1e-15);
 #endif
         // serialize to memory archive
         gb::yadro::archive::omem_archive<> oma;
