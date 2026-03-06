@@ -49,7 +49,6 @@
 #include "../util/gbutil.h"
 #include "../util/hash_util.h"
 #include "../container/lockfree_memo_table.h"
-#include "../container/bounded_priority_queue.h"
 #include "../async/threadpool.h"
 #include "../archive/archive.h"
 
@@ -1623,6 +1622,55 @@ namespace gb::yadro::algorithm::conv {
         }
     };
 
+    // =========================================================================
+    // Adaptive multi-phase optimization schedule
+    //
+    // Controls how optimize() partitions the total duration budget into phases
+    // and which thresholds trigger parameter adaptations between them.
+    //
+    // The default schedule is:
+    //   Phase 0 (Exploration)  — 40% of time, raised mutation, lower tournament
+    //   Phase 1 (Transition)   — 30% of time, blended toward baseline
+    //   Phase 2 (Exploitation) — 20% of time, near-baseline, tightening
+    //   Phase 3 (Refinement)   — 10% of time, low mutation, high tournament
+    //
+    // Each phase is a full call to the existing single-phase optimizer with a
+    // warm-restart population, so the memo table and elite individuals carry
+    // over at zero cost.
+    // =========================================================================
+    struct adaptive_phase_config {
+        // ── Adaptation bounds ────────────────────────────────────────────
+        double mutation_rate_min = 0.02;  ///< Hard floor for mutation_rate
+        double mutation_rate_max = 0.40;  ///< Hard ceiling for mutation_rate
+        size_t tournament_size_min = 2;     ///< Hard floor for tournament_size
+        size_t tournament_size_max = 10;    ///< Hard ceiling for tournament_size
+        double pop_size_min_frac = 0.50;  ///< Minimum pop as fraction of initial
+        double pop_size_max_frac = 2.00;  ///< Maximum pop as fraction of initial
+
+        // ── Adaptation signal thresholds ─────────────────────────────────
+        /// Per-phase cache-hit rate above which mutation is considered too
+        /// conservative (too many re-evaluations of known chromosomes).
+        double high_cache_threshold = 0.40;
+
+        /// Per-phase cache-hit rate below which the memo table is providing
+        /// negligible benefit (used by Rule 5, late phases only).
+        double low_cache_threshold = 0.05;
+
+        auto serialize(this auto&& self, auto&& archive)
+        {
+            std::invoke(std::forward<decltype(archive)>(archive),
+                self.mutation_rate_min,
+                self.mutation_rate_max,
+                self.tournament_size_min,
+                self.tournament_size_max,
+                self.pop_size_min_frac,
+                self.pop_size_max_frac,
+                self.high_cache_threshold,
+                self.low_cache_threshold
+            );
+        }
+    };
+
     // -----------------------------------------------------------------------------
     // 4b. stopping_criteria
     //
@@ -2237,6 +2285,7 @@ namespace gb::yadro::algorithm::conv {
         // Public configuration
         // -------------------------------------------------------------------------
         ga_config         config;
+        adaptive_phase_config adaptive_config;
         stopping_criteria stop_criteria;
         std::optional<target_t> target_fitness;
 
@@ -2378,6 +2427,264 @@ namespace gb::yadro::algorithm::conv {
             return make_result_snapshot();
         }
 
+        // =========================================================================
+        // Adaptive multi-phase optimize
+        //
+        // Splits total_duration into N phases according to adaptive_config.
+        // After each phase the following signals are computed from per-phase
+        // deltas and used to adjust config before the next phase runs:
+        //
+        //   Signal                   Interpretation           Adaptation
+        //   ──────────────────────   ──────────────────────   ──────────────────────────────────
+        //   stagnation + diverse     Hard landscape           ↑ mutation, ↓ tournament
+        //   stagnation + low div.    Premature convergence    ↑ mutation, ↑ cataclysm aggression
+        //   elite_converged          Near a peak              ↓ mutation, ↑ tournament, tighter ε
+        //   high per-phase cache %   Over-familiar landscape  ↑ mutation, ↓ pop_size
+        //   low per-phase cache %    Under-exploiting memo    ↑ pop_size   (late phases only)
+        //
+        // Additionally a baseline exploration→refinement schedule is applied to
+        // every phase regardless of signals, interpolating from:
+        //   t=0  mutation_rate × 1.30,  tournament × 0.80   (exploration)
+        //   t=1  mutation_rate × 0.70,  tournament × 1.20   (refinement)
+        //
+        // Adaptive rule adjustments are layered on top of the baseline.
+        //
+        // config and stop_criteria are restored to their original values after
+        // the call so that repeated invocations are idempotent with respect to
+        // configuration. Population and memo table are retained for warm restart.
+        //
+        // max_tries is treated as a global cap across all phases: the cumulative
+        // evaluation counter is never reset, so the total budget is always
+        // respected regardless of how the per-phase time is allocated.
+        // =========================================================================
+        template<typename Rep, typename Period>
+        auto optimize(std::size_t num_phases,
+            std::chrono::duration<Rep, Period> total_duration,
+            std::size_t initial_population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max(),
+            std::size_t max_tries = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            return optimize_imp([this](auto dur, auto pop_size, auto hist_size, auto tries) {
+                return optimize(dur, pop_size, hist_size, tries);
+                }, num_phases, total_duration, initial_population_size, max_history, max_tries);
+        }
+
+        template<typename ThreadPool, typename Rep, typename Period>
+        auto optimize(ThreadPool& tp, std::size_t num_phases,
+            std::chrono::duration<Rep, Period> total_duration,
+            std::size_t initial_population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max(),
+            std::size_t max_tries = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            return optimize_imp([this, &tp](auto dur, auto pop_size, auto hist_size, auto tries) {
+                return optimize(tp, dur, pop_size, hist_size, tries);
+                }, num_phases, total_duration, initial_population_size, max_history, max_tries);
+        }
+    private:
+        // implementation shared by both adaptive optimize() overloads, taking an OptimizeFn
+        template<class OptimizeFn, typename Rep, typename Period>
+        auto optimize_imp(OptimizeFn optimize_fn, std::size_t num_phases,
+            std::chrono::duration<Rep, Period> total_duration,
+            std::size_t initial_population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max(),
+            std::size_t max_tries = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            using namespace std::chrono;
+
+            if (num_phases == 0)
+                throw std::invalid_argument("optimize_adaptive: num_phases must be > 0");
+
+            // Short-circuit: a single phase is identical to a direct
+            // optimize_phase call with the original parameters.
+            if (num_phases == 1)
+                return optimize_fn(total_duration, initial_population_size,
+                    max_history, max_tries);
+
+            // ── Build normalised time fractions ───────────────────────────────
+            // Default: triangular front-loaded schedule.
+            // For N=4: 40% / 30% / 20% / 10%
+            // For N=3: 50% / 33% / 17%
+            // For N=2: 67% / 33%
+            std::vector<double> fracs(num_phases);
+            const double denom = static_cast<double>(num_phases * (num_phases + 1)) / 2.0;
+            for (size_t i = 0; i < num_phases; ++i)
+                fracs[i] = static_cast<double>(num_phases - i) / denom;
+
+            const auto total_ns = duration_cast<nanoseconds>(total_duration);
+
+            // ── Save originals for restoration and baseline interpolation ─────
+            const ga_config         saved_config = config;
+            const stopping_criteria saved_stop = stop_criteria;
+
+            size_t current_pop_size = initial_population_size;
+
+            // Cumulative stats snapshot from the previous phase, used to
+            // compute per-phase deltas (cache rate, eval count, etc.).
+            optimization_stats prev_stats = {};
+
+            std::pair<optimization_stats, history_t> result;
+
+            for (size_t phase = 0; phase < num_phases; ++phase)
+            {
+                // ── Baseline schedule ──────────────────────────────────────────
+                // Smoothly interpolate from exploration (t=0) to refinement (t=1)
+                // regardless of adaptive signal rules below.  Rules then adjust
+                // further on top of this baseline.
+                {
+                    const double t = static_cast<double>(phase)
+                        / static_cast<double>(num_phases - 1);
+                    const double mut_scale = 1.30 - 0.60 * t; // 1.30 → 0.70
+                    const double tour_scale = 0.80 + 0.40 * t; // 0.80 → 1.20
+
+                    config.mutation_rate = std::clamp(
+                        saved_config.mutation_rate * mut_scale,
+                        adaptive_config.mutation_rate_min,
+                        adaptive_config.mutation_rate_max);
+
+                    config.tournament_size = static_cast<size_t>(std::clamp(
+                        std::round(
+                            static_cast<double>(saved_config.tournament_size) * tour_scale),
+                        static_cast<double>(adaptive_config.tournament_size_min),
+                        static_cast<double>(adaptive_config.tournament_size_max)));
+                }
+
+                // ── Run phase ─────────────────────────────────────────────────
+                const auto phase_dur = duration_cast<nanoseconds>(
+                    total_ns * fracs[phase]);
+
+                result = optimize_fn(phase_dur, current_pop_size,
+                    max_history, max_tries);
+
+                const optimization_stats& cum = result.first;
+                const stop_reason         reason = cum.last_stop_reason;
+
+                // ── Early exit ─────────────────────────────────────────────────
+                if (reason == stop_reason::target_reached || phase == num_phases - 1)
+                    break;
+
+                // ── Compute per-phase deltas ───────────────────────────────────
+                // All stats_ counters are cumulative across optimize_phase calls.
+                // Subtract the previous snapshot to isolate this phase's activity.
+                const size_t delta_evals = cum.total_evaluations
+                    - prev_stats.total_evaluations;
+                const size_t delta_hits = cum.cache_hits
+                    - prev_stats.cache_hits;
+                const size_t delta_total = delta_evals + delta_hits;
+                const double cache_rate = (delta_total > 0)
+                    ? static_cast<double>(delta_hits)
+                    / static_cast<double>(delta_total)
+                    : 0.0;
+
+                const double diversity = cum.last_diversity;
+                const bool   low_div =
+                    diversity < stop_criteria.diversity_threshold * 3.0;
+                const bool   high_cache =
+                    cache_rate > adaptive_config.high_cache_threshold;
+
+                prev_stats = cum;
+
+                // ── Adaptive signal rules ──────────────────────────────────────
+                // Applied on top of the baseline already written above.
+                // Multiple rules can fire and compound.
+
+                // Rule 1 — Stagnation with healthy diversity
+                //   The landscape is genuinely hard, or the mutation step is too
+                //   small to escape the current basin.  Increase perturbation
+                //   energy and reduce selection pressure.
+                if (reason == stop_reason::stagnation && !low_div) {
+                    config.mutation_rate = std::clamp(
+                        config.mutation_rate * 1.40,
+                        adaptive_config.mutation_rate_min,
+                        adaptive_config.mutation_rate_max);
+                    config.crossover_rate = std::clamp(
+                        config.crossover_rate * 0.90, 0.50, 0.95);
+                    config.tournament_size = std::max(
+                        adaptive_config.tournament_size_min,
+                        config.tournament_size - 1u);
+                }
+
+                // Rule 2 — Stagnation with low diversity
+                //   Premature convergence.  Cataclysm should fire automatically
+                //   next generation (criterion 2), but also raise mutation so
+                //   survivors spread more aggressively from the reset point.
+                if (reason == stop_reason::stagnation && low_div) {
+                    config.mutation_rate = std::clamp(
+                        config.mutation_rate * 1.30,
+                        adaptive_config.mutation_rate_min,
+                        adaptive_config.mutation_rate_max);
+                    stop_criteria.cataclysm_survival_fraction =
+                        std::clamp(
+                            stop_criteria.cataclysm_survival_fraction * 0.75,
+                            0.05, 0.30);
+                }
+
+                // Rule 3 — Elite convergence (perturbation budget exhausted)
+                //   The search has settled on a peak.  Shift fully into
+                //   fine-tuning mode: small steps, high selection pressure, and
+                //   a tighter convergence criterion for the next phase.
+                if (reason == stop_reason::elite_converged) {
+                    config.mutation_rate = std::clamp(
+                        config.mutation_rate * 0.50,
+                        adaptive_config.mutation_rate_min,
+                        adaptive_config.mutation_rate_max);
+                    config.crossover_rate = std::clamp(
+                        config.crossover_rate * 1.05, 0.50, 0.95);
+                    config.tournament_size = std::min(
+                        adaptive_config.tournament_size_max,
+                        config.tournament_size + 2u);
+                    stop_criteria.elite_convergence_epsilon *= 0.10;
+                    stop_criteria.max_elite_perturbation_count =
+                        std::min(stop_criteria.max_elite_perturbation_count + 1u,
+                            size_t{ 5 });
+                }
+
+                // Rule 4 — High per-phase cache hit rate
+                //   The population is repeatedly revisiting already-evaluated
+                //   chromosomes: mutation is too conservative relative to the
+                //   effective search space resolution.  Increase mutation and
+                //   trim population slightly so the evaluation budget is spent
+                //   on genuinely new chromosomes rather than cache lookups.
+                if (high_cache) {
+                    config.mutation_rate = std::clamp(
+                        config.mutation_rate * 1.25,
+                        adaptive_config.mutation_rate_min,
+                        adaptive_config.mutation_rate_max);
+                    const size_t min_pop = static_cast<size_t>(
+                        initial_population_size * adaptive_config.pop_size_min_frac);
+                    current_pop_size = std::max(
+                        min_pop,
+                        static_cast<size_t>(current_pop_size * 0.85));
+                }
+
+                // Rule 5 — Very low per-phase cache rate in later phases
+                //   Every individual is new: the memo table is providing no
+                //   benefit and the search is over-exploring.  Increase
+                //   population to sample more densely in the same time slice.
+                if (!high_cache
+                    && cache_rate < adaptive_config.low_cache_threshold
+                    && phase >= num_phases / 2)
+                {
+                    const size_t max_pop = static_cast<size_t>(
+                        initial_population_size * adaptive_config.pop_size_max_frac);
+                    current_pop_size = std::min(
+                        max_pop,
+                        static_cast<size_t>(current_pop_size * 1.20));
+                }
+            }
+
+            // ── Restore original configuration ─────────────────────────────────
+            // Population and memo table are deliberately retained for warm-restart
+            // continuity.  Only the tuning knobs are restored so that repeated
+            // calls to optimize() see the same starting parameters.
+            config = saved_config;
+            stop_criteria = saved_stop;
+
+            return result;
+        }
+    public:
         // -------------------------------------------------------------------------
         // soft_reset()
         //
@@ -2690,29 +2997,29 @@ namespace gb::yadro::algorithm::conv {
         auto serialize(this auto&& self, auto&& archive)
         {
             // ── 1. GA tuning knobs ────────────────────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.config);
+            std::invoke(std::forward<decltype(archive)>(archive), self.config, 
+                self.adaptive_config,
 
             // ── 2. Stopping criteria configuration ───────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.stop_criteria);
+            self.stop_criteria,
 
             // ── 3. Cumulative statistics ──────────────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.stats_);
+            self.stats_,
 
             // ── 4. Best-result history ────────────────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.history_);
+            self.history_,
 
             // ── 5. Live population ────────────────────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.population_);
+            self.population_,
 
             // ── 6. Criterion 3: target fitness ───────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.target_fitness);
+            self.target_fitness,
 
             // ── 7. Stagnation baseline ────────────────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive), self.prev_best_);
+            self.prev_best_,
 
             // ── 8. Atomic evaluation counters ─────────────────────────────────────
-            std::invoke(std::forward<decltype(archive)>(archive),
-                self.fn_call_count_, self.total_eval_requests_);
+            self.fn_call_count_, self.total_eval_requests_);
 
             // ── 9. Memo table — intentionally not serialized ──────────────────────
             // Memo cannot be saved/loaded (as designed). Lazy reconstruction on first use.
