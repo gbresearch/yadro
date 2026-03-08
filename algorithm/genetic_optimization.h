@@ -1896,7 +1896,7 @@ namespace gb::yadro::algorithm::conv {
         inline std::mt19937_64& thread_rng() {
             thread_local std::mt19937_64 rng{
                 std::random_device{}() ^
-                (std::hash<std::thread::id>{}(std::this_thread::get_id()) << 32u)
+                (std::hash<std::thread::id>{}(std::this_thread::get_id()) << 4u*sizeof(std::size_t))
             };
             return rng;
         }
@@ -2340,11 +2340,16 @@ namespace gb::yadro::algorithm::conv {
             {
                 sort_population(elite_n);
                 feed_history_from_population();
-
                 reason = should_stop_or_cataclysm(stagnation_limit, elite_n, rng);
                 if (is_terminal(reason))
                     break;
-
+                // Cataclysm and elite perturbation replace individuals with
+                // random chromosomes (fitness = nullopt).  Those must be
+                // evaluated before breed_next_generation, which asserts that
+                // every individual in the population carries a valid fitness.
+                if (reason == stop_reason::cataclysm ||
+                    reason == stop_reason::elite_perturbation)
+                    evaluate_all_single();
                 population_ = breed_next_generation(population_size, elite_n, rng);
                 evaluate_all_single();
                 {
@@ -2401,9 +2406,14 @@ namespace gb::yadro::algorithm::conv {
                     reason = should_stop_or_cataclysm(stagnation_limit, elite_n, rng);
                     if (is_terminal(reason))
                         break;
-                    
+                    // Same obligation as in the single-threaded path: cataclysm
+                    // and elite perturbation leave nullopt slots that must be
+                    // filled before breed_next_generation inspects them.
+                    if (reason == stop_reason::cataclysm ||
+                        reason == stop_reason::elite_perturbation)
+                        evaluate_all_parallel(tp);
                     population_ = breed_next_generation(tp, population_size, elite_n);
-                    evaluate_all_parallel(tp);         // may throw
+                    evaluate_all_parallel(tp);
                     {
                         std::lock_guard lk(stats_mutex_);
                         ++stats_.generations;
@@ -2495,7 +2505,7 @@ namespace gb::yadro::algorithm::conv {
             using namespace std::chrono;
 
             if (num_phases == 0)
-                throw std::invalid_argument("optimize_adaptive: num_phases must be > 0");
+                throw std::invalid_argument("optimize_imp: num_phases must be > 0");
 
             // Short-circuit: a single phase is identical to a direct
             // optimize_phase call with the original parameters.
@@ -3407,7 +3417,7 @@ namespace gb::yadro::algorithm::conv {
             std::vector<target_t> fitnesses;
             fitnesses.reserve(population_.size());
             for (const auto& [chrom, fit] : population_) {
-                assert(fit.has_value() &&
+                util::gbassert(fit.has_value(),
                     "breed_next_generation: all individuals must be evaluated beforehand");
                 fitnesses.push_back(*fit);
             }
@@ -3451,7 +3461,7 @@ namespace gb::yadro::algorithm::conv {
             std::vector<target_t> fitnesses;
             fitnesses.reserve(population_.size());
             for (const auto& [chrom, fit] : population_) {
-                assert(fit.has_value() &&
+                util::gbassert(fit.has_value(),
                     "breed_next_generation: all individuals must be evaluated beforehand");
                 fitnesses.push_back(*fit);
             }

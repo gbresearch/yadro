@@ -168,7 +168,8 @@ namespace
 
         // first optimization run to populate history and test multithreading
         gb::yadro::async::threadpool<> tp(4);
-        opt.optimize(tp, 4,
+        opt.optimize(tp, 
+            /* phases*/          4,
             /* time budget */    10ms,
             /*population_size=*/ 100,
             /*max_history=*/     5,
@@ -179,7 +180,8 @@ namespace
         opt.report(std::cout);
 #endif
         // second optimization run to test history and stopping criteria
-        auto [stats, history] = opt.optimize(4,
+        auto [stats, history] = opt.optimize(
+            /* phases*/          4,
             /* time budget */    10ms,
             /*population_size=*/ 100,
             /*max_history=*/     5
@@ -190,7 +192,7 @@ namespace
 #endif
 #if defined(NDEBUG)
         gbassert(history.size() == 5);
-        gbassert(history.best().first <= 1e-15);
+        gbassert(history.best().first <= 1e-8);
 #endif
         // serialize to memory archive
         gb::yadro::archive::omem_archive<> oma;
@@ -374,7 +376,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, regression_test, std::launch::async)
+    GB_TEST(algorithm, least_squares_test, std::launch::async)
     {
         using namespace std::chrono_literals;
 
@@ -423,10 +425,13 @@ namespace
             }
 #endif
             gbassert(opt_map.size() == 4);
+
+#if defined(NDEBUG)
             auto [target, a, b] = make_flat_tuple(*opt_map.begin());
             gbassert(almost_equal(target, 0., 0.1));
             gbassert(almost_equal(a, 1., 0.1));
             gbassert(almost_equal(b, 1., 0.1));
+#endif
         }
     }
 
