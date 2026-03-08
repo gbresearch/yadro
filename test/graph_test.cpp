@@ -41,7 +41,7 @@ namespace
     using namespace gb::yadro::util;
     using namespace gb::yadro::archive;
 
-    GB_TEST(yadro, tree_test)
+    GB_TEST(container, tree_test)
     {
         indexed_tree<int> tree1;
         gbassert(tree1.get_value(0) == 0);
@@ -92,7 +92,7 @@ namespace
             });
     }
 
-    GB_TEST(yadro, graph_test)
+    GB_TEST(container, graph_test)
     {
         // [0]->[1]->[2]->[3]->[4]
         //  |------------>

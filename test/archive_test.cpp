@@ -63,7 +63,7 @@ namespace
         std::invoke(std::forward<A>(a), std::forward<C>(b).i, std::forward<C>(b).d);
     }
 
-    GB_TEST(yadro, serialization, std::launch::async)
+    GB_TEST(archive, serialization, std::launch::async)
     {
         A a(555, 1.23);
         B b{ 999, -1.99 };
