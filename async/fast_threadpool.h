@@ -285,8 +285,7 @@ namespace gb::yadro::async::v2
         }
 
         bool is_ready() const {
-            std::lock_guard lk{ mu_ };
-            return ready_;
+            return ready_.load(std::memory_order_acquire);
         }
 
         // called only when caller knows dep is ready
