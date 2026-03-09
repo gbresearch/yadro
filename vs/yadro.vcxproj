@@ -28,22 +28,22 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -83,7 +83,7 @@
     <ClCompile>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <PreprocessorDefinitions>_DEBUG;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;_ITERATOR_DEBUG_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions) /arch:AVX2   /utf-8</AdditionalOptions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <TreatWarningAsError>true</TreatWarningAsError>
     </ClCompile>
@@ -92,7 +92,7 @@
     <ClCompile>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <PreprocessorDefinitions>_DEBUG;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;_ITERATOR_DEBUG_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions) /arch:AVX2   /utf-8</AdditionalOptions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <TreatWarningAsError>true</TreatWarningAsError>
     </ClCompile>
@@ -101,7 +101,7 @@
     <ClCompile>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions) /arch:AVX2   /utf-8</AdditionalOptions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -110,25 +110,31 @@
     <ClCompile>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions) /arch:AVX2   /utf-8</AdditionalOptions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\algorithm\adf_test.h" />
     <ClInclude Include="..\algorithm\chebyshev.h" />
     <ClInclude Include="..\algorithm\discrete_transform.h" />
     <ClInclude Include="..\algorithm\gbalgorithm.h" />
     <ClInclude Include="..\algorithm\genetic_optimization.h" />
+    <ClInclude Include="..\algorithm\mackinnon.h" />
     <ClInclude Include="..\algorithm\regression_analysis.h" />
     <ClInclude Include="..\algorithm\statistics.h" />
     <ClInclude Include="..\algorithm\student.h" />
     <ClInclude Include="..\archive\archive.h" />
     <ClInclude Include="..\archive\archive_traits.h" />
+    <ClInclude Include="..\async\chase_lev_deque.h" />
+    <ClInclude Include="..\async\fast_threadpool.h" />
     <ClInclude Include="..\async\taskcontainer.h" />
     <ClInclude Include="..\async\threadpool.h" />
+    <ClInclude Include="..\container\bounded_priority_queue.h" />
     <ClInclude Include="..\container\gbcontainer.h" />
     <ClInclude Include="..\container\graph.h" />
+    <ClInclude Include="..\container\lockfree_memo_table.h" />
     <ClInclude Include="..\container\matrix.h" />
     <ClInclude Include="..\container\matrix_functions.h" />
     <ClInclude Include="..\container\static_string.h" />
@@ -153,6 +159,7 @@
     <ClInclude Include="..\util\gbwin.h" />
     <ClInclude Include="..\util\gnuplot.h" />
     <ClInclude Include="..\util\hash_util.h" />
+    <ClInclude Include="..\util\hybrid_mutex.h" />
     <ClInclude Include="..\util\misc.h" />
     <ClInclude Include="..\util\string_util.h" />
     <ClInclude Include="..\util\time_util.h" />
@@ -162,6 +169,8 @@
     <ClInclude Include="..\util\win_service.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\algorithm\adf_test.cpp" />
+    <ClCompile Include="..\algorithm\mackinnon.cpp" />
     <ClCompile Include="..\archive\archive.cpp" />
     <ClCompile Include="..\container\tree.cpp" />
     <ClCompile Include="..\simulator\fiber.cpp" />

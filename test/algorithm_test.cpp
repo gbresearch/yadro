@@ -30,6 +30,7 @@
 #include "../util/misc.h"
 #include "../archive/archive.h"
 #include "../algorithm/gbalgorithm.h"
+#include "../async/fast_threadpool.h"
 #include <iostream>
 
 namespace
@@ -100,7 +101,8 @@ namespace
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
         // first optimization run to populate history and test multithreading
-        gb::yadro::async::threadpool<> tp(4);
+        //gb::yadro::async::threadpool<> tp(4);
+        gb::yadro::async::v2::ThreadPool tp(4);
         opt.optimize(tp,
             /* time budget */    10ms,
             /*population_size=*/ 100,
@@ -167,8 +169,9 @@ namespace
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
         // first optimization run to populate history and test multithreading
-        gb::yadro::async::threadpool<> tp(4);
-        opt.optimize(tp, 
+        //gb::yadro::async::threadpool<> tp(4);
+        gb::yadro::async::v2::ThreadPool tp(4);
+        opt.optimize(tp,
             /* phases*/          4,
             /* time budget */    10ms,
             /*population_size=*/ 100,

@@ -151,6 +151,27 @@
     <ClInclude Include="..\algorithm\chebyshev.h">
       <Filter>algorithm</Filter>
     </ClInclude>
+    <ClInclude Include="..\async\fast_threadpool.h">
+      <Filter>async</Filter>
+    </ClInclude>
+    <ClInclude Include="..\algorithm\mackinnon.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
+    <ClInclude Include="..\algorithm\adf_test.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\hybrid_mutex.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\lockfree_memo_table.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\bounded_priority_queue.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\async\chase_lev_deque.h">
+      <Filter>async</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\archive\archive.cpp">
@@ -173,6 +194,12 @@
     </ClCompile>
     <ClCompile Include="..\simulator\scheduler.cpp">
       <Filter>simulator</Filter>
+    </ClCompile>
+    <ClCompile Include="..\algorithm\mackinnon.cpp">
+      <Filter>algorithm</Filter>
+    </ClCompile>
+    <ClCompile Include="..\algorithm\adf_test.cpp">
+      <Filter>algorithm</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

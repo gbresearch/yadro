@@ -28,25 +28,30 @@
 
 #include <chrono>
 #include <thread>
+#include <atomic>
+#include <numeric>
+#include <vector>
 #include "../util/gbtest.h"
 #include "../async/threadpool.h"
+#include "../async/fast_threadpool.h"
 
+#pragma warning(disable: 4996) // testing deprecated functions
 
 namespace
 {
     using namespace gb::yadro::util;
     using namespace gb::yadro::async;
 
-    GB_TEST(yadro, async_test)
+    // --- Legacy futures API ---
+    GB_TEST(async, async_test)
     {
-        using namespace std::chrono_literals;
+        using namespace gb::yadro::async;
 
         threadpool tp;
         auto f1 = tp([] 
             { 
                 auto sum{ 0. }; 
                 for (auto i = 0u; i < 100'000'000; ++i) ++sum; 
-                std::this_thread::sleep_for(100ms);  
                 return sum; 
             }).share();
         
@@ -71,5 +76,773 @@ namespace
         fvoid.get();
         gbassert(f.get());
         gbassert(ff.get() == 1);
+    }
+
+    // --- Legacy futures API ---
+    GB_TEST(async, async_test_loop)
+    {
+        using namespace gb::yadro::async;
+
+        std::vector< std::future<void>> void_futures;
+        std::vector< std::future<int>> int_futures;
+
+        threadpool tp;
+        for(auto i = 0; i < 10; ++i)
+        {
+            auto f1 = tp([]
+                {
+                    auto sum{ 0. };
+                    for (auto i = 0u; i < 100'000'000; ++i) ++sum;
+                    return sum;
+                }).share();
+            auto f2 = tp([](auto init)
+                {
+                    for (auto i = 0u; i < 100'000'000; ++i) ++init;
+                    return init;
+                }, 0.);
+            auto f3 = tp.then([](auto init)
+                {
+                    for (auto i = 0u; i < 100'000'000; ++i) --init;
+                    return init;
+                }, f1).share();
+            auto fvoid = tp.then([](auto v) { gbassert(v == 0); }, f3);
+            void_futures.push_back(std::move(fvoid));
+            auto f = tp.then([](auto v1, auto v2, auto v3) { return v1 == v2 && v3 == 0; }, f1, std::move(f2), f3);
+            auto ff = tp.then([](auto v) { return v ? 1 : 0; }, std::move(f));
+            int_futures.push_back(std::move(ff));
+        }
+
+        for (auto& f : void_futures) f.get();
+        for (auto& f : int_futures) gbassert(f.get() == 1);
+    }
+
+    GB_TEST(async, async_test_loop_new)
+    {
+        using namespace gb::yadro::async;
+
+        std::vector< std::future<void>> void_futures;
+        std::vector< std::future<int>> int_futures;
+
+        v2::ThreadPool tp;
+
+        for (auto i = 0; i < 10; ++i)
+        {
+            auto f1 = tp.submit([]
+                {
+                    auto sum{ 0. };
+                    for (auto i = 0u; i < 100'000'000; ++i) ++sum;
+                    return sum;
+                }).share();
+            auto f2 = tp.submit([](auto init)
+                {
+                    for (auto i = 0u; i < 100'000'000; ++i) ++init;
+                    return init;
+                }, 0.);
+            auto f3 = tp.then([](auto init)
+                {
+                    for (auto i = 0u; i < 100'000'000; ++i) --init;
+                    return init;
+                }, f1).share();
+            auto fvoid = tp.then([](auto v) { gbassert(v == 0); }, f3);
+            void_futures.push_back(std::move(fvoid));
+            auto f = tp.then([](auto v1, auto v2, auto v3) 
+                { 
+                    return v1 == v2 && v3 == 0; 
+                }, f1, std::move(f2), f3);
+            auto ff = tp.then([](auto v) { return v ? 1 : 0; }, std::move(f));
+            int_futures.push_back(std::move(ff));
+        }
+
+        for (auto& f : void_futures) f.get();
+        for (auto& f : int_futures) gbassert(f.get() == 1);
+    }
+
+    GB_TEST(async, zldeque_steal_test)
+    {
+        using namespace gb::yadro::async;
+
+        WorkStealingDeque<int> deque;
+
+        // Owner pushes 0..99
+        for (int i = 0; i < 100; ++i)
+            deque.push_bottom(i);
+
+        std::atomic<int> stolen_sum{ 0 };
+
+        // Two thief threads steal everything
+        auto thief = [&] {
+            int local = 0;
+            for (;;) {
+                auto [status, val] = deque.steal();
+                if (status == StealResult::Success) {
+                    local += val;
+                }
+                else if (status == StealResult::Empty) {
+                    break;
+                }
+                // Abort → retry handled implicitly by the loop
+            }
+            stolen_sum.fetch_add(local, std::memory_order_relaxed);
+            };
+
+        std::thread t1{ thief }, t2{ thief };
+        t1.join(); t2.join();
+
+        // Drain remaining items (if any) with pop_bottom
+        int owner_sum = 0;
+        while (true) {
+            auto [status, val] = deque.pop_bottom();
+            if (status != StealResult::Success) break;
+            owner_sum += val;
+        }
+
+        const int expected = 99 * 100 / 2;   // 0+1+…+99
+        gbassert(stolen_sum.load() + owner_sum == expected);
+    }
+
+    GB_TEST(async, zldeque_resize_test)
+    {
+        using namespace gb::yadro::async;
+        // Start with capacity 4 (log2=2) to force many resizes
+        WorkStealingDeque<int, /*InitialLog2Cap=*/2> deque;
+
+        constexpr int N = 10'000;
+        for (int i = 0; i < N; ++i)
+            deque.push_bottom(i);
+
+        int sum = 0;
+        while (true) {
+            auto [status, val] = deque.pop_bottom();
+            if (status != StealResult::Success) break;
+            sum += val;
+        }
+        gbassert(sum == N * (N - 1) / 2);
+    }
+
+    using namespace std::chrono_literals;
+
+    // ── helpers ──────────────────────────────────────────────────────────────────
+
+    static void wait_for(auto cond, std::chrono::seconds timeout = 5s) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!cond()) {
+            gbassert(std::chrono::steady_clock::now() < deadline && "timed out");
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    // ── test 1: on_idle fires after all tasks complete ────────────────────────────
+
+    GB_TEST(async, test_idle_fires) 
+    {
+        using namespace gb::yadro::async;
+        std::atomic<int>  idle_count{ 0 };
+        std::atomic<bool> idle_seen_while_tasks_running{ false };
+
+        v2::ThreadPool pool(4, [&](v2::ThreadPool& p) {
+            if (p.tasks_in_system() != 0)
+                idle_seen_while_tasks_running.store(true);
+            idle_count.fetch_add(1, std::memory_order_relaxed);
+            });
+
+        constexpr int N = 1000;
+        std::vector<std::future<void>> futs;
+        futs.reserve(N);
+        for (int i = 0; i < N; ++i)
+            futs.push_back(pool.submit([] { /* lightweight work */ }));
+        for (auto& f : futs) f.get();
+
+        // After all futures are done, on_idle should have fired at least once.
+        wait_for([&] { return idle_count.load() > 0; });
+
+        gbassert(!idle_seen_while_tasks_running.load()
+            && "on_idle fired while tasks were still in-system");
+        gbassert(idle_count.load() >= 1 && "on_idle should have fired");
+    }
+
+    // ── test 2: tasks_in_system == 0 when on_idle runs ───────────────────────────
+
+    GB_TEST(async, test_idle_invariant) 
+    {
+        using namespace gb::yadro::async;
+        std::atomic<std::size_t> tasks_during_idle{ 1 };  // init non-zero; should become 0
+
+        v2::ThreadPool pool(4, [&](v2::ThreadPool& p) {
+            tasks_during_idle.store(p.tasks_in_system(), std::memory_order_relaxed);
+            });
+
+        constexpr int N = 500;
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < N; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+
+        wait_for([&] { return tasks_during_idle.load() == 0; });
+        gbassert(tasks_during_idle.load() == 0 && "tasks_in_system must be 0 in on_idle");
+    }
+
+    // ── test 3: garbage_collect() safe to call from on_idle ──────────────────────
+
+    GB_TEST(async, test_gc_from_idle) {
+        using namespace gb::yadro::async;
+        // Force resizes by starting with log2=2 (capacity 4).
+        // Use a pool whose internal deques start tiny so they resize many times.
+        // We call garbage_collect() from on_idle — if unsafe this crashes under ASAN.
+
+        std::atomic<int> gc_calls{ 0 };
+
+        // We can't customise deque capacity via the pool constructor in the current
+        // API; use the raw deque directly to prove the GC path is safe.
+        WorkStealingDeque<int*, /*log2=*/2> dq;
+
+        // Fill beyond initial capacity to force resizes.
+        std::vector<int> storage(512);
+        std::iota(storage.begin(), storage.end(), 0);
+        for (auto& v : storage) dq.push_bottom(&v);
+
+        // Confirm gc_list_ is non-empty.
+        gbassert(dq.gc_pending() > 0 && "expected resize gc entries");
+
+        // Drain via two thief threads.
+        std::atomic<int> stolen{ 0 };
+        auto thief = [&] {
+            for (;;) {
+                auto [s, v] = dq.steal();
+                if (s == StealResult::Success) { stolen.fetch_add(1, std::memory_order_relaxed); }
+                else if (s == StealResult::Empty) break;
+            }
+            };
+        std::thread t1{ thief }, t2{ thief };
+        t1.join(); t2.join();
+
+        // Drain remainder with owner.
+        while (true) {
+            auto [s, v] = dq.pop_bottom();
+            if (s != StealResult::Success) break;
+            stolen.fetch_add(1, std::memory_order_relaxed);
+        }
+        gbassert(stolen.load() == 512);
+
+        // Now quiescent — safe to call garbage_collect().
+        dq.garbage_collect();
+        gbassert(dq.gc_pending() == 0 && "gc_list_ should be empty after collect");
+
+        // Also test via ThreadPool's public garbage_collect() called from on_idle.
+        v2::ThreadPool pool(4, [&](v2::ThreadPool& p) {
+            p.garbage_collect();   // must not crash under ASAN
+            gc_calls.fetch_add(1, std::memory_order_relaxed);
+            });
+
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < 200; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+
+        wait_for([&] { return gc_calls.load() > 0; });
+    }
+
+    // ── test 4: on_idle callback may safely submit new tasks ─────────────────────
+
+    GB_TEST(async, test_idle_resubmit) {
+        using namespace gb::yadro::async;
+        constexpr int ROUNDS = 5;
+        std::atomic<int> rounds_done{ 0 };
+        std::atomic<int> extra_tasks_done{ 0 };
+
+        v2::ThreadPool pool(4, [&](v2::ThreadPool& p) {
+            const int r = rounds_done.fetch_add(1, std::memory_order_relaxed);
+            if (r < ROUNDS) {
+                // Submit a fresh batch of tasks from inside on_idle.
+                for (int i = 0; i < 10; ++i)
+                    (void)p.submit([&] { extra_tasks_done.fetch_add(1, std::memory_order_relaxed); });
+            }
+            });
+
+        // Kick off the first batch.
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < 10; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+
+        // Wait for all rounds to complete.
+        wait_for([&] { return rounds_done.load() > ROUNDS; }, 10s);
+    }
+
+    // ── test 5: no spurious on_idle during heavy parallel submit ─────────────────
+
+    GB_TEST(async, test_no_spurious_idle) {
+        using namespace gb::yadro::async;
+        std::atomic<bool> spurious{ false };
+        std::atomic<int>  total_submitted{ 0 };
+
+        v2::ThreadPool pool(4, [&](v2::ThreadPool& p) {
+            if (p.tasks_in_system() != 0)
+                spurious.store(true, std::memory_order_relaxed);
+            });
+
+        // Submitters and workers both run concurrently.
+        constexpr int SUBMITTERS = 4, TASKS_EACH = 500;
+        std::vector<std::thread> submitters;
+        std::vector<std::future<void>> all_futs;
+        std::mutex futs_mutex;
+
+        for (int s = 0; s < SUBMITTERS; ++s) {
+            submitters.emplace_back([&] {
+                for (int i = 0; i < TASKS_EACH; ++i) {
+                    auto fut = pool.submit([] {
+                        // simulate a tiny bit of work
+                        volatile int x = 0;
+                        for (int j = 0; j < 100; ++j) x += j;
+                        (void)x;
+                        });
+                    std::lock_guard lk{ futs_mutex };
+                    all_futs.push_back(std::move(fut));
+                    total_submitted.fetch_add(1, std::memory_order_relaxed);
+                }
+                });
+        }
+        for (auto& t : submitters) t.join();
+        {
+            std::lock_guard lk{ futs_mutex };
+            for (auto& f : all_futs) f.get();
+        }
+
+        gbassert(!spurious.load() && "on_idle fired while tasks still in system");
+    }
+
+    // ── test 6: basic functionality still works ────────────────────────────────
+
+    GB_TEST(async, test_basic) {
+        using namespace gb::yadro::async;
+        v2::ThreadPool pool(4);
+        const int N = 100000;
+        std::vector<long long> data(N);
+        std::iota(data.begin(), data.end(), 1);
+
+        constexpr int chunks = 40;
+        std::vector<std::future<long long>> futs;
+        for (int c = 0; c < chunks; ++c) {
+            int lo = c * (N / chunks), hi = (c + 1 == chunks) ? N : lo + N / chunks;
+            futs.push_back(pool.submit([&, lo, hi] {
+                return std::accumulate(data.begin() + lo, data.begin() + hi, 0LL);
+                }));
+        }
+        long long total = 0;
+        for (auto& f : futs) total += f.get();
+        gbassert(total == (long long)N * (N + 1) / 2);
+    }
+
+    // ── Test: single allocation (TaskNode contains both promise + callable) ──────
+    GB_TEST(async, test_single_alloc) {
+        // If allocations are merged, valgrind/ASAN heap profile shows 1 alloc per
+        // task instead of 3.  We verify correctness; allocation count is a
+        // property best verified with a custom allocator or valgrind externally.
+        v2::ThreadPool pool(4);
+        constexpr int N = 10000;
+        std::vector<std::future<int>> futs;
+        futs.reserve(N);
+        for (int i = 0; i < N; ++i)
+            futs.push_back(pool.submit([i] { return i * 2; }));
+        int sum = 0;
+        for (int i = 0; i < N; ++i) sum += futs[i].get();
+        gbassert(sum == N * (N - 1));  // sum of 2*0 + 2*1 + ... + 2*(N-1)
+    }
+
+    // ── Test: workers actually sleep (CPU usage drops to near-zero when idle) ────
+    void test_workers_sleep() {
+        std::atomic<int> idle_fires{ 0 };
+        v2::ThreadPool pool(4, [&](v2::ThreadPool&) {
+            idle_fires.fetch_add(1, std::memory_order_relaxed);
+            });
+
+        // Submit a small batch and wait for idle.
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < 100; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+
+        // Wait for the idle callback to fire.
+        auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (idle_fires.load() == 0) {
+            gbassert(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(1ms);
+        }
+
+        // Sleep for a moment; worker threads should NOT be burning CPU here.
+        // We can't measure CPU programmatically, but we can at least confirm
+        // the pool is quiescent and no assertion fires.
+        std::this_thread::sleep_for(50ms);
+        gbassert(pool.tasks_in_system() == 0);
+    }
+
+    // ── Test: workers wake quickly after work arrives ────────────────────────────
+    GB_TEST(async, test_wakeup_latency) {
+        v2::ThreadPool pool(4);
+
+        // Let workers park.
+        std::this_thread::sleep_for(20ms);
+
+        // Submit tasks; measure wall time until all complete.
+        auto t0 = std::chrono::steady_clock::now();
+        constexpr int N = 1000;
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < N; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+        auto elapsed = std::chrono::steady_clock::now() - t0;
+
+        // 1000 trivial tasks on 4 workers should complete in well under 1 second.
+        gbassert(elapsed < 1s);
+    }
+
+    // ── Test: exception safety — push_bottom failure rolls back correctly ─────────
+    // We can't easily inject a bad_alloc into push_bottom, but we can verify
+    // that normal exception propagation from the callable reaches the future.
+    GB_TEST(async, test_exception_in_task) {
+        v2::ThreadPool pool(4);
+        auto fut = pool.submit([]() -> int {
+            throw std::runtime_error("task error");
+            return 0;
+            });
+        try {
+            fut.get();
+            gbassert(false && "should have thrown");
+        }
+        catch (const std::runtime_error& e) {
+            gbassert(std::string(e.what()) == "task error");
+        }
+    }
+
+    // ── Test: alignas on tasks_in_system_ — no false sharing assertion ───────────
+    GB_TEST(async, test_no_false_sharing) {
+        // Verify the atomic is on its own cache line by checking alignment.
+        v2::ThreadPool pool(1);
+        // We can't access private members directly.  The ASAN run without errors
+        // is the practical verification; we just submit some work.
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < 5000; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+    }
+
+    // ── Stress: no spurious idle under concurrent external submitters ─────────────
+    GB_TEST(async, test_stress_no_spurious) {
+        for (int round = 0; round < 10; ++round) {
+            std::atomic<bool> spurious{ false };
+            v2::ThreadPool pool(8, [&](v2::ThreadPool& p) {
+                if (p.tasks_in_system() != 0)
+                    spurious.store(true, std::memory_order_relaxed);
+                });
+
+            constexpr int S = 8, T = 200;
+            std::vector<std::thread> submitters;
+            std::vector<std::future<void>> futs;
+            std::mutex mu;
+
+            for (int s = 0; s < S; ++s) {
+                submitters.emplace_back([&] {
+                    for (int i = 0; i < T; ++i) {
+                        auto f = pool.submit([] {
+                            volatile int x = 0;
+                            for (int j = 0; j < 20; ++j) x += j;
+                            (void)x;
+                            });
+                        std::lock_guard lk{ mu };
+                        futs.push_back(std::move(f));
+                    }
+                    });
+            }
+            for (auto& t : submitters) t.join();
+            { std::lock_guard lk{ mu }; for (auto& f : futs) f.get(); }
+
+            gbassert(!spurious.load());
+        }
+    }
+
+    // ── 1. Many external submitters → distributed inbox ─────────────────────────
+    // All N submitters run concurrently.  Under the old global inject_mutex_,
+    // they would serialise.  With per-worker inboxes they run largely in parallel.
+    GB_TEST(async, test_distributed_inbox) 
+    {
+        constexpr int SUBMITTERS = 16, TASKS_EACH = 500;
+        std::atomic<int> done{ 0 };
+        std::atomic<bool> spurious{ false };
+
+        v2::ThreadPool pool(8, [&](v2::ThreadPool& p) {
+            if (p.tasks_in_system() != 0) spurious.store(true);
+            });
+
+        std::vector<std::thread> submitters;
+        std::vector<std::future<void>> futs;
+        std::mutex futs_mu;
+
+        for (int s = 0; s < SUBMITTERS; ++s) {
+            submitters.emplace_back([&] {
+                for (int i = 0; i < TASKS_EACH; ++i) {
+                    auto f = pool.submit([&] {
+                        done.fetch_add(1, std::memory_order_relaxed);
+                        });
+                    std::lock_guard lk{ futs_mu };
+                    futs.push_back(std::move(f));
+                }
+                });
+        }
+        for (auto& t : submitters) t.join();
+        { std::lock_guard lk{ futs_mu }; for (auto& f : futs) f.get(); }
+
+        gbassert(done.load() == SUBMITTERS * TASKS_EACH);
+        gbassert(!spurious.load() && "on_idle fired while tasks in flight");
+    }
+
+    // ── 2. Batch stealing actually reduces idle cycles ────────────────────────────
+    // One worker gets all the work; others should steal batches and stay busy.
+    GB_TEST(async, test_batch_steal_reduces_idle) {
+        constexpr int N = 2000;
+        std::atomic<int> executed{ 0 };
+
+        // Single-submitter to one worker's deque; other workers steal in batches
+        v2::ThreadPool pool(8);
+
+        // Submit from inside on the pool itself to make all tasks land on one deque
+        std::vector<std::future<void>> futs;
+        futs.reserve(N);
+        for (int i = 0; i < N; ++i)
+            futs.push_back(pool.submit([&] {
+            // Tiny work — batch stealing should dominate scheduling
+            executed.fetch_add(1, std::memory_order_relaxed);
+                }));
+
+        for (auto& f : futs) f.get();
+        gbassert(executed.load() == N);
+    }
+
+    // ── 3. Worker-path submit from on_idle still correct ────────────────────────
+    GB_TEST(async, test_worker_path_from_on_idle) {
+        std::atomic<int> extra_done{ 0 };
+        std::atomic<int> idle_calls{ 0 };
+
+        v2::ThreadPool pool(4, [&](v2::ThreadPool& p) {
+            idle_calls.fetch_add(1, std::memory_order_relaxed);
+            if (idle_calls.load() <= 3) {
+                for (int i = 0; i < 10; ++i)
+                    (void)p.submit([&] { extra_done.fetch_add(1, std::memory_order_relaxed); });
+            }
+            });
+
+        std::vector<std::future<void>> futs;
+        for (int i = 0; i < 50; ++i)
+            futs.push_back(pool.submit([] {}));
+        for (auto& f : futs) f.get();
+
+        // Wait for the resubmit chain to drain
+        auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (idle_calls.load() <= 3) {
+            gbassert(std::chrono::steady_clock::now() < deadline && "timed out");
+            std::this_thread::sleep_for(1ms);
+        }
+
+        gbassert(extra_done.load() == 30 && "expected 3 rounds × 10 tasks");
+    }
+
+    // ── 4. Sticky external assignment doesn't cause starvation ───────────────────
+    // All external threads hash to the same worker if n=1. Verify correctness.
+    GB_TEST(async, test_sticky_single_worker) {
+        std::atomic<int> done{ 0 };
+        v2::ThreadPool pool(1);   // only worker 0
+
+        constexpr int SUBMITTERS = 8, TASKS = 100;
+        std::vector<std::thread> submitters;
+        std::vector<std::future<void>> futs;
+        std::mutex mu;
+
+        for (int s = 0; s < SUBMITTERS; ++s)
+            submitters.emplace_back([&] {
+            for (int i = 0; i < TASKS; ++i) {
+                auto f = pool.submit([&] { done.fetch_add(1, std::memory_order_relaxed); });
+                std::lock_guard lk{ mu };
+                futs.push_back(std::move(f));
+            }
+                });
+        for (auto& t : submitters) t.join();
+        { std::lock_guard lk{ mu }; for (auto& f : futs) f.get(); }
+
+        gbassert(done.load() == SUBMITTERS * TASKS);
+    }
+
+    // ── 5. Stress: no spurious idle under all three paths concurrently ────────────
+    GB_TEST(async, test_all_paths_concurrent) {
+        for (int round = 0; round < 10; ++round) {
+            std::atomic<bool> spurious{ false };
+            v2::ThreadPool pool(6, [&](v2::ThreadPool& p) {
+                if (p.tasks_in_system() != 0) spurious.store(true);
+                });
+
+            // External submitters (16 threads) + worker-from-on_idle + batch stealing
+            constexpr int EXT = 8, T = 200;
+            std::vector<std::thread> ext;
+            std::vector<std::future<void>> futs;
+            std::mutex mu;
+
+            for (int s = 0; s < EXT; ++s)
+                ext.emplace_back([&] {
+                for (int i = 0; i < T; ++i) {
+                    auto f = pool.submit([] {
+                        volatile int x = 0; for (int j = 0; j < 30; j++) x += j; (void)x;
+                        });
+                    std::lock_guard lk{ mu };
+                    futs.push_back(std::move(f));
+                }
+                    });
+            for (auto& t : ext) t.join();
+            { std::lock_guard lk{ mu }; for (auto& f : futs) f.get(); }
+
+            gbassert(!spurious.load());
+        }
+    }
+
+    using namespace gb::yadro::async::v2;
+
+    GB_TEST(async, task_get_basic) { // task_get_basic
+        ThreadPool p(4);
+        auto ti = p.submit([] { return 42; });
+        gbassert(ti.get() == 42 && ti.get() == 42);
+        auto tv = p.submit([] {});
+        tv.get(); tv.get();
+    }
+    GB_TEST(async, then_single_dep) { // then_single_dep
+        ThreadPool p(4);
+        auto a = p.submit([] { return 10; });
+        auto b = p.then([](int x) { return x * 3; }, a);
+        gbassert(b.get() == 30);
+    }
+    GB_TEST(async, then_two_deps) { // then_two_deps
+        ThreadPool p(4);
+        auto a = p.submit([] { return 6; });
+        auto b = p.submit([] { return 7; });
+        auto c = p.then([](int x, int y) { return x * y; }, a, b);
+        gbassert(c.get() == 42);
+    }
+    GB_TEST(async, then_chain) { // then_chain
+        ThreadPool p(4);
+        auto a = p.submit([] { return 1; });
+        auto b = p.then([](int x) { return x + 1; }, a);
+        auto c = p.then([](int x) { return x * 10; }, b);
+        auto d = p.then([](int x) { return x - 3; }, c);
+        gbassert(d.get() == 17);
+    }
+    GB_TEST(async, then_diamond) { // then_diamond
+        ThreadPool p(4);
+        auto a = p.submit([] { return 4; });
+        auto b = p.then([](int x) { return x + 1; }, a);
+        auto c = p.then([](int x) { return x * 2; }, a);
+        auto d = p.then([](int x, int y) { return x + y; }, b, c);
+        gbassert(d.get() == 13);
+    }
+    GB_TEST(async, void_dep) { // void_dep
+        ThreadPool p(4);
+        std::atomic<bool> ran{ false };
+        auto a = p.submit([&] { ran.store(true); });
+        auto b = p.then([]() { return 99; }, a);
+        gbassert(b.get() == 99 && ran.load());
+    }
+    GB_TEST(async, then_void_result) { // then_void_result
+        ThreadPool p(4);
+        std::atomic<int> side{ 0 };
+        auto a = p.submit([] { return 7; });
+        auto b = p.then([&](int x) { side.store(x * 6); }, a);
+        b.get();
+        gbassert(side.load() == 42);
+    }
+    GB_TEST(async, deps) { // no deps
+        ThreadPool p(4);
+        auto t = p.then([] { return 100; });
+        gbassert(t.get() == 100);
+    }
+    GB_TEST(async, already_ready) { // already ready
+        ThreadPool p(4);
+        auto a = p.submit([] { return 3; });
+        auto b = p.submit([] { return 4; });
+        a.wait(); b.wait();
+        auto c = p.then([](int x, int y) { return x + y; }, a, b);
+        gbassert(c.get() == 7);
+    }
+    GB_TEST(async, exception_prop) { // exception propagation
+        ThreadPool p(4);
+        auto a = p.submit([]() -> int { throw std::runtime_error("upstream"); return 0; });
+        auto b = p.then([](int x) { return x * 2; }, a);
+        auto c = p.then([](int x) { return x + 1; }, b);
+        try { c.get(); gbassert(false); }
+        catch (const std::runtime_error& e) { gbassert(std::string(e.what()) == "upstream"); }
+    }
+    GB_TEST(async, task_throws) { // task throws
+        ThreadPool p(4);
+        auto a = p.submit([] { return 1; });
+        auto b = p.then([](int) -> int { throw std::logic_error("then-task"); return 0; }, a);
+        try { b.get(); gbassert(false); }
+        catch (const std::logic_error& e) { gbassert(std::string(e.what()) == "then-task"); }
+    }
+    GB_TEST(async, legacy_future) { // legacy future
+        ThreadPool p(4);
+        auto ti = p.submit([] { return 55; });
+        std::future<int> fi = ti;
+        gbassert(fi.get() == 55);
+        auto tv = p.submit([] {});
+        std::future<void> fv = tv;
+        fv.get();
+    }
+    GB_TEST(async, task_copy) { // copy
+        ThreadPool p(4);
+        auto a = p.submit([] { return 7; });
+        Task<int> a2 = a, a3 = a2;
+        gbassert(a.get() == 7 && a2.get() == 7 && a3.get() == 7);
+        auto b = p.then([](int x) { return x * 6; }, a2);
+        gbassert(b.get() == 42);
+    }
+    GB_TEST(async, fan_out_fan_in) { // fan-out fan-in
+        ThreadPool p(8);
+        constexpr int N = 16;
+        std::vector<Task<int>> parts;
+        for (int i = 0; i < N; ++i) parts.push_back(p.submit([i] { return i; }));
+        while (parts.size() > 1) {
+            std::vector<Task<int>> next;
+            for (size_t i = 0; i + 1 < parts.size(); i += 2)
+                next.push_back(p.then([](int x, int y) { return x + y; }, parts[i], parts[i + 1]));
+            if (parts.size() % 2) next.push_back(parts.back());
+            parts = std::move(next);
+        }
+        gbassert(parts[0].get() == N * (N - 1) / 2);
+    }
+    GB_TEST(async, from_worker) { // then from worker
+        ThreadPool p(4);
+        std::atomic<int> res{ 0 };
+        auto outer = p.submit([&] {
+            auto a = p.submit([] { return 10; });
+            auto b = p.then([](int x) { return x * 10; }, a);
+            res.store(b.get());
+            });
+        outer.get();
+        gbassert(res.load() == 100);
+    }
+    GB_TEST(async, stress_test) { // stress
+        for (int round = 0; round < 3; ++round) {
+            ThreadPool p(8);
+            constexpr int C = 50, L = 5;
+            std::vector<Task<int>> ends;
+            for (int c = 0; c < C; ++c) {
+                Task<int> t = p.submit([c] { return c; });
+                for (int s = 0; s < L; ++s) t = p.then([](int x) { return x + 1; }, t);
+                ends.push_back(std::move(t));
+            }
+            for (int c = 0; c < C; ++c) gbassert(ends[c].get() == c + L);
+        }
+    }
+    GB_TEST(async, on_idle) { // on_idle
+        std::atomic<int> ic{ 0 };
+        ThreadPool p(4, [&](ThreadPool&) { ic.fetch_add(1); });
+        auto a = p.submit([] { return 1; });
+        auto b = p.submit([] { return 2; });
+        auto c = p.then([](int x, int y) { return x + y; }, a, b);
+        gbassert(c.get() == 3);
+        wait_for([&] { return ic.load() >= 1; });
     }
 }

@@ -33,7 +33,14 @@
 #include <stack>
 #include <functional>
 #include <future>
-
+#include <atomic>
+#include <memory>
+#include <stdexcept>
+#include <optional>
+#include <cstddef>
+#include <limits>
+#include <algorithm>
+#include <cassert>
 
 namespace gb::yadro::async
 {
@@ -148,4 +155,512 @@ namespace gb::yadro::async
     };
 
     template<class T> using task_vector = task_container<T, std::vector<T>>;
+
+    // ============================================================
+    // Lock-free Chase-Lev work-stealing deque
+    // ============================================================
+
+    // Epoch-based memory reclamation for safe deallocation
+    template<typename T>
+    class epoch_manager {
+    public:
+        epoch_manager() : global_epoch_(0) {}
+
+        struct epoch_guard {
+            epoch_manager* manager;
+            size_t thread_id;
+
+            epoch_guard(epoch_manager* mgr, size_t tid)
+                : manager(mgr), thread_id(tid) {
+                manager->enter(thread_id);
+            }
+
+            ~epoch_guard() {
+                manager->exit(thread_id);
+            }
+        };
+
+        size_t register_thread() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            size_t id = thread_epochs_.size();
+            thread_epochs_.emplace_back(std::numeric_limits<size_t>::max());
+            return id;
+        }
+
+        void enter(size_t thread_id) {
+            size_t epoch = global_epoch_.load(std::memory_order_relaxed);
+            thread_epochs_[thread_id].store(epoch, std::memory_order_release);
+        }
+
+        void exit(size_t thread_id) {
+            thread_epochs_[thread_id].store(
+                std::numeric_limits<size_t>::max(),
+                std::memory_order_release
+            );
+        }
+
+        void retire(T* ptr) {
+            size_t epoch = global_epoch_.load(std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(mutex_);
+            retired_.push_back({ ptr, epoch });
+            try_reclaim();
+        }
+
+        void tick() {
+            global_epoch_.fetch_add(1, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(mutex_);
+            try_reclaim();
+        }
+
+    private:
+        struct retired_node {
+            T* ptr;
+            size_t epoch;
+        };
+
+        void try_reclaim() {
+            size_t min_epoch = global_epoch_.load(std::memory_order_relaxed);
+
+            for (const auto& te : thread_epochs_) {
+                size_t e = te.load(std::memory_order_acquire);
+                if (e < min_epoch) {
+                    min_epoch = e;
+                }
+            }
+
+            auto it = retired_.begin();
+            while (it != retired_.end()) {
+                if (it->epoch < min_epoch) {
+                    delete it->ptr;
+                    it = retired_.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        std::atomic<size_t> global_epoch_;
+        std::vector<std::atomic<size_t>> thread_epochs_;
+        std::vector<retired_node> retired_;
+        std::mutex mutex_;
+    };
+
+    template<typename T>
+    struct chase_lev_deque 
+    {
+        explicit chase_lev_deque(size_t initial_capacity = 256, size_t max_capacity = 1ULL << 30)
+            : top_(0), bottom_(0), max_capacity_(max_capacity),
+            steal_attempts_(0), steal_successes_(0),
+            pop_attempts_(0), pop_successes_(0),
+            push_count_(0), grow_count_(0) {
+            if ((initial_capacity & (initial_capacity - 1)) != 0) {
+                throw std::invalid_argument("Initial capacity must be power of 2");
+            }
+            if (initial_capacity > max_capacity_) {
+                throw std::invalid_argument("Initial capacity exceeds max capacity");
+            }
+            buffer_.store(new circular_array(initial_capacity), std::memory_order_relaxed);
+            epoch_mgr_ = std::make_unique<epoch_manager<circular_array>>();
+        }
+
+        ~chase_lev_deque() {
+            circular_array* arr = buffer_.load(std::memory_order_relaxed);
+            int64_t t = top_.load(std::memory_order_relaxed);
+            int64_t b = bottom_.load(std::memory_order_relaxed);
+
+            for (int64_t i = t; i < b; ++i) {
+                arr->clear(i);
+            }
+            delete arr;
+        }
+
+        // No copy/move
+        chase_lev_deque(const chase_lev_deque&) = delete;
+        chase_lev_deque& operator=(const chase_lev_deque&) = delete;
+
+        size_t register_thread() {
+            return epoch_mgr_->register_thread();
+        }
+
+        void push(T item) {
+            push_count_.fetch_add(1, std::memory_order_relaxed);
+
+            int64_t b = bottom_.load(std::memory_order_relaxed);
+            int64_t t = top_.load(std::memory_order_acquire);
+            circular_array* arr = buffer_.load(std::memory_order_relaxed);
+
+            // Check for overflow
+            if (b >= std::numeric_limits<int64_t>::max() - 1) {
+                throw std::overflow_error("Queue index overflow");
+            }
+
+            // Check if we need to grow
+            if (static_cast<int64_t>(arr->capacity()) <= (b - t)) {
+                size_t new_capacity = arr->capacity() * 2;
+                if (new_capacity > max_capacity_) {
+                    throw std::overflow_error("Queue capacity limit reached");
+                }
+
+                circular_array* old_arr = arr;
+                arr = arr->grow(b, t);
+                buffer_.store(arr, std::memory_order_release);
+
+                // Safely retire old array using epoch-based reclamation
+                epoch_mgr_->retire(old_arr);
+                grow_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            arr->put(b, std::move(item));
+            std::atomic_thread_fence(std::memory_order_release);
+            bottom_.store(b + 1, std::memory_order_relaxed);
+        }
+
+        bool try_push(T item, size_t max_size) {
+            int64_t b = bottom_.load(std::memory_order_relaxed);
+            int64_t t = top_.load(std::memory_order_acquire);
+
+            if (static_cast<size_t>(b - t) >= max_size) {
+                return false;
+            }
+
+            push(std::move(item));
+            return true;
+        }
+
+        bool pop(T& item) {
+            pop_attempts_.fetch_add(1, std::memory_order_relaxed);
+
+            int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
+            circular_array* arr = buffer_.load(std::memory_order_relaxed);
+            bottom_.store(b, std::memory_order_relaxed);
+
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            int64_t t = top_.load(std::memory_order_relaxed);
+
+            bool success = false;
+            if (t <= b) {
+                // Non-empty queue
+                item = arr->get(b);
+                if (t == b) {
+                    // Last element - race with stealers
+                    if (!top_.compare_exchange_strong(t, t + 1,
+                        std::memory_order_seq_cst,
+                        std::memory_order_relaxed)) {
+                        // Lost race - a stealer got it
+                        success = false;
+                    }
+                    else {
+                        success = true;
+                    }
+                    bottom_.store(b + 1, std::memory_order_relaxed);
+                }
+                else {
+                    // More than one element left
+                    success = true;
+                }
+            }
+            else {
+                // Empty queue
+                bottom_.store(b + 1, std::memory_order_relaxed);
+            }
+
+            if (success) {
+                arr->clear(b);
+                pop_successes_.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            return success;
+        }
+
+        bool steal(T& item, size_t thread_id) {
+            steal_attempts_.fetch_add(1, std::memory_order_relaxed);
+
+            auto guard = epoch_mgr_->epoch_guard(epoch_mgr_.get(), thread_id);
+
+            int64_t t = top_.load(std::memory_order_acquire);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            int64_t b = bottom_.load(std::memory_order_acquire);
+
+            if (t < b) {
+                circular_array* arr = buffer_.load(std::memory_order_consume);
+                item = arr->get(t);
+
+                if (!top_.compare_exchange_strong(t, t + 1,
+                    std::memory_order_seq_cst,
+                    std::memory_order_relaxed)) {
+                    // Lost race
+                    return false;
+                }
+
+                arr->clear(t);
+                steal_successes_.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+            return false;
+        }
+
+        bool empty() const {
+            int64_t b = bottom_.load(std::memory_order_relaxed);
+            int64_t t = top_.load(std::memory_order_relaxed);
+            return b <= t;
+        }
+
+        size_t size() const {
+            int64_t b = bottom_.load(std::memory_order_relaxed);
+            int64_t t = top_.load(std::memory_order_relaxed);
+            return static_cast<size_t>(std::max(int64_t(0), b - t));
+        }
+
+        // Statistics
+        struct statistics {
+            size_t steal_attempts;
+            size_t steal_successes;
+            size_t pop_attempts;
+            size_t pop_successes;
+            size_t push_count;
+            size_t grow_count;
+            size_t current_size;
+            size_t capacity;
+
+            double steal_success_rate() const {
+                return steal_attempts > 0 ?
+                    static_cast<double>(steal_successes) / steal_attempts : 0.0;
+            }
+
+            double pop_success_rate() const {
+                return pop_attempts > 0 ?
+                    static_cast<double>(pop_successes) / pop_attempts : 0.0;
+            }
+        };
+
+        statistics get_statistics() const {
+            circular_array* arr = buffer_.load(std::memory_order_relaxed);
+            return {
+                steal_attempts_.load(std::memory_order_relaxed),
+                steal_successes_.load(std::memory_order_relaxed),
+                pop_attempts_.load(std::memory_order_relaxed),
+                pop_successes_.load(std::memory_order_relaxed),
+                push_count_.load(std::memory_order_relaxed),
+                grow_count_.load(std::memory_order_relaxed),
+                size(),
+                arr->capacity()
+            };
+        }
+
+        void reset_statistics() {
+            steal_attempts_.store(0, std::memory_order_relaxed);
+            steal_successes_.store(0, std::memory_order_relaxed);
+            pop_attempts_.store(0, std::memory_order_relaxed);
+            pop_successes_.store(0, std::memory_order_relaxed);
+            push_count_.store(0, std::memory_order_relaxed);
+            grow_count_.store(0, std::memory_order_relaxed);
+        }
+
+        void tick_epoch() {
+            epoch_mgr_->tick();
+        }
+
+    private:
+        struct circular_array {
+            size_t capacity_;
+            size_t mask_;
+            std::unique_ptr<std::optional<T>[]> data_;
+
+            circular_array(size_t capacity)
+                : capacity_(capacity),
+                mask_(capacity - 1),
+                data_(new std::optional<T>[capacity]) {
+                if ((capacity & (capacity - 1)) != 0) {
+                    throw std::invalid_argument("Capacity must be power of 2");
+                }
+            }
+
+            size_t capacity() const { return capacity_; }
+
+            T get(int64_t index) const {
+                size_t idx = index & mask_;
+                assert(data_[idx].has_value() && "Accessing empty slot");
+                return std::move(*data_[idx]);
+            }
+
+            void put(int64_t index, T item) {
+                data_[index & mask_] = std::move(item);
+            }
+
+            void clear(int64_t index) {
+                data_[index & mask_].reset();
+            }
+
+            circular_array* grow(int64_t bottom, int64_t top) {
+                circular_array* new_arr = new circular_array(capacity_ * 2);
+                for (int64_t i = top; i < bottom; ++i) {
+                    size_t idx = i & mask_;
+                    if (data_[idx].has_value()) {
+                        new_arr->put(i, std::move(*data_[idx]));
+                    }
+                }
+                return new_arr;
+            }
+        };
+
+        alignas(64) std::atomic<int64_t> top_;
+        alignas(64) std::atomic<int64_t> bottom_;
+        alignas(64) std::atomic<circular_array*> buffer_;
+
+        size_t max_capacity_;
+
+        // Statistics
+        alignas(64) std::atomic<size_t> steal_attempts_;
+        alignas(64) std::atomic<size_t> steal_successes_;
+        alignas(64) std::atomic<size_t> pop_attempts_;
+        alignas(64) std::atomic<size_t> pop_successes_;
+        alignas(64) std::atomic<size_t> push_count_;
+        alignas(64) std::atomic<size_t> grow_count_;
+
+        // Memory reclamation
+        std::unique_ptr<epoch_manager<circular_array>> epoch_mgr_;
+    };
+
+    // Example usage
+    /*
+    int main() {
+        chase_lev_deque<int> deque(256);
+
+        // Register threads
+        size_t owner_id = deque.register_thread();
+        size_t stealer_id = deque.register_thread();
+
+        // Owner pushes work
+        for (int i = 0; i < 1000; ++i) {
+            deque.push(i);
+        }
+
+        // Owner pops work
+        int item;
+        while (deque.pop(item)) {
+            // Process item
+        }
+
+        // Stealer steals work
+        if (deque.steal(item, stealer_id)) {
+            // Process stolen item
+        }
+
+        // Periodically tick epoch for memory reclamation
+        deque.tick_epoch();
+
+        // Get statistics
+        auto stats = deque.get_statistics();
+        printf("Steal success rate: %.2f%%\n", stats.steal_success_rate() * 100);
+
+        return 0;
+    }
+    */
+
+
+    // ============================================================
+    // Lock-free Michael-Scott queue (non-blocking concurrent queue)
+    // ============================================================
+    template<typename T>
+    struct michael_scott_queue 
+    {
+        michael_scott_queue() {
+            Node* node = new Node();
+            pointer_t pt{ node, 0 };
+            head_.store(pt, std::memory_order_relaxed);
+            tail_.store(pt, std::memory_order_relaxed);
+        }
+
+        ~michael_scott_queue() {
+            pointer_t h = head_.load(std::memory_order_relaxed);
+            while (h.ptr) {
+                Node* temp = h.ptr;
+                pointer_t next = temp->next.load(std::memory_order_relaxed);
+                delete temp;
+                h = next;
+            }
+        }
+
+        void enqueue(T value) {
+            Node* node = new Node(std::move(value));
+            pointer_t tail;
+            while (true) {
+                tail = tail_.load(std::memory_order_seq_cst);
+                pointer_t next = tail.ptr->next.load(std::memory_order_seq_cst);
+                if (tail == tail_.load(std::memory_order_seq_cst)) {
+                    if (next.ptr == nullptr) {
+                        pointer_t new_next{ node, next.count + 1 };
+                        if (tail.ptr->next.compare_exchange_strong(next, new_next, std::memory_order_seq_cst)) {
+                            break;
+                        }
+                    }
+                    else {
+                        pointer_t new_tail{ next.ptr, tail.count + 1 };
+                        tail_.compare_exchange_strong(tail, new_tail, std::memory_order_seq_cst);
+                    }
+                }
+            }
+            pointer_t new_tail{ node, tail.count + 1 };
+            tail_.compare_exchange_strong(tail, new_tail, std::memory_order_seq_cst);
+        }
+
+        bool dequeue(T& pvalue) {
+            while (true) {
+                pointer_t head = head_.load(std::memory_order_seq_cst);
+                pointer_t tail = tail_.load(std::memory_order_seq_cst);
+                pointer_t next = head.ptr->next.load(std::memory_order_seq_cst);
+                if (head == head_.load(std::memory_order_seq_cst)) {
+                    if (head.ptr == tail.ptr) {
+                        if (next.ptr == nullptr) {
+                            return false;
+                        }
+                        pointer_t new_tail{ next.ptr, tail.count + 1 };
+                        tail_.compare_exchange_strong(tail, new_tail, std::memory_order_seq_cst);
+                    }
+                    else {
+                        if (!next.ptr->value.has_value()) {
+                            continue; // Should not happen for valid nodes
+                        }
+                        pvalue = std::move(*next.ptr->value);
+                        pointer_t new_head{ next.ptr, head.count + 1 };
+                        if (head_.compare_exchange_strong(head, new_head, std::memory_order_seq_cst)) {
+                            delete head.ptr;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        bool empty() const {
+            pointer_t head = head_.load(std::memory_order_acquire);
+            pointer_t tail = tail_.load(std::memory_order_acquire);
+            pointer_t next = head.ptr->next.load(std::memory_order_acquire);
+            return head.ptr == tail.ptr && next.ptr == nullptr;
+        }
+    
+    private:
+        struct Node;
+
+        struct pointer_t {
+            Node* ptr = nullptr;
+            size_t count = 0;
+
+            bool operator==(const pointer_t& other) const {
+                return ptr == other.ptr && count == other.count;
+            }
+        };
+
+        struct Node {
+            std::optional<T> value;
+            std::atomic<pointer_t> next{ {nullptr, 0} };
+
+            Node() = default;
+            Node(T val) : value(std::move(val)) {}
+        };
+
+        alignas(64) std::atomic<pointer_t> head_;
+        alignas(64) std::atomic<pointer_t> tail_;
+    };
 }

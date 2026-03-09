@@ -31,6 +31,7 @@
 #include "../algorithm/gbalgorithm.h"
 #include "../archive/archive.h"
 #include "../async/threadpool.h"
+#include "../async/fast_threadpool.h"
 #include "../container/gbcontainer.h"
 #include "../util/gbutil.h"
 #include "../simulator/simulator.h"

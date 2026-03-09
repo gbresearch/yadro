@@ -26,18 +26,82 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 /**
- * @file thread_pool.hpp
+ * @file thread_pool.h
  * @brief Work-stealing thread pool built on the Chase-Lev deque.
  *
  * Each worker thread owns one WorkStealingDeque.  When its own deque is empty
  * it picks a random victim and calls steal().
  *
+ * ── Task handle: Task<T> ──────────────────────────────────────────────────
+ * submit() returns Task<T>, not std::future<T>.  Task<T> wraps a
+ * shared_ptr<SharedState<T>> and supports:
+ *
+ *   .get()   — blocks until ready, rethrows exception (non-destructive;
+ *               safe to call multiple times and from multiple threads)
+ *   .wait()  — blocks without extracting the value
+ *   .valid() — false only if default-constructed or moved-from
+ *   operator std::future<T>() — legacy compat; creates a promise listener
+ *
+ * Task<T> is copyable (shared ownership), unlike std::future<T>.
+ * All copies share the same SharedState.
+ *
+ * ── Continuations: then() ─────────────────────────────────────────────────
+ *
+ *   Task<R> result = pool.then(task, fut1, fut2, ...futN);
+ *
+ * Schedules task(fut1.get(), fut2.get(), ..., futN.get()) on the pool when
+ * ALL futures are ready.  Returns a Task<R> for the continuation's result.
+ *
+ * Dependencies may be given in any state (pending or already-ready).
+ *
+ * Dependency tracking: each call to then() creates a ContinuationHandle
+ * with an atomic dep_count initialised to N.  Each dependency, on completion,
+ * calls handle->notify(), which decrements dep_count with acq_rel.  The last
+ * to decrement (old value == 1) fires submit_fn, which calls the internal
+ * enqueue_with_state() helper to push the continuation TaskNode.
+ *
+ * Why the already-ready check is race-free
+ * ─────────────────────────────────────────
+ * Registration and the ready check are performed under the dependency's
+ * SharedState::mu_:
+ *   • If ready_ is true:  we call handle->notify() immediately (dep_count--).
+ *   • If ready_ is false: we push the handle into waiters_.
+ *
+ * The fulfillment side (SharedState::fire()) also holds mu_ when it snapshots
+ * the waiters list and sets ready_ = true.  These two critical sections are
+ * mutually exclusive, so a notification can never be lost.
+ *
+ * tasks_in_system_ and the continuation path
+ * ──────────────────────────────────────────
+ * tasks_in_system_ is incremented inside enqueue(), which is reached only
+ * when the last dep fires and submit_fn() runs.  At that point at least one
+ * worker is still active (it is completing that last dep), so
+ * tasks_in_system_ ≥ 1 before the increment — no spurious on_idle is
+ * possible.  The existing idle_.mutex guard in the external path still
+ * applies for continuations triggered by external-thread futures (e.g., a
+ * Task converted to std::future and fulfilled externally, which is unusual
+ * but handled correctly).
+ *
+ * Chained continuations
+ * ─────────────────────
+ *   auto a = pool.submit(f);
+ *   auto b = pool.submit(g);
+ *   auto c = pool.then(h, a, b);   // runs h(a.get(), b.get()) after a and b
+ *   auto d = pool.then(k, c);      // runs k(c.get()) after c
+ *
+ * Chains work because then() accepts any Task<X> (or any type whose .get()
+ * compiles); each Task's SharedState carries its own waiter list.
+ *
+ * ── Why std::promise<R> was replaced ─────────────────────────────────────
+ * std::promise<R> fulfils std::future<R> exactly once and provides no hook
+ * for attaching callbacks.  SharedState<R> is the analogous structure with
+ * an open waiter list — the mechanism that makes then() possible.
+ * operator std::future<T>() preserves backward compatibility by wiring a
+ * std::promise<T> as a single-entry waiter on the SharedState.
+ *
  * ── Idle notification ─────────────────────────────────────────────────────
  * An optional on_idle callback (void(ThreadPool&)) fires whenever the pool
- * transitions to fully-idle, defined as tasks_in_system_ == 0, where:
- *
- *   tasks_in_system_ is incremented BEFORE a task enters any queue and
- *   decremented AFTER its execution completes.
+ * transitions to fully-idle, defined as tasks_in_system_ == 0.
  *
  * When on_idle_ is invoked, all three conditions hold simultaneously:
  *   1. Every worker deque is empty.
@@ -47,74 +111,39 @@
  * on_idle_ is suppressed once shutdown() is called (state_ != Running).
  *
  * ── External submission: per-worker inboxes + per-worker CVs ─────────────
- * Each worker has a WorkerCtl struct that combines:
- *   • inbox   — the task queue for external submissions (push_bottom is
- *               owner-only; external threads cannot call it directly)
- *   • mutex   — guards the inbox vector AND serves as the CV's mutex
- *   • cv      — condition variable used to park/wake exactly this worker
+ * Each worker has a WorkerCtl (mutex + CV + inbox vector).  External
+ * submitters target one inbox via a thread-local sticky hash.  submit()
+ * notifies ctls_[target].cv — waking exactly the owning worker.
  *
- * submit() pushes to ctls_[target].inbox and then calls
- * ctls_[target].cv.notify_one() — waking exactly the owning worker.
+ * A shared work_cv_.notify_one() is WRONG with per-worker inboxes: workers
+ * only drain their own inbox, so the wrong worker being woken causes an
+ * indefinite hang (task stranded in inbox[target], non-owner spinning).
  *
- * WHY notify_one() ON A SHARED work_cv_ IS WRONG WITH PER-WORKER INBOXES
- * ─────────────────────────────────────────────────────────────────────────
- * A shared work_cv_.notify_one() wakes an arbitrary sleeping worker W.
- * W checks its OWN inbox (the only one it can drain — push_bottom is
- * owner-only).  If W != target, W finds nothing and spins (because
- * tasks_in_system_ > 0 makes the predicate true).  The owning worker
- * remains parked indefinitely.  future.get() hangs.
- *
- * Per-worker CVs eliminate this: notify_one() on ctls_[target].cv wakes
- * the correct worker.  No notification can be "lost" because cv.wait(lk,
- * pred) re-evaluates pred before sleeping; if the inbox is already
- * non-empty (notification fired before wait), wait returns immediately.
- *
- * ── Why push_bottom() cannot be called by external threads ───────────────
- * push_bottom() is OWNER-ONLY — it reads and writes bottom_, array_, and
- * gc_list_ without multi-thread synchronisation.  An external thread calling
- * it on another worker's deque is a data race.  The per-worker inbox is the
- * correct bridge; the owner drains it in step 2 of worker_loop.
- *
- * ── Why fetch_add uses acq_rel (not relaxed) ─────────────────────────────
- * The acquire half prevents inbox.push_back from being reordered before the
- * increment.  With relaxed a CPU could execute the push first; a worker
- * would then observe a task in the inbox while tasks_in_system_ == 0,
- * triggering a spurious on_idle_.
- *
- * ── Why idle_.mutex guards the external-submit fetch_add ──────────────────
- * notify_idle() re-checks tasks_in_system_ == 0 under idle_.mutex before
- * calling on_idle_.  Without the matching lock in external submit(), the race:
- *
- *   Worker:   fetch_sub → 0 → lock idle_.mutex → re-check == 0 ✓   ← GAP
- *   External: fetch_add → 1  (no lock held)                     ← in GAP
- *   Worker:   call on_idle_(*this)  → tasks_in_system() == 1  ← SPURIOUS
- *
- * remains open.  idle_.mutex is held during fetch_add, then released BEFORE
- * ctls_[target].mutex is acquired — the two are never held simultaneously.
+ * ── Why idle_.mutex guards the external fetch_add ─────────────────────────
+ * Spurious-idle race (see previous sessions).  idle_.mutex is released BEFORE
+ * ctls_[target].mutex — the two are never held simultaneously.
  *
  * ── Lock ordering ─────────────────────────────────────────────────────────
- * idle_.mutex and ctls_[i].mutex are NEVER held simultaneously on any path:
+ *   External submit:  idle_.mutex → release → ctls_[i].mutex → release
+ *   Worker step 2/4:  ctls_[id].mutex (try or full)
+ *   run_task:         idle_.mutex (via notify_idle)
+ *   SharedState:      SharedState::mu_ (leaf; never held with any pool lock)
+ *   shutdown():       shutdown_mutex_ (leaf)
  *
- *   External submit:  lock idle_.mutex → release → lock ctls_[i].mutex → release
- *   Worker step 2:    try_lock ctls_[id].mutex → drain → release
- *   Worker step 4:    lock ctls_[id].mutex → wait/drain → release
- *   run_task:         lock idle_.mutex (via notify_idle) → release
- *   shutdown():       lock shutdown_mutex_ → notify all cvs → join
+ * SharedState::mu_ is acquired only inside ContinuationHandle::notify() /
+ * SharedState::register_waiter() / SharedState::fire().  None of these are
+ * called while any pool lock is held.
  *
  * ── Batch stealing ────────────────────────────────────────────────────────
- * After a successful steal, up to kStealBatchSize-1 additional tasks are
- * stolen from the same victim and pushed into the thief's deque, amortising
- * the seq_cst fence + CAS cost over more useful work.
+ * Up to kStealBatchSize-1 extra tasks stolen per victim visit; first stolen
+ * task is always run directly.  Amortises seq_cst fence + CAS cost.
  *
  * ── Shutdown semantics ────────────────────────────────────────────────────
- *   shutdown(true)   [graceful, default] — waits for all tasks to complete.
- *   shutdown(false)  [immediate]         — discards unstarted tasks
- *                                          (futures → broken_promise).
- *   After shutdown(), submit() throws.  Idempotent.
+ *   shutdown(true)   [graceful, default]
+ *   shutdown(false)  [immediate — unstarted tasks receive broken_promise]
+ *   After shutdown(), submit() throws.  then() must not be called after
+ *   shutdown (submit_fn may execute against a stopped pool).  Idempotent.
  *   Must not be called from a pool worker thread.
- *
- * ── Single allocation per task ────────────────────────────────────────────
- * TaskNode<F,R> holds the callable AND the std::promise<R> in one allocation.
  */
 
 #pragma once
@@ -135,10 +164,16 @@
 #include <random>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
+#include <variant>
 #include <vector>
+#include <shared_mutex>
 
-namespace gb::yadro::async::v2 {
+namespace gb::yadro::async::v2
+{
     using namespace gb::yadro::async;
+    class ThreadPool;  // forward declaration — notify() calls pool->fire_continuation()
+
     // ─────────────────────────────────────────────────────────────────────────────
     // Splitmix64 — lightweight RNG for victim selection
     // ─────────────────────────────────────────────────────────────────────────────
@@ -155,18 +190,253 @@ namespace gb::yadro::async::v2 {
     };
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // Task abstraction
+    // LifetimeToken is used to detect when a pool is destroyed while a continuation is pending
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    struct LifetimeToken {
+        mutable std::shared_mutex mu;
+        ThreadPool* pool;   // set to nullptr in ~ThreadPool
+        explicit LifetimeToken(ThreadPool* p) : pool{ p } {}
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ContinuationHandle
+    // ─────────────────────────────────────────────────────────────────────────────
+    // A ref-counted node shared by every dependency of one then() call.
+    //
+    // dep_count is initialised to N (number of dependencies).  Each dependency,
+    // on completion, calls notify().  The thread whose fetch_sub returns 1 (the
+    // last dep) invokes submit_fn(), which enqueues the continuation task.
+    //
+    // Memory order on notify(): acq_rel — the release half ensures all work done
+    // by the completing dep is visible to the thread that eventually runs the
+    // continuation (which loads the completed futures' values via .get()).
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    struct ContinuationHandle {
+        std::atomic<int>                   dep_count;
+        std::function<void()>              execute_fn;
+        ThreadPool* pool_raw_;  // unguarded — only used on
+        // worker threads (safe)
+        std::shared_ptr<LifetimeToken>     token_;     // guards external-thread path
+
+        ContinuationHandle(int n, std::function<void()> fn, ThreadPool* p, std::shared_ptr<LifetimeToken> tok)
+            : dep_count{ n }
+            , execute_fn{ std::move(fn) }
+            , pool_raw_{ p }
+            , token_{ std::move(tok) } {
+        }
+
+        void notify();   // defined after ThreadPool — needs fire_continuation()
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // detail::ConstRef<T>
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Returns `const T&` for non-void T and `void` for void T, without ever
+    // forming the ill-formed type `const void&`.  std::conditional_t cannot be
+    // used here because both branches are type-checked at the point of
+    // instantiation even when the condition selects only one of them.
+
+    namespace detail {
+        template <typename T> struct ConstRef { using type = const T&; };
+        template <>           struct ConstRef<void> { using type = void; };
+        template <typename T> using  ConstRef_t = typename ConstRef<T>::type;
+    } // namespace detail
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // SharedState<T>
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Shared mutable state backing a Task<T>.  Stores the result value or
+    // exception, coordinates blocking .get()/.wait() calls via a condition
+    // variable, and carries the list of ContinuationHandles to notify.
+    //
+    // Stored: std::monostate for void T (avoids specialising the whole class).
+    // Variant index: 0 = pending, 1 = value (monostate for void), 2 = exception.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    template <typename T>
+    class SharedState {
+    public:
+        using Stored = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
+
+        // ── Fulfilment (called by TaskNode::execute or by ~TaskNode) ─────────
+
+        void set_value(Stored v) {
+            fire([&] { result_.template emplace<1>(std::move(v)); });
+        }
+
+        void set_exception(std::exception_ptr ep) {
+            fire([&] { result_.template emplace<2>(std::move(ep)); });
+        }
+
+        // ── Observation ──────────────────────────────────────────────────────
+
+        void wait() const {
+            if (ready_.load(std::memory_order_acquire)) {  // fast path: no lock needed
+                if (result_.index() == 2)
+                    std::rethrow_exception(std::get<2>(result_));
+                return;
+            }
+            wait_count_.fetch_add(1, std::memory_order_relaxed);
+            std::unique_lock lk{ mu_ };
+            cv_.wait(lk, [this] { return ready_.load(std::memory_order_relaxed); });
+            wait_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
+
+        bool is_ready() const {
+            std::lock_guard lk{ mu_ };
+            return ready_;
+        }
+
+        // called only when caller knows dep is ready
+        [[nodiscard]] detail::ConstRef_t<T> get_ready() const {
+            // Caller guarantees ready_ == true with at least acquire visibility.
+            // The release in fire() / ready_.store(release) synchronises-with
+            // the acquire in dep_count.fetch_sub(acq_rel) that triggered this
+            // continuation, so the result_ write is visible here without locking.
+            if (result_.index() == 2)
+                std::rethrow_exception(std::get<2>(result_));
+            if constexpr (!std::is_void_v<T>)
+                return std::get<1>(result_);
+        }
+
+        // Non-destructive get — may be called multiple times from any thread.
+        // Returns const T& for non-void T; returns void for void T.
+        // Rethrows the stored exception if the state holds one.
+        [[nodiscard]] detail::ConstRef_t<T> get() const {
+            wait();
+            if (result_.index() == 2)
+                std::rethrow_exception(std::get<2>(result_));
+            if constexpr (!std::is_void_v<T>)
+                return std::get<1>(result_);
+        }
+
+        bool has_exception() const noexcept { return result_.index() == 2; }
+
+        // ── Continuation registration ─────────────────────────────────────────
+        // Returns true if the handle was added to the waiter list (dep not yet
+        // ready).  Returns false if already ready — caller must invoke
+        // handle->notify() itself.  Thread-safe; see race analysis in file header.
+
+        bool register_waiter(std::shared_ptr<ContinuationHandle> h) {
+            std::lock_guard lk{ mu_ };
+            if (ready_.load(std::memory_order_relaxed)) return false;
+            if (!single_waiter_) single_waiter_ = std::move(h);
+            else extra_waiters_.push_back(std::move(h));
+            return true;
+        }
+
+    private:
+        template <typename SetFn>
+        void fire(SetFn&& set_fn) {
+            std::shared_ptr<ContinuationHandle> sw;
+            std::vector<std::shared_ptr<ContinuationHandle>> ew;
+            {
+                std::lock_guard lk{ mu_ };
+                assert(!ready_.load(std::memory_order_relaxed)
+                    && "SharedState fulfilled twice");
+                set_fn();
+                ready_.store(true, std::memory_order_release);
+                if (wait_count_.load(std::memory_order_relaxed))
+                    cv_.notify_all();
+                sw = std::move(single_waiter_);
+                ew = std::move(extra_waiters_);
+            }
+            // Notify continuations outside the lock: notify() may call
+            // fire_continuation() which acquires pool-internal locks —
+            // never held simultaneously with SharedState::mu_.
+            if (sw) sw->notify();
+            for (auto& h : ew) h->notify();
+        }
+
+        mutable std::mutex              mu_;
+        mutable std::condition_variable cv_;
+        mutable std::atomic<int> wait_count_{ 0 };
+        std::atomic<bool>               ready_{ false };
+        std::variant<std::monostate, Stored, std::exception_ptr> result_;
+        std::shared_ptr<ContinuationHandle>                      single_waiter_;
+        std::vector<std::shared_ptr<ContinuationHandle>>         extra_waiters_;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Task<T>  — user-facing handle
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Copyable (shared ownership via shared_ptr<SharedState<T>>).
+    // .get() is non-destructive: safe to call multiple times and from continuations.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    template <typename T>
+    class Task {
+    public:
+        using value_type = T;
+
+        Task() = default;
+
+        explicit Task(std::shared_ptr<SharedState<T>> s, ThreadPool* p = nullptr, std::shared_ptr<LifetimeToken> tok = {})
+            : state_{ std::move(s) }, pool_{ p }, pool_token_{ std::move(tok) } {
+        }
+
+        decltype(auto) get() const { return state_->get(); }
+        void wait()  const { state_->wait(); }
+        bool valid() const noexcept { return state_ != nullptr; }
+
+        [[nodiscard]] std::shared_ptr<SharedState<T>> state() const noexcept {
+            return state_;
+        }
+
+        [[nodiscard]] std::shared_future<T> share() const {
+            return std::future<T>(*this).share();
+        }
+
+        [[nodiscard]] operator std::future<T>() const {
+            auto prom = std::make_shared<std::promise<T>>();
+            auto fut = prom->get_future();
+            auto h = std::make_shared<ContinuationHandle>(1,
+                [s = state_, p = std::move(prom)]() mutable {
+                    try {
+                        if constexpr (std::is_void_v<T>) {
+                            s->get();
+                            p->set_value();
+                        }
+                        else {
+                            p->set_value(s->get());
+                        }
+                    }
+                    catch (...) {
+                        try { p->set_exception(std::current_exception()); }
+                        catch (...) {}
+                    }
+                },
+                pool_, pool_token_);   // ← pool_ passed here; was missing before
+            if (!state_->register_waiter(h))
+                h->notify();
+            return fut;
+        }
+
+    private:
+        std::shared_ptr<SharedState<T>> state_;
+        ThreadPool* pool_;
+        std::shared_ptr<LifetimeToken> pool_token_;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Task abstraction — TaskBase + TaskNode
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TaskNode<F,R> holds the callable AND the SharedState<R> in one allocation.
+    // On destruction without execute() (immediate shutdown), ~TaskNode sets
+    // broken_promise so .get() does not hang indefinitely.
     // ─────────────────────────────────────────────────────────────────────────────
 
     struct TaskBase {
+        std::shared_ptr<TaskBase> self_;   // keeps node alive while in deque
         virtual ~TaskBase() = default;
         virtual void execute() noexcept = 0;
     };
 
     template <typename F, typename R>
-    struct TaskNode final : TaskBase {
-        std::promise<R> promise;
-        F               callable;
+    struct TaskNode final : TaskBase, SharedState<R> {
+        F callable;
 
         explicit TaskNode(F&& f) : callable{ std::move(f) } {}
 
@@ -174,23 +444,82 @@ namespace gb::yadro::async::v2 {
             try {
                 if constexpr (std::is_void_v<R>) {
                     callable();
-                    promise.set_value();
+                    SharedState<R>::set_value({});
                 }
                 else {
-                    promise.set_value(callable());
+                    SharedState<R>::set_value(callable());
                 }
             }
             catch (...) {
-                promise.set_exception(std::current_exception());
+                SharedState<R>::set_exception(std::current_exception());
             }
         }
     };
+        
+    namespace detail {
+
+        // task_arg_tuple(fut)
+        // Works for Task<T>, std::future<T>, std::shared_future<T>, or any type
+        // whose .get() compiles.  Void .get() contributes an empty tuple (exception
+        // propagation only); non-void contributes a single-element tuple by value.
+        template <typename Fut>
+        auto task_arg_tuple(Fut& f) {
+            using R = decltype(f.get());
+            if constexpr (std::is_void_v<R>) {
+                f.get();
+                return std::tuple<>{};
+            }
+            else {
+                return std::make_tuple(f.get());   // copies; shared_future::get() → const T&
+            }
+        }
+
+        // task_arg_type_tuple — type-level only, never calls .get().
+        // std::decay_t strips const T& (shared_future) and T& (future) to plain T.
+        template <typename Fut>
+        auto task_arg_type_tuple(std::type_identity<Fut>) {
+            using R = std::decay_t<decltype(std::declval<Fut&>().get())>;
+            if constexpr (std::is_void_v<R>) return std::tuple<>{};
+            else                             return std::tuple<R>{};
+        }
+
+        // For Task<T>: lock-free path via get_ready(), safe because
+        // dep_count.fetch_sub(acq_rel) synchronises-with the release store in fire().
+        template <typename T>
+        auto task_arg_tuple_ready(const Task<T>& t) {
+            if constexpr (std::is_void_v<T>) {
+                t.state()->get_ready();
+                return std::tuple<>{};
+            }
+            else {
+                return std::make_tuple(t.state()->get_ready());
+            }
+        }
+
+        // For std::shared_future, std::future, or any other future-like type:
+        // we don't control their internals so cannot bypass their locking.
+        // .get() returns immediately here because the blocking worker task
+        // already waited for the dep before decrementing dep_count.
+        template <typename Fut>
+            requires (!requires { std::declval<Fut&>().state(); })
+        auto task_arg_tuple_ready(Fut& f) {
+            using R = std::decay_t<decltype(f.get())>;
+            if constexpr (std::is_void_v<R>) {
+                f.get();
+                return std::tuple<>{};
+            }
+            else {
+                return std::make_tuple(f.get());
+            }
+        }
+
+    } // namespace detail
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Thread pool
     // ─────────────────────────────────────────────────────────────────────────────
 
-    class ThreadPool {
+    class ThreadPool final {
     public:
 #ifdef __cpp_lib_hardware_interference_size
         static constexpr std::size_t kCacheLineSize =
@@ -199,8 +528,6 @@ namespace gb::yadro::async::v2 {
         static constexpr std::size_t kCacheLineSize = 64;
 #endif
 
-        /// Maximum additional tasks stolen per steal attempt (first stolen task
-        /// is always run; up to kStealBatchSize-1 extras pushed to own deque).
         static constexpr int kStealBatchSize = 8;
 
         enum class PoolState : std::uint8_t { Running, Draining, Stopped };
@@ -231,19 +558,17 @@ namespace gb::yadro::async::v2 {
                 threads_.emplace_back(&ThreadPool::worker_loop, this, i);
         }
 
-        ~ThreadPool() { shutdown(true); }
+        ~ThreadPool() {
+            shutdown(true);                          // drains, joins all workers
+            std::unique_lock lk{ token_->mu };         // waits for all in-flight
+            token_->pool = nullptr;                  // external notify() sees null
+        }
 
         ThreadPool(const ThreadPool&) = delete;
         ThreadPool& operator=(const ThreadPool&) = delete;
 
         // ── Shutdown ──────────────────────────────────────────────────────────
 
-        /**
-         * @param wait_for_completion
-         *   true  — wait for all queued + executing tasks, then join workers.
-         *   false — discard unstarted tasks (broken_promise), join workers.
-         * Idempotent.  Must NOT be called from a pool worker thread.
-         */
         void shutdown(bool wait_for_completion = true) {
             assert(local_id_ == kNoWorker
                 && "shutdown() must not be called from a pool worker thread");
@@ -265,18 +590,13 @@ namespace gb::yadro::async::v2 {
             }
 
             stop_.store(true, std::memory_order_relaxed);
-
-            // Wake every worker by notifying its own CV.
             for (auto& ctl : ctls_)
                 ctl->cv.notify_all();
-
             lk.unlock();
 
             for (auto& t : threads_)
                 if (t.joinable()) t.join();
 
-            // Drain any remaining tasks (immediate shutdown only; graceful
-            // leaves everything empty before this point).
             for (auto& ctl : ctls_) {
                 std::lock_guard inbox_lk{ ctl->mutex };
                 for (auto* t : ctl->inbox) delete t;
@@ -294,84 +614,116 @@ namespace gb::yadro::async::v2 {
         // ── Submit ────────────────────────────────────────────────────────────
 
         /**
-         * @brief Enqueue a callable and return a std::future for its result.
+         * @brief Enqueue a callable; return a Task<R> for its result.
          *
-         * Worker path:   push directly to own deque (owner-safe).
-         * External path: push to ctls_[target].inbox, then notify ctls_[target].cv.
-         *
-         * Sticky external target: same OS thread always maps to the same worker,
-         * minimising per-inbox mutex contention.
-         *
-         * On push failure (bad_alloc): Option A — store exception in promise,
-         * roll back counter, delete node, return future.  submit() never throws
-         * after the initial allocation.
+         * Throws std::runtime_error if the pool is not Running.
+         * Never throws after the initial new — failures are surfaced via Task::get().
          */
         template <typename F, typename... Args>
         [[nodiscard]] auto submit(F&& f, Args&&... args)
-            -> std::future<std::invoke_result_t<F, Args...>>
+            -> Task<std::invoke_result_t<F, Args...>>
         {
             if (state_.load(std::memory_order_acquire) != PoolState::Running)
                 throw std::runtime_error("wsq::ThreadPool::submit: pool is stopped");
 
             using R = std::invoke_result_t<F, Args...>;
+            return make_and_enqueue<R>(
+                [fn = std::forward<F>(f), ...bound = std::forward<Args>(args)]() mutable -> R {
+                    return std::invoke(fn, bound...);
+                });
+        }
 
-            auto callable = [fn = std::forward<F>(f),
-                ...bound = std::forward<Args>(args)]() mutable -> R {
-                return std::invoke(fn, bound...);
+        template <typename F, typename... Args>
+        [[nodiscard]] auto operator()(F&& f, Args&&... args)
+            -> Task<std::invoke_result_t<F, Args...>>
+        {
+            return submit(std::forward<F>(f), std::forward<Args>(args)...);
+        }
+
+        // ── Then ──────────────────────────────────────────────────────────────
+
+        /**
+         * @brief Schedule task(futures.get()...) when all futures are ready.
+         *
+         * @param task     Callable invoked with each dependency's .get() value.
+         * @param futures  Dependencies — any type whose .get() compiles (Task<X>).
+         * @return         Task<R> for the continuation's result.
+         *
+         * All futures are captured by value (Task<X> is a shared_ptr wrapper).
+         * then() is safe to call from any thread, including worker threads and
+         * the on_idle callback, and at any time while the pool is Running.
+         *
+         * If N == 0: task is submitted immediately (no waiting).
+         * If all futures are already ready: task is submitted synchronously
+         * within the then() call (on the calling thread via enqueue()).
+         */
+        template <typename F, typename... Futures>
+        [[nodiscard]] auto then(F&& task, Futures... futures)
+            requires requires { (futures.get(), ...); }
+        {
+            using ArgsTuple = decltype(std::tuple_cat(
+                detail::task_arg_type_tuple(
+                    std::type_identity<std::decay_t<Futures>>{})...));
+            using R = decltype(std::apply(
+                std::declval<std::decay_t<F>&>(),
+                std::declval<ArgsTuple>()));
+
+            auto out = std::make_shared<SharedState<R>>();
+
+            // Builds the execute_fn: calls fn with dep values, fulfils out_state.
+            // This lambda is passed directly to ContinuationHandle — it IS the work,
+            // not a wrapper that re-enqueues.  fire_continuation() runs it either
+            // inline on the completing worker or via enqueue_continuation().
+            auto make_execute = [&](auto fn_arg, auto... cdep_args) {
+                return [fn = std::move(fn_arg),
+                    ...cdeps = std::move(cdep_args),
+                    out_state = out]() mutable {
+                    try {
+                        if constexpr (std::is_void_v<R>) {
+                            std::apply(fn, std::tuple_cat(detail::task_arg_tuple_ready(cdeps)...));
+                            out_state->set_value({});
+                        }
+                        else {
+                            out_state->set_value(
+                                std::apply(fn, std::tuple_cat(detail::task_arg_tuple_ready(cdeps)...)));
+                        }
+                    }
+                    catch (...) {
+                        out_state->set_exception(std::current_exception());
+                    }
+                    };
                 };
-            using CallableT = std::decay_t<decltype(callable)>;
 
-            auto* node = new TaskNode<CallableT, R>{ std::move(callable) };
-            auto  future = node->promise.get_future();
-
-            if (auto* own = own_deque(); own != nullptr) {
-                // ── Worker path ───────────────────────────────────────────────
-                tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
-                try {
-                    own->push_bottom(node);
-                }
-                catch (...) {
-                    node->promise.set_exception(std::current_exception());
-                    tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
-                    delete node;
-                    return future;
-                }
-                // The task is now in our own deque; no CV notification needed —
-                // we (the worker) will pop and run it in the next iteration.
+            if constexpr (sizeof...(Futures) == 0) {
+                // No dependencies: fire immediately via the normal dispatch path.
+                auto execute = make_execute(std::forward<F>(task));
+                fire_continuation(execute);
             }
             else {
-                // ── External path ─────────────────────────────────────────────
-                const std::size_t n = ctls_.size();
-                const std::size_t target = ext_home_raw_ % n;
+                auto execute = make_execute(std::forward<F>(task), futures...);
+                auto cont = std::make_shared<ContinuationHandle>(
+                    static_cast<int>(sizeof...(Futures)),
+                    std::move(execute),
+                    this,        // raw pointer — safe on worker path
+                    token_);     // shared lifetime guard — used on external path
 
-                // (1) Atomic increment under idle_.mutex to close spurious-idle race.
-                {
-                    std::lock_guard idle_lk{ idle_.mutex };
-                    tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
-                }
-
-                // (2) Push to inbox under ctls_[target].mutex.
-                //     idle_.mutex is fully released before this lock is taken.
-                try {
-                    std::lock_guard inbox_lk{ ctls_[target]->mutex };
-                    ctls_[target]->inbox.push_back(node);
-                }
-                catch (...) {
-                    node->promise.set_exception(std::current_exception());
-                    tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
-                    delete node;
-                    return future;
-                }
-
-                // (3) Wake exactly the owning worker.
-                //     notify_one() does not require holding ctls_[target].mutex.
-                //     A notification cannot be "lost": cv.wait(lk, pred) re-checks
-                //     pred before sleeping, so if the inbox was filled and the
-                //     notify fired before wait(), wait() returns immediately.
-                ctls_[target]->cv.notify_one();
+                auto register_one = [&](auto& dep) {
+                    if constexpr (requires { dep.state(); }) {
+                        // Task<T>: push-based, no thread consumed.
+                        if (!dep.state()->register_waiter(cont))
+                            cont->notify();   // already ready
+                    }
+                    else {
+                        // std::shared_future or similar: no push mechanism.
+                        // Occupy one worker thread for the wait duration.
+                        enqueue_continuation(
+                            [dep, c = cont]() mutable { dep.get(); c->notify(); });
+                    }
+                    };
+                (register_one(futures), ...);
             }
 
-            return future;
+            return Task<R>{std::move(out), this, token_};
         }
 
         // ── Observers ─────────────────────────────────────────────────────────
@@ -386,22 +738,8 @@ namespace gb::yadro::async::v2 {
         }
 
     private:
+        friend struct ContinuationHandle;
         // ── Per-worker control block ──────────────────────────────────────────
-        //
-        // Combines the external inbox with the condition variable.  Using the
-        // same mutex for both roles is correct and eliminates a separate mutex:
-        //
-        //   submit() external:  lock mutex → push_back → unlock → notify_one()
-        //   worker step 2:      try_lock → drain if non-empty → unlock
-        //   worker step 4:      lock → wait(pred: !inbox.empty()) → drain → unlock
-        //
-        // The try_lock in step 2 serves as a fast-path check while the worker is
-        // active; step 4's full lock + wait is the parking path.  If the try_lock
-        // fails (a submitter holds the mutex), the worker moves on to stealing,
-        // then to step 4, where the full lock guarantees it will eventually wake.
-        //
-        // Each WorkerCtl is heap-allocated independently to avoid false sharing
-        // between adjacent workers' inbox vectors and mutexes.
 
         struct WorkerCtl {
             std::mutex               mutex;
@@ -409,10 +747,98 @@ namespace gb::yadro::async::v2 {
             std::vector<TaskBase*>   inbox;
         };
 
+        // ── Internal enqueue ──────────────────────────────────────────────────
+
+        /**
+         * @brief Route a pre-constructed TaskBase* into the right queue.
+         *
+         * Worker path (own_deque() != nullptr): push directly into own deque.
+         *   No idle_.mutex needed — tasks_in_system_ ≥ 1 while the worker's
+         *   own current task is alive.
+         *
+         * External path: hold idle_.mutex during fetch_add (closes spurious-idle
+         *   race), then push to ctls_[target].inbox and wake ctls_[target].cv.
+         *
+         * On push failure: rolls back fetch_add and rethrows.
+         * Caller (enqueue_with_state) deletes the node on exception.
+         */
+        void enqueue(TaskBase* node) {
+            if (auto* own = own_deque(); own != nullptr) {
+                tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
+                try { own->push_bottom(node); }
+                catch (...) {
+                    tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
+                    throw;
+                }
+                // Notify one other worker so it can steal this task if the
+                // submitting worker blocks (e.g. in Task::get() / SharedState::wait).
+                // Without this, the task sits in the deque undiscovered: other
+                // workers sleep on !inbox.empty() which is inbox-only and never
+                // signals deque-only work.  The simplest correct choice is the next
+                // worker in ring order; any sleeping worker will do.
+                const std::size_t n = ctls_.size();
+                if (n > 1)
+                    ctls_[(local_id_ + 1) % n]->cv.notify_one();
+            }
+            else {
+                const std::size_t target = ext_home_raw_ % ctls_.size();
+                {
+                    std::lock_guard idle_lk{ idle_.mutex };
+                    tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
+                }
+                try {
+                    std::lock_guard inbox_lk{ ctls_[target]->mutex };
+                    ctls_[target]->inbox.push_back(node);
+                }
+                catch (...) {
+                    tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
+                    throw;
+                }
+                ctls_[target]->cv.notify_one();
+            }
+        }
+
+        /**
+         * @brief Construct a TaskNode<F,R> and enqueue it.
+         *
+         * On enqueue failure: delete node (whose destructor sets broken_promise
+         * on @p out via ~TaskNode).  Does NOT rethrow — failure is surfaced via
+         * Task<R>::get().
+         */
+        template <typename R, typename F>
+        [[nodiscard]] Task<R> make_and_enqueue(F callable) {
+            using CallableT = std::decay_t<F>;
+
+            // One allocation: node IS both the TaskBase and the SharedState<R>.
+            auto node = std::make_shared<TaskNode<CallableT, R>>(std::move(callable));
+
+            // Aliasing constructor: Task<R> shares ownership with node but points
+            // at the SharedState<R> base sub-object.
+            std::shared_ptr<SharedState<R>> state_ptr(
+                node, static_cast<SharedState<R>*>(node.get()));
+
+            // Self-reference keeps the node alive while the raw TaskBase* sits in
+            // the deque.  run_task() clears it after execute().
+            node->self_ = node;
+
+            try {
+                enqueue(node.get());
+            }
+            catch (...) {
+                // enqueue rolled back tasks_in_system_.
+                // Clear self_ so the refcount drops and ~TaskNode fires
+                // broken_promise on state_ptr via SharedState<R>::set_exception.
+                node->self_.reset();
+            }
+
+            return Task<R>{std::move(state_ptr), this, token_};
+        }
+
         // ── Worker loop ───────────────────────────────────────────────────────
 
         void worker_loop(std::size_t id) {
             local_id_ = id;
+            local_pool_ = this;   // ← mark this thread as belonging to this pool
 
             Splitmix64        rng{ std::random_device{}()
                                   ^ (static_cast<std::uint64_t>(id) * 0x9e3779b97f4a7c15ULL) };
@@ -422,15 +848,13 @@ namespace gb::yadro::async::v2 {
 
             while (!stop_.load(std::memory_order_relaxed)) {
 
-                // ── Step 1: pop from own deque (fast path, no lock) ─────────────
+                // ── Step 1: pop from own deque ───────────────────────────────
                 if (auto [s, t] = my_deque.pop_bottom(); s == StealResult::Success) {
                     run_task(t);
                     continue;
                 }
 
-                // ── Step 2: drain own inbox (fast path, try_lock) ───────────────
-                // Uses try_lock to avoid blocking on an external submitter; the
-                // full blocking drain happens in step 4.
+                // ── Step 2: drain own inbox (fast path, try_lock) ────────────
                 {
                     std::unique_lock lk{ my_ctl.mutex, std::try_to_lock };
                     if (lk && !my_ctl.inbox.empty()) {
@@ -443,8 +867,7 @@ namespace gb::yadro::async::v2 {
                     }
                 }
 
-                // ── Step 3: batch-steal from a random victim ─────────────────────
-                // Self-steal avoidance: uniform draw over [0, n-1] \ {id}.
+                // ── Step 3: batch-steal from a random victim ─────────────────
                 if (n > 1) {
                     const std::size_t r = static_cast<std::size_t>(rng() % (n - 1));
                     const std::size_t victim = r + (r >= id ? 1 : 0);
@@ -454,54 +877,53 @@ namespace gb::yadro::async::v2 {
                         for (int extra = 1; extra < kStealBatchSize; ++extra) {
                             auto [s2, t2] = vdeque.steal();
                             if (s2 != StealResult::Success) break;
-                            try {
-                                my_deque.push_bottom(t2);
-                            }
-                            catch (...) {
-                                run_task(t2);   // Option A: run rather than discard
-                                break;
-                            }
+                            try { my_deque.push_bottom(t2); }
+                            catch (...) { run_task(t2); break; }
                         }
                         run_task(first);
                         continue;
                     }
                 }
 
-                // ── Step 4: park until own inbox has work or stop ────────────────
+                // ── Step 4: park until inbox has work, stealable deque work
+                //           exists, or stop is set ─────────────────────────────
                 //
-                // Full lock on my_ctl.mutex (same mutex used for the inbox).
-                // Predicate: stop_ OR inbox non-empty.
-                // After waking, drain the inbox while still holding the lock
-                // (prevents a concurrent submitter from pushing to a vector we
-                // are iterating), then unlock before calling push_bottom.
+                // Predicate: stop_ OR !inbox.empty() OR tasks_in_system_ > 0.
                 //
-                // No lost-notification hazard: if a submitter pushed to the inbox
-                // and called notify_one() before we reached wait(), the predicate
-                // (!inbox.empty()) is true and wait() returns immediately.
+                // !inbox.empty():        wakes the correct worker on external submit.
+                // tasks_in_system_ > 0:  wakes any worker when a peer has pushed to
+                //                        its own deque and then blocked (e.g. inside
+                //                        Task::get() for a continuation).  Without
+                //                        this clause, the peer's task sits undiscovered
+                //                        and the continuation never fires.
                 //
-                // my_ctl.mutex is never held while any other lock is held, so
-                // there is no deadlock with idle_.mutex or shutdown_mutex_.
+                // Spin-guard: wait_for with a 200µs timeout.  If a worker wakes
+                // because tasks_in_system_ > 0 but all work is still in inboxes (not
+                // yet migrated to deques), it finds nothing in step 3 and re-enters
+                // step 4.  The predicate is still true, so plain wait() would return
+                // immediately and the worker would spin.  wait_for ensures it
+                // re-sleeps for the poll period instead.  Inbox arrival still causes
+                // immediate wakeup via notify_one() in the external submit path.
+                //
+                // my_ctl.mutex is never held while any other pool lock is held.
                 {
                     std::unique_lock lk{ my_ctl.mutex };
-                    my_ctl.cv.wait(lk, [&] {
+                    my_ctl.cv.wait_for(lk, std::chrono::microseconds{ 200 }, [&] {
                         return stop_.load(std::memory_order_relaxed)
-                            || !my_ctl.inbox.empty();
+                            || !my_ctl.inbox.empty()
+                            || tasks_in_system_.load(std::memory_order_acquire) > 0;
                         });
-
-                    // Drain inbox while lock is held, then release before pushing.
                     std::vector<TaskBase*> batch;
                     std::swap(batch, my_ctl.inbox);
                     lk.unlock();
-
                     for (auto* t : batch)
                         my_deque.push_bottom(t);
                 }
             }
 
-            // Reset sentinel: handle potential OS-thread reuse after pool exit.
             local_id_ = kNoWorker;
+            local_pool_ = nullptr;   // ← clear on exit
 
-            // Shutdown drain: delete remaining tasks in inbox and deque.
             {
                 std::lock_guard lk{ my_ctl.mutex };
                 for (auto* t : my_ctl.inbox) delete t;
@@ -517,18 +939,17 @@ namespace gb::yadro::async::v2 {
         // ── Task execution ────────────────────────────────────────────────────
 
         void run_task(TaskBase* task) noexcept {
+            executing_task_ = true;
             task->execute();
-            delete task;
+            executing_task_ = false;
+            task->self_.reset();   // releases shared ownership; deletes if no Task<R> copy
 
             const auto prev = tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
             if (prev == 1) {
                 drain_cv_.notify_all();
-
                 if (idle_.on_idle
                     && state_.load(std::memory_order_acquire) == PoolState::Running)
-                {
                     notify_idle();
-                }
             }
         }
 
@@ -538,10 +959,93 @@ namespace gb::yadro::async::v2 {
                 idle_.on_idle(*this);
         }
 
+        // ── Continuation dispatch ─────────────────────────────────────────────
+        //
+        // Called by ContinuationHandle::notify() when dep_count reaches zero.
+        // Chooses between inline execution (same worker, no scheduling roundtrip)
+        // and normal enqueue (external thread, or worker path for future safety).
+
+        // Called from ContinuationHandle::notify().
+        // local_id_ and kNoWorker are accessible here — private members of this class.
+        void fire_continuation(std::function<void()> work) {
+            if (state_.load(std::memory_order_acquire) != PoolState::Running) {
+                // Pool is shutting down — set broken_promise on out_state
+                // so callers waiting on .get() unblock rather than hang.
+                // work() captures out_state; calling it fulfils the SharedState
+                // with whatever the callable produces — but we cannot safely run
+                // user code here. Instead: the SharedState stays pending and
+                // Task::get() will block. Document this as a precondition
+                // violation (then() must not be called after shutdown).
+                return;
+            }
+            if (local_pool_ == this) {         // worker of THIS pool — safe to run inline
+                if (executing_task_)
+                    run_inline_nested(work);
+                else
+                    run_inline(work);
+            }
+            else {
+                enqueue_continuation(std::move(work));   // external or wrong-pool thread
+            }
+        }
+        // Called only when executing_task_ == true.
+        // tasks_in_system_ is already ≥ 1 (the outer run_task holds it).
+        // Incrementing and decrementing here would be correct but redundant —
+        // the outer run_task's fetch_sub handles the final transition to zero.
+        // work() catching its own exceptions and storing them in the continuation's
+        // SharedState means this call is genuinely noexcept at this level.
+        void run_inline_nested(std::function<void()>& work) noexcept {
+            if (inline_depth_ >= kMaxInlineDepth) {
+                // Unwind: enqueue as a normal task so this stack frame can return.
+                // The continuation will be picked up by this worker in the next
+                // iteration of worker_loop after the current chain unwinds.
+                enqueue_continuation(work);
+                return;
+            }
+            struct depth_guard {
+                depth_guard() { ++ThreadPool::inline_depth_; }
+                ~depth_guard() { --ThreadPool::inline_depth_; }
+            } guard;
+            work();
+        }
+        // Execute work inline on the current worker thread.
+        // Manages tasks_in_system_ exactly as run_task() does, so drain_cv_
+        // and on_idle fire correctly.  work() already catches exceptions
+        // internally and stores them in the continuation's SharedState.
+        void run_inline(std::function<void()>& work) noexcept {
+            tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
+            work();
+            const auto prev = tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
+            if (prev == 1) {
+                drain_cv_.notify_all();
+                if (idle_.on_idle
+                    && state_.load(std::memory_order_acquire) == PoolState::Running)
+                    notify_idle();
+            }
+        }
+
+        // Wrap work in a minimal TaskBase and enqueue via the normal inbox path.
+        // Used when fire_continuation() is called from a non-worker thread.
+        void enqueue_continuation(std::function<void()> work) {
+            struct FnTask final : TaskBase {
+                std::function<void()> fn;
+                explicit FnTask(std::function<void()> f) : fn{ std::move(f) } {}
+                void execute() noexcept override { fn(); }
+            };
+            auto node = std::make_shared<FnTask>(std::move(work));
+            node->self_ = node;   // keep alive while raw TaskBase* is in the deque
+            try {
+                enqueue(node.get());
+            }
+            catch (...) {
+                node->self_.reset();   // triggers set_exception via ~FnTask if needed
+            }
+        }
+
         // ── Helpers ───────────────────────────────────────────────────────────
 
         [[nodiscard]] WorkStealingDeque<TaskBase*>* own_deque() const noexcept {
-            if (local_id_ == kNoWorker) return nullptr;
+            if (local_pool_ != this) return nullptr;   // covers kNoWorker and wrong-pool
             return deques_[local_id_].get();
         }
 
@@ -550,6 +1054,10 @@ namespace gb::yadro::async::v2 {
         static constexpr std::size_t kNoWorker = std::numeric_limits<std::size_t>::max();
         static thread_local std::size_t local_id_;
         static thread_local std::size_t ext_home_raw_;
+        static thread_local bool        executing_task_;
+        static thread_local ThreadPool* local_pool_;
+        static thread_local int inline_depth_; // preventing stack overflow in pathological cases of deep inline nesting (e.g. a long chain of continuations firing synchronously on the same worker).
+        static constexpr int kMaxInlineDepth = 16; // maximum inline nesting depth before forced unwinding via enqueue_continuation.
 
         std::atomic<bool>                                          stop_;
         std::vector<std::unique_ptr<WorkStealingDeque<TaskBase*>>> deques_;
@@ -566,10 +1074,39 @@ namespace gb::yadro::async::v2 {
         std::atomic<PoolState>  state_;
         std::mutex              shutdown_mutex_;
         std::condition_variable drain_cv_;
+        std::shared_ptr<LifetimeToken> token_{ std::make_shared<LifetimeToken>(this) };   // constructed with raw this
     };
+    // Defined here, not inline in the struct, because it calls pool->fire_continuation()
+    // which requires the complete ThreadPool definition.
+    inline void ContinuationHandle::notify() {
+        if (dep_count.fetch_sub(1, std::memory_order_acq_rel) != 1)
+            return;
+
+        // ── Worker thread fast path ───────────────────────────────────────
+        // If this thread is a worker of pool_raw_, the pool is alive by
+        // definition: shutdown() joins all workers before ~ThreadPool sets
+        // the token to null.  No lock needed.
+        if (ThreadPool::local_pool_ == pool_raw_) {
+            pool_raw_->fire_continuation(execute_fn);
+            return;
+        }
+
+        // ── External thread safe path ─────────────────────────────────────
+        // shared_lock allows concurrent external notify() calls.
+        // unique_lock in ~ThreadPool waits for all of these to finish
+        // before nulling the pointer and freeing pool memory.
+        std::shared_lock lk{ token_->mu };
+        if (token_->pool)
+            token_->pool->fire_continuation(execute_fn);
+        // If token_->pool is null the pool is gone; SharedState stays
+        // pending.  Task::get() will block indefinitely — same contract
+        // as calling submit() on a destroyed pool (precondition violation).
+    }
 
     inline thread_local std::size_t ThreadPool::local_id_ = ThreadPool::kNoWorker;
     inline thread_local std::size_t ThreadPool::ext_home_raw_ =
         std::hash<std::thread::id>{}(std::this_thread::get_id());
-
+    inline thread_local bool ThreadPool::executing_task_ = false;
+    inline thread_local ThreadPool* ThreadPool::local_pool_ = nullptr;
+    inline thread_local int ThreadPool::inline_depth_ = 0;
 }
