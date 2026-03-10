@@ -30,7 +30,7 @@
 #include "../util/misc.h"
 #include "../archive/archive.h"
 #include "../algorithm/gbalgorithm.h"
-#include "../async/fast_threadpool.h"
+#include "../async/async.h"
 #include <iostream>
 
 namespace
@@ -306,7 +306,7 @@ namespace
         }
         {// multithreaded
             optimizer.clear();
-            gb::yadro::async::threadpool<> tp;
+            gb::yadro::async::v2::ThreadPool tp;
             auto [stat, opt_map] = optimizer.optimize(tp, 100ms, 5);
 #if defined(NDEBUG)
             gbassert(opt_map.size() == 5);
@@ -325,7 +325,7 @@ namespace
         }
         {// multithreaded with acceptable_target
             optimizer.clear();
-            gb::yadro::async::threadpool<> tp;
+            gb::yadro::async::v2::ThreadPool tp;
             auto [stat, opt_map] = optimizer.optimize(tp, 0.01, 100ms, 5);
 #if defined(NDEBUG)
             gbassert(opt_map.size() == 5);

@@ -32,8 +32,7 @@
 #include <numeric>
 #include <vector>
 #include "../util/gbtest.h"
-#include "../async/threadpool.h"
-#include "../async/fast_threadpool.h"
+#include "../async/async.h"
 
 #pragma warning(disable: 4996) // testing deprecated functions
 
@@ -47,7 +46,7 @@ namespace
     {
         using namespace gb::yadro::async;
 
-        threadpool tp;
+        legacy::threadpool tp;
         auto f1 = tp([] 
             { 
                 auto sum{ 0. }; 
@@ -86,7 +85,7 @@ namespace
         std::vector< std::future<void>> void_futures;
         std::vector< std::future<int>> int_futures;
 
-        threadpool tp;
+        legacy::threadpool tp;
         for(auto i = 0; i < 10; ++i)
         {
             auto f1 = tp([]

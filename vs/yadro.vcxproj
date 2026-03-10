@@ -127,10 +127,11 @@
     <ClInclude Include="..\algorithm\student.h" />
     <ClInclude Include="..\archive\archive.h" />
     <ClInclude Include="..\archive\archive_traits.h" />
+    <ClInclude Include="..\async\async.h" />
     <ClInclude Include="..\async\chase_lev_deque.h" />
-    <ClInclude Include="..\async\fast_threadpool.h" />
-    <ClInclude Include="..\async\taskcontainer.h" />
     <ClInclude Include="..\async\threadpool.h" />
+    <ClInclude Include="..\async\taskcontainer.h" />
+    <ClInclude Include="..\async\threadpool_legacy.h" />
     <ClInclude Include="..\container\bounded_priority_queue.h" />
     <ClInclude Include="..\container\gbcontainer.h" />
     <ClInclude Include="..\container\graph.h" />

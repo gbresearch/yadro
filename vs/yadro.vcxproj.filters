@@ -30,7 +30,7 @@
     <ClInclude Include="..\async\taskcontainer.h">
       <Filter>async</Filter>
     </ClInclude>
-    <ClInclude Include="..\async\threadpool.h">
+    <ClInclude Include="..\async\threadpool_legacy.h">
       <Filter>async</Filter>
     </ClInclude>
     <ClInclude Include="..\container\graph.h">
@@ -151,7 +151,7 @@
     <ClInclude Include="..\algorithm\chebyshev.h">
       <Filter>algorithm</Filter>
     </ClInclude>
-    <ClInclude Include="..\async\fast_threadpool.h">
+    <ClInclude Include="..\async\threadpool.h">
       <Filter>async</Filter>
     </ClInclude>
     <ClInclude Include="..\algorithm\mackinnon.h">
@@ -170,6 +170,9 @@
       <Filter>container</Filter>
     </ClInclude>
     <ClInclude Include="..\async\chase_lev_deque.h">
+      <Filter>async</Filter>
+    </ClInclude>
+    <ClInclude Include="..\async\async.h">
       <Filter>async</Filter>
     </ClInclude>
   </ItemGroup>

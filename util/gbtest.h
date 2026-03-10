@@ -38,7 +38,7 @@
 #include "gbtimer.h"
 #include "gberror.h"
 #include "time_util.h"
-#include "../async/threadpool.h"
+#include "../async/async.h"
 
 namespace gb::yadro::util
 {
@@ -60,7 +60,7 @@ namespace gb::yadro::util
     //-----------------------------------------------------------------------------------------------------------------
     struct tester
     {
-        gb::yadro::async::threadpool<> _pool;
+        gb::yadro::async::v2::ThreadPool _pool;
         std::unordered_map<std::string, std::vector<test_base*>> _tests;
         mutable logger _log;
 

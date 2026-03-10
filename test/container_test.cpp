@@ -31,7 +31,7 @@
 #include "../util/hash_util.h"
 #include "../container/gbcontainer.h"
 #include "../archive/archive.h"
-#include "../async/threadpool.h"
+#include "../async/async.h"
 #include <vector>
 #include <iostream>
 #include <chrono>
@@ -737,7 +737,7 @@ namespace
                 using Item = PQ::value_type;
 
                 PQ pq(K, 32);
-                gb::yadro::async::threadpool<> pool(nthreads);
+                gb::yadro::async::v2::ThreadPool pool(nthreads);
                 std::vector<std::future<void>> results;
 
                 std::barrier sync_barrier(nthreads + 1);
@@ -797,8 +797,10 @@ namespace
         auto small_map = run_benchmark<bounded_priority_queue<TestItem<1024>>>(32'000'000);
         auto large_map = run_benchmark<bounded_priority_queue<TestItem<10240>>>(3'200'000);
         // these asserts may fail on slower machines or with different compilers, but should be generally true for a well-optimized implementation
-        gbassert(small_map[1] < 60 && small_map[16] < 6);
-        gbassert(large_map[1] < 100 && large_map[16] < 20);
+        gbassert(small_map[1] < 60);
+        gbassert(small_map[16] < 6);
+        gbassert(large_map[1] < 100);
+        gbassert(large_map[16] < 20);
 #endif
         //run_benchmark_fixed<bounded_priority_queue<TestItem<1024>>>(32'000);
      }

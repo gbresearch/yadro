@@ -27,7 +27,6 @@
 //-----------------------------------------------------------------------------
 
 #include "../util/gbutil.h"
-
 #include <sstream>
 #include <string>
 #include <algorithm>

@@ -49,7 +49,7 @@
 #include "../util/gbutil.h"
 #include "../util/hash_util.h"
 #include "../container/lockfree_memo_table.h"
-#include "../async/threadpool.h"
+#include "../async/async.h"
 #include "../archive/archive.h"
 
 namespace gb::yadro::algorithm
@@ -173,13 +173,13 @@ namespace gb::yadro::algorithm
             // multithreaded version of the above, using threadpool (intended for slow target functions)
             // if target function is fast, then context switching overhead will make this function slower than single threaded function
             //------------------------------------------------------------------------------------------
-            template<class Rep, class Period>
-            auto optimize(gb::yadro::async::threadpool<>& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+            template<class TP, class Rep, class Period>
+            auto optimize(TP& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
             //------------------------------------------------------------------------------------------
             // same as above, but also specifying acceptable target, after satisfying which the optimization may stop
-            template<class Rep, class Period>
-            auto optimize(gb::yadro::async::threadpool<>& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
+            template<class TP, class Rep, class Period>
+            auto optimize(TP& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration, std::size_t max_history = -1, std::size_t max_tries = -1);
 
             //------------------------------------------------------------------------------------------
             // clear the state
@@ -244,7 +244,8 @@ namespace gb::yadro::algorithm
             //------------------------------------------------------------------------------------------
             // single thread optimization, end when acceptable_target, or timeout, or max_tries are reached
             auto optimize_one(std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
-            auto optimize_in_pool(gb::yadro::async::threadpool<>& tp, std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
+            template<class TP>
+            auto optimize_in_pool(TP& tp, std::optional<target_t> acceptable_target, auto&& duration, std::size_t max_history, std::size_t max_tries);
 
             //------------------------------------------------------------------------------------------
             // random functions
@@ -528,12 +529,13 @@ namespace gb::yadro::algorithm
 
         //------------------------------------------------------------------------------------------
         template<class Fn, class CompareFn, class ...Types>
-        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_in_pool(gb::yadro::async::threadpool<>& tp, std::optional<target_t> acceptable_target,
+        template<class TP>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize_in_pool(TP& tp, std::optional<target_t> acceptable_target,
             auto&& duration, std::size_t max_history, std::size_t max_tries)
         {
             std::vector<std::future<stats>> futures;
 
-            for (std::size_t i = 0, thread_count = tp.max_thread_count(); i < thread_count; ++i)
+            for (std::size_t i = 0, thread_count = tp.thread_count(); i < thread_count; ++i)
             {
                 futures.push_back(tp([&]
                     {
@@ -552,16 +554,16 @@ namespace gb::yadro::algorithm
 
         //------------------------------------------------------------------------------------------
         template<class Fn, class CompareFn, class ...Types>
-        template<class Rep, class Period>
-        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration,
+        template<class TP, class Rep, class Period>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(TP& tp, target_t acceptable_target, std::chrono::duration<Rep, Period> duration,
             std::size_t max_history, std::size_t max_tries)
         {
             return optimize_in_pool(tp, acceptable_target, duration, max_history, max_tries);
         }
         //------------------------------------------------------------------------------------------
         template<class Fn, class CompareFn, class ...Types>
-        template<class Rep, class Period>
-        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(gb::yadro::async::threadpool<>& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
+        template<class TP, class Rep, class Period>
+        auto genetic_optimization_t<Fn, CompareFn, Types...>::optimize(TP& tp, std::chrono::duration<Rep, Period> duration, std::size_t max_history, std::size_t max_tries)
         {
             return optimize_in_pool(tp, std::nullopt, duration, max_history, max_tries);
         }
