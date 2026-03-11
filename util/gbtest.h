@@ -60,7 +60,7 @@ namespace gb::yadro::util
     //-----------------------------------------------------------------------------------------------------------------
     struct tester
     {
-        gb::yadro::async::v2::ThreadPool _pool;
+        gb::yadro::async::threadpool _pool;
         std::unordered_map<std::string, std::vector<test_base*>> _tests;
         mutable logger _log;
 

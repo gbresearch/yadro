@@ -101,8 +101,7 @@ namespace
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
         // first optimization run to populate history and test multithreading
-        //gb::yadro::async::threadpool<> tp(4);
-        gb::yadro::async::v2::ThreadPool tp(4);
+        gb::yadro::async::threadpool tp(4);
         opt.optimize(tp,
             /* time budget */    10ms,
             /*population_size=*/ 100,
@@ -169,8 +168,7 @@ namespace
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
         // first optimization run to populate history and test multithreading
-        //gb::yadro::async::threadpool<> tp(4);
-        gb::yadro::async::v2::ThreadPool tp(4);
+        gb::yadro::async::threadpool tp(4);
         opt.optimize(tp,
             /* phases*/          4,
             /* time budget */    10ms,
@@ -306,7 +304,7 @@ namespace
         }
         {// multithreaded
             optimizer.clear();
-            gb::yadro::async::v2::ThreadPool tp;
+            gb::yadro::async::threadpool tp;
             auto [stat, opt_map] = optimizer.optimize(tp, 100ms, 5);
 #if defined(NDEBUG)
             gbassert(opt_map.size() == 5);
@@ -325,7 +323,7 @@ namespace
         }
         {// multithreaded with acceptable_target
             optimizer.clear();
-            gb::yadro::async::v2::ThreadPool tp;
+            gb::yadro::async::threadpool tp;
             auto [stat, opt_map] = optimizer.optimize(tp, 0.01, 100ms, 5);
 #if defined(NDEBUG)
             gbassert(opt_map.size() == 5);

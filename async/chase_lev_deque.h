@@ -64,7 +64,7 @@
  * Type requirements
  * ─────────────────
  *   T must be trivially copyable (enforced by static_assert).  For complex
- *   task objects, store a pointer (e.g. Task*) — exactly as ThreadPool does —
+ *   task objects, store a pointer (e.g. Task*) — exactly as threadpool does —
  *   so the deque stores only the cheap, trivially-copyable pointer.
  *
  * Why seq_cst fences and not just acquire/release?
@@ -207,7 +207,7 @@ namespace gb::yadro::async
 
         ~WorkStealingDeque() {
             // Safe: the destructor is only called once all threads that could
-            // call steal() have been joined (e.g. the ThreadPool destructor joins
+            // call steal() have been joined (e.g. the threadpool destructor joins
             // workers before destroying deques).  No concurrent access is possible
             // at this point, so relaxed loads and plain deletes are correct.
             delete array_.load(std::memory_order_relaxed);

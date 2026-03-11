@@ -100,7 +100,7 @@
  * std::promise<T> as a single-entry waiter on the SharedState.
  *
  * ── Idle notification ─────────────────────────────────────────────────────
- * An optional on_idle callback (void(ThreadPool&)) fires whenever the pool
+ * An optional on_idle callback (void(threadpool&)) fires whenever the pool
  * transitions to fully-idle, defined as tasks_in_system_ == 0.
  *
  * When on_idle_ is invoked, all three conditions hold simultaneously:
@@ -168,10 +168,8 @@
 #include <vector>
 #include <shared_mutex>
 
-namespace gb::yadro::async::v2
-{
-    using namespace gb::yadro::async;
-    class ThreadPool;  // forward declaration — notify() calls pool->fire_continuation()
+namespace gb::yadro::async {
+    class threadpool;  // forward declaration — notify() calls pool->fire_continuation()
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Splitmix64 — lightweight RNG for victim selection
@@ -194,8 +192,8 @@ namespace gb::yadro::async::v2
 
     struct LifetimeToken {
         mutable std::shared_mutex mu;
-        ThreadPool* pool;   // set to nullptr in ~ThreadPool
-        explicit LifetimeToken(ThreadPool* p) : pool{ p } {}
+        threadpool* pool;   // set to nullptr in ~threadpool
+        explicit LifetimeToken(threadpool* p) : pool{ p } {}
     };
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -215,18 +213,18 @@ namespace gb::yadro::async::v2
     struct ContinuationHandle {
         std::atomic<int>                   dep_count;
         std::function<void()>              execute_fn;
-        ThreadPool* pool_raw_;  // unguarded — only used on
+        threadpool* pool_raw_;  // unguarded — only used on
         // worker threads (safe)
         std::shared_ptr<LifetimeToken>     token_;     // guards external-thread path
 
-        ContinuationHandle(int n, std::function<void()> fn, ThreadPool* p, std::shared_ptr<LifetimeToken> tok)
+        ContinuationHandle(int n, std::function<void()> fn, threadpool* p, std::shared_ptr<LifetimeToken> tok)
             : dep_count{ n }
             , execute_fn{ std::move(fn) }
             , pool_raw_{ p }
             , token_{ std::move(tok) } {
         }
 
-        void notify();   // defined after ThreadPool — needs fire_continuation()
+        void notify();   // defined after threadpool — needs fire_continuation()
     };
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -371,7 +369,7 @@ namespace gb::yadro::async::v2
 
         Task() = default;
 
-        explicit Task(std::shared_ptr<SharedState<T>> s, ThreadPool* p = nullptr, std::shared_ptr<LifetimeToken> tok = {})
+        explicit Task(std::shared_ptr<SharedState<T>> s, threadpool* p = nullptr, std::shared_ptr<LifetimeToken> tok = {})
             : state_{ std::move(s) }, pool_{ p }, pool_token_{ std::move(tok) } {
         }
 
@@ -414,7 +412,7 @@ namespace gb::yadro::async::v2
 
     private:
         std::shared_ptr<SharedState<T>> state_;
-        ThreadPool* pool_;
+        threadpool* pool_;
         std::shared_ptr<LifetimeToken> pool_token_;
     };
 
@@ -453,7 +451,7 @@ namespace gb::yadro::async::v2
             }
         }
     };
-        
+
     namespace detail {
 
         // task_arg_tuple(fut)
@@ -517,7 +515,7 @@ namespace gb::yadro::async::v2
     // Thread pool
     // ─────────────────────────────────────────────────────────────────────────────
 
-    class ThreadPool final {
+    class threadpool final {
     public:
 #ifdef __cpp_lib_hardware_interference_size
         static constexpr std::size_t kCacheLineSize =
@@ -529,11 +527,11 @@ namespace gb::yadro::async::v2
         static constexpr int kStealBatchSize = 8;
 
         enum class PoolState : std::uint8_t { Running, Draining, Stopped };
-        using IdleCallback = std::function<void(ThreadPool&)>;
+        using IdleCallback = std::function<void(threadpool&)>;
 
         // ── Construction ──────────────────────────────────────────────────────
 
-        explicit ThreadPool(
+        explicit threadpool(
             std::size_t  num_threads = std::thread::hardware_concurrency(),
             IdleCallback on_idle = {})
             : stop_{ false }
@@ -553,17 +551,17 @@ namespace gb::yadro::async::v2
             }
 
             for (std::size_t i = 0; i < n; ++i)
-                threads_.emplace_back(&ThreadPool::worker_loop, this, i);
+                threads_.emplace_back(&threadpool::worker_loop, this, i);
         }
 
-        ~ThreadPool() {
+        ~threadpool() {
             shutdown(true);                          // drains, joins all workers
             std::unique_lock lk{ token_->mu };         // waits for all in-flight
             token_->pool = nullptr;                  // external notify() sees null
         }
 
-        ThreadPool(const ThreadPool&) = delete;
-        ThreadPool& operator=(const ThreadPool&) = delete;
+        threadpool(const threadpool&) = delete;
+        threadpool& operator=(const threadpool&) = delete;
 
         // ── Shutdown ──────────────────────────────────────────────────────────
 
@@ -622,7 +620,7 @@ namespace gb::yadro::async::v2
             -> Task<std::invoke_result_t<F, Args...>>
         {
             if (state_.load(std::memory_order_acquire) != PoolState::Running)
-                throw std::runtime_error("wsq::ThreadPool::submit: pool is stopped");
+                throw std::runtime_error("wsq::threadpool::submit: pool is stopped");
 
             using R = std::invoke_result_t<F, Args...>;
             return make_and_enqueue<R>(
@@ -1001,8 +999,8 @@ namespace gb::yadro::async::v2
                 return;
             }
             struct depth_guard {
-                depth_guard() { ++ThreadPool::inline_depth_; }
-                ~depth_guard() { --ThreadPool::inline_depth_; }
+                depth_guard() { ++threadpool::inline_depth_; }
+                ~depth_guard() { --threadpool::inline_depth_; }
             } guard;
             work();
         }
@@ -1053,7 +1051,7 @@ namespace gb::yadro::async::v2
         static thread_local std::size_t local_id_;
         static thread_local std::size_t ext_home_raw_;
         static thread_local bool        executing_task_;
-        static thread_local ThreadPool* local_pool_;
+        static thread_local threadpool* local_pool_;
         static thread_local int inline_depth_; // preventing stack overflow in pathological cases of deep inline nesting (e.g. a long chain of continuations firing synchronously on the same worker).
         static constexpr int kMaxInlineDepth = 16; // maximum inline nesting depth before forced unwinding via enqueue_continuation.
 
@@ -1075,23 +1073,23 @@ namespace gb::yadro::async::v2
         std::shared_ptr<LifetimeToken> token_{ std::make_shared<LifetimeToken>(this) };   // constructed with raw this
     };
     // Defined here, not inline in the struct, because it calls pool->fire_continuation()
-    // which requires the complete ThreadPool definition.
+    // which requires the complete threadpool definition.
     inline void ContinuationHandle::notify() {
         if (dep_count.fetch_sub(1, std::memory_order_acq_rel) != 1)
             return;
 
         // ── Worker thread fast path ───────────────────────────────────────
         // If this thread is a worker of pool_raw_, the pool is alive by
-        // definition: shutdown() joins all workers before ~ThreadPool sets
+        // definition: shutdown() joins all workers before ~threadpool sets
         // the token to null.  No lock needed.
-        if (ThreadPool::local_pool_ == pool_raw_) {
+        if (threadpool::local_pool_ == pool_raw_) {
             pool_raw_->fire_continuation(execute_fn);
             return;
         }
 
         // ── External thread safe path ─────────────────────────────────────
         // shared_lock allows concurrent external notify() calls.
-        // unique_lock in ~ThreadPool waits for all of these to finish
+        // unique_lock in ~threadpool waits for all of these to finish
         // before nulling the pointer and freeing pool memory.
         std::shared_lock lk{ token_->mu };
         if (token_->pool)
@@ -1101,10 +1099,10 @@ namespace gb::yadro::async::v2
         // as calling submit() on a destroyed pool (precondition violation).
     }
 
-    inline thread_local std::size_t ThreadPool::local_id_ = ThreadPool::kNoWorker;
-    inline thread_local std::size_t ThreadPool::ext_home_raw_ =
+    inline thread_local std::size_t threadpool::local_id_ = threadpool::kNoWorker;
+    inline thread_local std::size_t threadpool::ext_home_raw_ =
         std::hash<std::thread::id>{}(std::this_thread::get_id());
-    inline thread_local bool ThreadPool::executing_task_ = false;
-    inline thread_local ThreadPool* ThreadPool::local_pool_ = nullptr;
-    inline thread_local int ThreadPool::inline_depth_ = 0;
+    inline thread_local bool threadpool::executing_task_ = false;
+    inline thread_local threadpool* threadpool::local_pool_ = nullptr;
+    inline thread_local int threadpool::inline_depth_ = 0;
 }

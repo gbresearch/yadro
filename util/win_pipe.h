@@ -612,7 +612,7 @@ namespace gb::yadro::util
     void start_server(std::size_t max_threads, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
         using namespace std::chrono_literals;
-        gb::yadro::async::v2::ThreadPool tp(max_threads);
+        gb::yadro::async::threadpool tp(max_threads);
         start_server(tp, pipename, log, std::forward<decltype(fn)>(fn)...);
     }
 
