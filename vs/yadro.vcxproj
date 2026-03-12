@@ -172,7 +172,6 @@
   <ItemGroup>
     <ClCompile Include="..\algorithm\adf_test.cpp" />
     <ClCompile Include="..\algorithm\mackinnon.cpp" />
-    <ClCompile Include="..\archive\archive.cpp" />
     <ClCompile Include="..\container\tree.cpp" />
     <ClCompile Include="..\simulator\fiber.cpp" />
     <ClCompile Include="..\simulator\scheduler.cpp" />
