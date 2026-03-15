@@ -105,8 +105,11 @@ namespace gb::yadro::archive
 
     // has member serialize(Archive) function
     template<class A, class T>
-    constexpr auto is_mem_serializable_v = is_detected_v<detail::serialize_mem_fn, A, T>
-        || is_detected_v<detail::serialize_mem_fn, std::add_lvalue_reference_t<A>, T>;
+    constexpr auto is_mem_serializable_v =
+        is_detected_v<detail::serialize_mem_fn, A, T >   // A&&, T&&
+        || is_detected_v<detail::serialize_mem_fn, A&, T >   // A&,  T&&
+        || is_detected_v<detail::serialize_mem_fn, A, T&>   // A&&, T&
+        || is_detected_v<detail::serialize_mem_fn, A&, T&>;  // A&,  T&
 
     // has free serialize(Archive, T) function
     template<class A, class T>
