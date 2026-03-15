@@ -624,7 +624,7 @@ namespace gb::yadro::util
             // 64-bit multiply: (a_hi:a_lo) * (b_hi:b_lo) = a_lo*b_lo + (a_hi*b_lo + a_lo*b_hi) << 32
             // We only need the low 64 bits of the result
 
-            __m256i b_swap = _mm256_shuffle_epi32(b, _MM_SHUFFLE(2, 3, 0, 1));  // Swap hi/lo 32-bit parts
+            __m256i b_swap = _mm256_shuffle_epi32(b, _MM_SHUFFLE(2, 3, 0, 1));  // swap hi/lo 32-bit parts
             __m256i prod_hi = _mm256_mul_epu32(a, b_swap);  // a_lo * b_hi
 
             __m256i a_swap = _mm256_shuffle_epi32(a, _MM_SHUFFLE(2, 3, 0, 1));
