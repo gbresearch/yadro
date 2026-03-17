@@ -43,6 +43,8 @@
 #include <expected>
 #include <atomic>
 #include <chrono>
+#include <concepts>
+#include <functional>
 
 #include "../util/gberror.h"
 #include "../util/string_util.h"
@@ -51,10 +53,11 @@
 namespace gb::yadro::archive
 {
     //---------------------------------------------------------------------
-    // convenience function to deserialize multiple types
+    // convenience function to deserialize multiple types, returning a tuple of deserialized values
     template<class... Ts>
-    inline auto deserialize(auto&& archive) requires requires { (Ts{}, ...); }
+    inline auto deserialize(iarchive_like auto&& archive) requires (std::default_initializable<Ts> && ...)
     {
+        // tuple is serialized as a sequence of its elements, so we can read them in order
         std::tuple<Ts...> tup;
         std::invoke(std::forward<decltype(archive)>(archive), tup);
         return tup;
@@ -65,23 +68,32 @@ namespace gb::yadro::archive
     inline auto serialization_size(auto&&... args);
 
     //---------------------------------------------------------------------
-    enum class archive_format_t { binary, text, custom };
+    // format of serialization: binary, text, or custom (default)
+    // text format is human-readable (intended for debugging), may not support all types
+    enum class archive_format_t 
+    { 
+        binary, // buffered streams, e.g. std::ofstream, std::istringstream, etc.
+        text, // human-readable, may not support all types, e.g. std::ofstream with std::noskipws
+        custom // use stream's read/write functions directly
+    };
     //---------------------------------------------------------------------
     // archive defined for in- and out-streams, but not for io-streams
-    template<class Stream, archive_format_t fmt = archive_format_t::custom>
+    template<archive_stream Stream, archive_format_t fmt = archive_format_t::custom>
     class archive
     {
         Stream s;
     public:
         using stream_type = std::remove_cvref_t<Stream>;
         using char_type = typename stream_type::char_type;
-        static_assert(is_readable_v<stream_type> && !is_writable_v<stream_type>
-            || !is_readable_v<stream_type> && is_writable_v<stream_type>,
-            "stream must be readable or writable, but not both");
 
         //-----------------------------------
-        explicit archive(auto&& ...args) : s(std::forward<decltype(args)>(args)...)
+        // can't put constraint: error C3546: '...': there are no parameter packs available to expand
+        explicit archive(auto&& ...args) //requires std::constructible_from<Stream, decltype(args)...>
+            : s(std::forward<decltype(args)>(args)...)
         {
+            static_assert(std::is_constructible_v<Stream, decltype(args)...>,
+                "Stream is not constructible from the provided arguments — "
+                "check the Stream type's constructor parameters");
         }
 
         //-----------------------------------
@@ -89,22 +101,27 @@ namespace gb::yadro::archive
         const auto& get_stream() const { return s; }
         
         //-----------------------------------
+        // reset the stream to a new state, e.g. for reuse after an error
         void reset(auto&&...args) { s.reset(std::forward<decltype(args)>(args)...); }
 
         //-----------------------------------
-        // read an array T
+        // read an array of trivial type T
         template<class T>
         auto read(T& t, std::size_t count = 1)
         {
-            static_assert(is_readable_v<stream_type>);
+            static_assert(readable_stream<stream_type>);
             static_assert(std::is_trivial_v<T>);
             if constexpr (fmt == archive_format_t::binary)
-                s.rdbuf()->sgetn(static_cast<char_type*>(static_cast<void*>(std::addressof(t))),
+            {
+                auto nread = s.rdbuf()->sgetn(static_cast<char_type*>(static_cast<void*>(std::addressof(t))),
                     count * (sizeof(T) / sizeof(char_type)));
+                if (nread != count)
+                    s.setstate(std::ios::failbit);  // propagate error to stream state
+            }
             else if constexpr (fmt == archive_format_t::text)
             {
                 for (size_t i = 0; i < count; ++i)
-                {   // TODO: spaces are skipped
+                {   // spaces are skipped by default, so we can read trivial types as text
                     s >> std::addressof(t)[i];
                 }
             }
@@ -114,11 +131,11 @@ namespace gb::yadro::archive
         }
 
         //-----------------------------------
-        // write an array of T
+        // write an array of trivial type T
         template<class T>
         auto write(const T& t, std::size_t count = 1)
         {
-            static_assert(is_writable_v<stream_type>);
+            static_assert(writable_stream<stream_type>);
             static_assert(std::is_trivial_v<T>);
 
             if constexpr (fmt == archive_format_t::binary)
@@ -136,40 +153,41 @@ namespace gb::yadro::archive
         }
 
         //-----------------------------------
+        // serialize a single object of any type
         template<class T>
         void operator()(T&& t)
         {
             using pure_type = std::remove_cvref_t<T>;
             static_assert(!std::is_pointer_v<pure_type>, "pointers cannot be serialized");
-            static_assert(!std::is_array_v<pure_type>); // TODO: process arrays of trivial types
+            static_assert(!std::is_array_v<pure_type>, "arrays are serialized as spans");
             
-            if constexpr (is_readable_v<stream_type>)
+            if constexpr (readable_stream<stream_type>)
             {   // read
                 static_assert(!std::is_const_v<std::remove_reference_t<T>>);
-                static_assert(is_serializable_v<archive, pure_type>, "type isn't read-serializable");
+                static_assert(serializable<archive, pure_type>, "type isn't read-serializable");
                 //  non-const r-values are treated as l-values
-                if constexpr (is_mem_serializable_v<archive, pure_type>)
-                    t.serialize(*this);
-                else if constexpr (is_free_serializable_v<archive, pure_type>)
-                    serialize(*this, t);
+                if constexpr (mem_serializable<archive, pure_type>)
+                    t.serialize(*this); // member function serialize
+                else if constexpr (free_serializable<archive, pure_type>)
+                    serialize(*this, t); // free function serialize
                 else if constexpr (std::is_trivial_v<pure_type>)
-                    read(t);
+                    read(t); // trivial types are read as raw bytes
             }
             else
             {   // write
                 using const_pure_type = std::add_const_t<pure_type>;
                 using const_ref_type = std::add_lvalue_reference_t<const_pure_type>;
 
-                static_assert(is_serializable_v<archive, const_pure_type>
-                    || is_serializable_v<archive, pure_type>, "type isn't write-serializable");
+                static_assert(serializable<archive, const_pure_type>
+                    || serializable<archive, pure_type>, "type isn't write-serializable");
 
-                if constexpr (is_mem_serializable_v<archive, const_pure_type>)
+                if constexpr (mem_serializable<archive, const_pure_type>)
                     const_cast<const_ref_type>(t).serialize(*this);
-                else if constexpr (is_free_serializable_v<archive, const_pure_type>)
+                else if constexpr (free_serializable<archive, const_pure_type>)
                     serialize(*this, const_cast<const_ref_type>(t));
-                else if constexpr (is_mem_serializable_v<archive, pure_type>)
+                else if constexpr (mem_serializable<archive, pure_type>)
                     const_cast<pure_type&>(t).serialize(*this); // symmetric non-const serialization only
-                else if constexpr (is_free_serializable_v<archive, pure_type>)
+                else if constexpr (free_serializable<archive, pure_type>)
                     serialize(*this, const_cast<pure_type&>(t));
                 else if constexpr (std::is_trivial_v<pure_type>)
                     write(t);
@@ -177,6 +195,7 @@ namespace gb::yadro::archive
         }
 
         //-----------------------------------
+        // serialize multiple objects in order
         template<class... Ts>
         void operator()(Ts&&... ts) requires(sizeof...(Ts) > 1)
         {
@@ -184,7 +203,7 @@ namespace gb::yadro::archive
         }
 
         //-----------------------------------
-        // fixed record size serialization with padding at the end of the record to allow non-destructive expansion
+        // fixed record size serialization with padding at the end of the record to reserve space for future expansion
         void serialize_with_padding(std::size_t record_size, std::uint8_t padding, auto&& ...ts)
         {
             (*this)(decltype(ts)(ts)...);
@@ -197,7 +216,8 @@ namespace gb::yadro::archive
         }
     };
 
-    template<class Stream, archive_format_t Fmt>
+    // deduction guide for archive class template
+    template<archive_stream Stream, archive_format_t Fmt>
     archive(Stream&&)->archive<Stream, Fmt>;
     
     //---------------------------------------------------------------------
@@ -206,15 +226,12 @@ namespace gb::yadro::archive
     {
         using char_type = char;
 
-        void write(const char_type* c, std::streamsize size)
-        {
-            _size += size;
-        }
+        // accumulate the size of all data written to the stream
+        void write(const char_type* c, std::streamsize size) { _size += size; }
 
         auto get_size() const { return _size; }
     private:
-        std::uint64_t _size;
-        std::optional<std::string> _md5sum;
+        std::uint64_t _size{};
     };
 
     // calculate the size (in bytes) of buffer necessary to serialize binary data
@@ -250,6 +267,7 @@ namespace gb::yadro::archive
     }
 
     //---------------------------------------------------------------------
+    // memory stream classes for serialization to/from memory buffers
     template<std::ranges::sized_range>
     struct imem_stream;
 
@@ -278,6 +296,7 @@ namespace gb::yadro::archive
     {
         using char_type = typename container_t::value_type;
         using omem_t = omem_stream< container_t>;
+        // construct from memory buffer of omem_stream or from archive with omem_stream
         explicit imem_stream(omem_t&& om) : _buf(std::move(om._buf)) {}
         explicit imem_stream(const omem_t& om) : _buf(om._buf) {}
         explicit imem_stream(archive<omem_t, archive_format_t::custom>&& oma) : imem_stream(std::move(oma.get_stream())) {}
@@ -302,10 +321,10 @@ namespace gb::yadro::archive
     };
 
 
-    template<class Stream>
+    template<archive_stream Stream>
     using bin_archive = archive<Stream, archive_format_t::binary>;
 
-    template<class Stream>
+    template<archive_stream Stream>
     using text_archive = archive<Stream, archive_format_t::text>;
 
     template<std::ranges::sized_range container_t = std::vector<char>>
@@ -316,8 +335,9 @@ namespace gb::yadro::archive
 
     //---------------------------------------------------------------------
     // serialize through conversion to type As
-    template<class As, class T>
-    requires (std::is_default_constructible_v<As>)
+    // Proxy type — use only as a temporary in archive calls.
+    // Holds a reference to the original value; never store this object.
+    template<std::default_initializable As, class T>
     class serialize_as_t
     {
         T t;
@@ -326,27 +346,29 @@ namespace gb::yadro::archive
         decltype(auto) get() const { return t; }
         decltype(auto) get() { return t; }
 
-        template<class Ar>
-        auto serialize(Ar& a) requires(is_iarchive_v<Ar>)
+        template<iarchive_like Ar>
+        auto serialize(Ar& a)
         {
             t = static_cast<std::remove_cvref_t<T>>(std::get<0>(deserialize<As>(a)));
         }
-        template<class Ar>
-        auto serialize(Ar& a) const requires(is_oarchive_v<Ar>)
+        template<oarchive_like Ar>
+        auto serialize(Ar& a) const
         {
             a(static_cast<As>(t));
         }
     };
 
-    template<class As, class T>
+    template<std::default_initializable As, class T>
     serialize_as_t(T&& t)->serialize_as_t<As, T>;
 
-    template<class As, class T>
-    auto serialize_as(T&& t) { return serialize_as_t<As, T>(std::forward<T>(t)); }
+    template<std::default_initializable As, class T>
+    [[nodiscard]] auto serialize_as(T&& t) {
+        return serialize_as_t<As, T>(std::forward<T>(t));
+    }
 
     //---------------------------------------------------------------------
     // variadic serialize function
-    template<class Archive, class... Ts>
+    template<archive_like Archive, class... Ts>
     void serialize(Archive&& a, Ts&& ... ts) requires(sizeof...(Ts) > 1)
     {
         (serialize(std::forward<Archive>(a), std::forward<Ts>(ts)), ...);
@@ -355,8 +377,8 @@ namespace gb::yadro::archive
     //---------------------------------------------------------------------
     // tuple/pair
 
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_tuple_v<std::remove_cvref_t<T>>)
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(tuple_like<std::remove_cvref_t<T>>)
     {
         if constexpr(std::tuple_size_v<std::remove_cvref_t<T>>)
             std::apply(std::forward<Archive>(a), std::forward<T>(t));
@@ -364,13 +386,10 @@ namespace gb::yadro::archive
 
     //---------------------------------------------------------------------
     // serialization of contiguous containers (vector, string, valarray) of trivial types
-    template<class Archive, class T>
+    template<archive_like Archive, class T>
     auto serialize(Archive&& a, T&& t) requires(is_trivial_sequence_v<T>)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>, "Archive can't be const");
-        static_assert(is_iarchive_v<Archive> || is_oarchive_v<Archive>, "invalid archive");
-
-        if constexpr (is_iarchive_v<Archive>)
+        if constexpr (iarchive_like<Archive>)
         {
             static_assert(!std::is_const_v<std::remove_reference_t<T>>);
             
@@ -393,14 +412,12 @@ namespace gb::yadro::archive
 
     //---------------------------------------------------------------------
     // serialization of sequences of non-trivial types
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_common_sequence_v<T>)
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(common_sequence<T>)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>, "Archive can't be const");
-
-        if constexpr (is_resizable_v<std::remove_cvref_t<T>>)
+        if constexpr (resizable<std::remove_cvref_t<T>>)
         {
-            if constexpr (is_iarchive_v<Archive>)
+            if constexpr (iarchive_like<Archive>)
             {
                 static_assert(!std::is_const_v<std::remove_reference_t<T>>);
                 static_assert(std::is_default_constructible_v<std::remove_cvref_t<decltype(t[0])>>);
@@ -423,15 +440,14 @@ namespace gb::yadro::archive
 
     //---------------------------------------------------------------------
     // queue/stack serialization
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_queue_v<T> || is_stack_v<T>)
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(queue_like<T> || stack_like<T>)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>, "Archive can't be const");
-        static_assert(!std::is_const_v<std::remove_reference_t<T>>);
         using value_type = typename std::remove_cvref_t<T>::value_type;
 
-        if constexpr (is_iarchive_v<Archive>)
+        if constexpr (iarchive_like<Archive>)
         {
+            static_assert(!std::is_const_v<std::remove_reference_t<T>>);
             static_assert(std::is_default_constructible_v<value_type>);
 
             // reading clears the queue
@@ -450,60 +466,103 @@ namespace gb::yadro::archive
         }
         else
         {
-            if constexpr (is_queue_v<T>)
+            if constexpr (queue_like<T>)
             {
                 a(serialize_as<std::uint64_t>(std::size(t)));
 
                 // must preserve the original queue
-                std::remove_cvref_t<T> tmp;
+                std::remove_cvref_t<T> tmp{ t };
 
-                while (!std::empty(t))
+                while (!std::empty(tmp))
                 {
-                    a(t.front());
-                    tmp.push(std::move(t.front()));
-                    t.pop();
+                    a(tmp.front());
+                    tmp.pop();
                 }
-
-                t.swap(tmp);
             }
-            else
+            else // stack
             {
-                static_assert(is_stack_v<T>);
+                static_assert(stack_like<T>);
 
-                // must preserve the original stack
+                // create a temporary vecor to hold the stack elements in reverse order
                 std::vector<value_type> tmp;
                 tmp.reserve(std::size(t));
 
-                while (!std::empty(t))
+                for (std::remove_cvref_t<T> t_copy{ t }; !std::empty(t_copy);)
                 {
-                    tmp.push_back(std::move(t.top()));
-                    t.pop();
+                    tmp.push_back(std::move(t_copy.top()));
+                    t_copy.pop();
                 }
 
-                // serialize as reversed vector
                 std::reverse(std::begin(tmp), std::end(tmp));
-
-                a(tmp);
-
-                // restore the original stack
-                for (auto&& v : tmp)
-                {
-                    t.push(std::move(v));
-                }
+                a(tmp); // serialize vector of stack elements in reversed order (bottom of stack first)
             }
         }
     }
 
     //---------------------------------------------------------------------
-    // serialization of ordered associative containers
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_ordered_associative_v<T> && not is_unordered_associative_v<T>)
+    // serialization of std::priority_queue
+    template<archive_like Archive, class T, class Container, class Compare>
+    auto serialize(Archive&& a, std::priority_queue<T, Container, Compare>& t)
+        requires(!std::is_const_v<std::remove_reference_t<decltype(t)>>)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
+        if constexpr (iarchive_like<Archive>)
+        {
+            static_assert(std::is_default_constructible_v<T>);
+
+            // clear by swapping with empty
+            std::priority_queue<T, Container, Compare>{}.swap(t);
+
+            std::size_t size{};
+            a(serialize_as<std::uint64_t>(size));
+
+            for (std::size_t i = 0; i < size; ++i)
+            {
+                T tmp{};
+                a(tmp);
+                t.push(std::move(tmp));  // push restores heap property automatically
+            }
+        }
+        else
+        {
+            // copy to a temporary — priority_queue is CopyConstructible
+            // if T is CopyConstructible (which it must be for priority_queue to work)
+            auto tmp = t;  // copy preserves heap order
+
+            a(serialize_as<std::uint64_t>(tmp.size()));
+
+            while (!tmp.empty())
+            {
+                a(tmp.top());  // serialize in heap order (highest priority first)
+                tmp.pop();
+            }
+            // original t is untouched
+        }
+    }
+
+    // const overload for write — copy from const is fine
+    template<oarchive_like Archive, class T, class Container, class Compare>
+    auto serialize(Archive&& a, const std::priority_queue<T, Container, Compare>& t)
+    {
+        auto tmp = t;  // CopyConstructible — legal even from const
+
+        a(serialize_as<std::uint64_t>(tmp.size()));
+
+        while (!tmp.empty())
+        {
+            a(tmp.top());
+            tmp.pop();
+        }
+    }
+
+    //---------------------------------------------------------------------
+    // serialization of ordered associative containers
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(ordered_associative<T> && not unordered_associative<T>)
+    {
         using key_type = typename std::remove_cvref_t<T>::key_type;
         using value_type = typename std::remove_cvref_t<T>::value_type;
 
-        if constexpr (is_iarchive_v<Archive>)
+        if constexpr (iarchive_like<Archive>)
         {
             static_assert(!std::is_const_v<std::remove_reference_t<T>>);
             t.clear();
@@ -541,15 +600,14 @@ namespace gb::yadro::archive
     }
 
     //---------------------------------------------------------------------
-    // serialization of ordered associative containers
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_unordered_associative_v<T>)
+    // serialization of unordered associative containers
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(unordered_associative<T>)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
         using key_type = typename std::remove_cvref_t<T>::key_type;
         using value_type = typename std::remove_cvref_t<T>::value_type;
 
-        if constexpr (is_iarchive_v<Archive>)
+        if constexpr (iarchive_like<Archive>)
         {
             static_assert(!std::is_const_v<std::remove_reference_t<T>>);
             t.clear();
@@ -594,12 +652,10 @@ namespace gb::yadro::archive
 
     //---------------------------------------------------------------------
     // serialization of optional
-    template<class Archive, class T>
-    auto serialize(Archive&& a, T&& t) requires(is_optional_v<T>)
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(optional_like<T>)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
-
-        if constexpr (is_iarchive_v<Archive>)
+        if constexpr (iarchive_like<Archive>)
         {
             auto has_value = false;
             a(serialize_as<char>(has_value));
@@ -653,12 +709,10 @@ namespace gb::yadro::archive
     }
     //---------------------------------------------------------------------
     // serialization of variant
-    template<class Archive, variant_c T>
-    auto serialize(Archive&& a, T&& t) //requires(is_variant_v<T>)
+    template<archive_like Archive, variant_like T>
+    auto serialize(Archive&& a, T&& t)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
-
-        if constexpr (is_iarchive_v<Archive>)
+        if constexpr (iarchive_like<Archive>)
         {
             std::size_t index{};
             a(serialize_as<std::uint64_t>(index));
@@ -676,43 +730,39 @@ namespace gb::yadro::archive
     }
     //---------------------------------------------------------------------
     // serialization of std::array
-    template<class Archive, class T, std::size_t N>
-    auto serialize(Archive&& a, std::array<T, N>& t) requires(is_iarchive_v<Archive>)
+    template<iarchive_like Archive, class T, std::size_t N>
+    auto serialize(Archive&& a, std::array<T, N>& t)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
         for (std::size_t i = 0; i < N; ++i)
             a(t[i]);
     }
     //---------------------------------------------------------------------
     // serialization of std::array
-    template<class Archive, class T, std::size_t N>
-    auto serialize(Archive&& a, const std::array<T, N>& t) requires(is_oarchive_v<Archive>)
+    template<oarchive_like Archive, class T, std::size_t N>
+    auto serialize(Archive&& a, const std::array<T, N>& t)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
         for (std::size_t i = 0; i < N; ++i)
             a(t[i]);
     }
     //---------------------------------------------------------------------
     // serialize span
-    template<class Archive, class T, std::size_t Extent>
-    auto serialize(Archive&& a, std::span<T, Extent>& s) requires(is_iarchive_v<Archive>)
+    template<iarchive_like Archive, class T, std::size_t Extent>
+    auto serialize(Archive&& a, std::span<T, Extent>& s)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
         for (auto it = s.begin(); it != s.end(); ++it)
             a(*it);
     }
     //---------------------------------------------------------------------
     // serialize span
-    template<class Archive, class T, std::size_t Extent>
-    auto serialize(Archive&& a, const std::span<T, Extent>& s) requires(is_oarchive_v<Archive>)
+    template<oarchive_like Archive, class T, std::size_t Extent>
+    auto serialize(Archive&& a, const std::span<T, Extent>& s)
     {
-        static_assert(!std::is_const_v<std::remove_reference_t<Archive>>);
         for (auto it = s.begin(); it != s.end(); ++it)
             a(*it);
     }
     //---------------------------------------------------------------------
-    template<class Archive, class T, class E>
-    auto serialize(Archive&& a, std::expected<T, E>& exp) requires(is_iarchive_v<Archive>)
+    template<iarchive_like Archive, class T, class E>
+    auto serialize(Archive&& a, std::expected<T, E>& exp)
     {
         static_assert(!std::is_void_v<E>);
 
@@ -736,8 +786,8 @@ namespace gb::yadro::archive
         }
     }
 
-    template<class Archive, class T, class E>
-    auto serialize(Archive&& a, const std::expected<T, E>& exp) requires(is_oarchive_v<Archive>)
+    template<oarchive_like Archive, class T, class E>
+    auto serialize(Archive&& a, const std::expected<T, E>& exp)
     {
         static_assert(!std::is_void_v<E>);
 
@@ -790,22 +840,22 @@ namespace gb::yadro::archive
     // -----------------------------------------------------------------------------
     // serialize_duration
     //
-    // On save (is_oarchive_v<Archive>):
+    // On save (oarchive_like<Archive>):
     //   Extract .count() into a local Rep, pass that to the archive.
     //   The duration itself is not modified.
     //
-    // On load (is_iarchive_v<Archive>):
+    // On load (iarchive_like<Archive>):
     //   Load a fresh Rep from the archive, reconstruct the duration in-place.
     //   Requires that the duration is not const — enforced by static_assert so the
     //   error message is actionable rather than a template wall.
     // -----------------------------------------------------------------------------
-    template<typename Archive, detail::DurationType Dur>
+    template<archive_like Archive, detail::DurationType Dur>
     void serialize(Archive&& ar, Dur&& d)
     {
         using duration_t = std::remove_cvref_t<Dur>;
         using rep_t = typename detail::is_duration_type<duration_t>::rep_type;
 
-        if constexpr (is_oarchive_v<std::remove_cvref_t<Archive>>) {
+        if constexpr (oarchive_like<Archive>) {
             // Save: duration may be const; we only read from it.
             rep_t count = d.count();
             std::invoke(std::forward<Archive>(ar), count);
@@ -828,11 +878,11 @@ namespace gb::yadro::archive
     // -----------------------------------------------------------------------------
     // serialize_atomic
     //
-    // On save (is_oarchive_v<Archive>):
+    // On save (oarchive_like<Archive>):
     //   Load the current value into a plain T local, pass that to the archive.
     //   load() is a const member of atomic, so the const& binding is legal.
     //
-    // On load (is_iarchive_v<Archive>):
+    // On load (iarchive_like<Archive>):
     //   Read a fresh T from the archive, store it back into the atomic.
     //   Requires a non-const atomic — enforced by static_assert.
     //
@@ -841,12 +891,12 @@ namespace gb::yadro::archive
     // all threads have finished (load); there is no concurrent access to these
     // atomics at the point of serialization.
     // -----------------------------------------------------------------------------
-    template<typename Archive, detail::AtomicType Atom>
+    template<archive_like Archive, detail::AtomicType Atom>
     void serialize(Archive&& ar, Atom&& atom)
     {
         using T = typename detail::is_atomic_type<std::remove_cvref_t<Atom>>::value_type;
 
-        if constexpr (is_oarchive_v<std::remove_cvref_t<Archive>>) {
+        if constexpr (oarchive_like<Archive>) {
             // Save: atomic::load() is const — legal even when Atom is const&.
             T tmp = atom.load(std::memory_order_relaxed);
             std::invoke(std::forward<Archive>(ar), tmp);
@@ -867,12 +917,13 @@ namespace gb::yadro::archive
 
 
 #if defined(clang_p1061)
+    // when compier supports variadic structured bindings, we can serialize aggregate-like types without defining custom serialize functions for them
     //---------------------------------------------------------------------
     // serialize aggregate-like types using variadic structured bindings
     // note: std::tuple is not an aggregate, std::aray is an aggregate
     // note: is_aggregate is stronger constraint than necessary
 
-    template<class Archive, class T> requires(std::is_aggregate_v<T>)
+    template<archive_like Archive, class T> requires(std::is_aggregate_v<T>)
     auto serialize(Archive&& a, T&& t)
     {
         auto&& [...fields] = std::forward<T>(t);
@@ -882,7 +933,7 @@ namespace gb::yadro::archive
 
     //---------------------------------------------------------------------
     // most common serialization in binary stream
-    template<class Stream, class... Ts>
+    template<archive_stream Stream, class... Ts>
     void bin_serialize(Stream&& s, Ts&& ... ts) requires(sizeof...(Ts) > 0)
     {
         serialize(bin_archive(std::forward<Stream>(s)), std::forward<Ts>(ts)...);

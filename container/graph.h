@@ -214,7 +214,7 @@ namespace gb::yadro::container
         {}
 
         template<class Archive>
-        explicit graph(Archive&& a) requires(gb::yadro::archive::is_iarchive_v<Archive>)
+        explicit graph(Archive&& a) requires(gb::yadro::archive::iarchive_like<Archive>)
         {
             serialize(a);
         }

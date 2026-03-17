@@ -25,204 +25,184 @@
 //  ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
-
 #pragma once
-
-#include <type_traits>
-#include <vector>
-#include <string>
 #include <array>
+#include <iterator>
+#include <string>
+#include <type_traits>
 #include <valarray>
 #include <variant>
+#include <vector>
 
-#include "../util/traits.h"
+namespace gb::yadro::archive {
 
-namespace gb::yadro::archive
-{
-    //---------------------------------------------------------------------
-    // private details
-    //---------------------------------------------------------------------
-    namespace detail
-    {
-
-        // function tests
-
-        template<class A, class T>
-        using serialize_mem_fn = decltype(std::declval<T>().template serialize(std::declval<A>()));
-
-        template<class A, class T>
-        using serialize_fn = decltype(serialize(std::declval<A>(), std::declval<T>()));
-
-        template<class S>
-        using read_fn = decltype(std::declval<S>().read((typename std::remove_cvref_t<S>::char_type*)0, (std::streamsize)0));
-
-        template<class S>
-        using write_fn = decltype(std::declval<S>().write((const typename std::remove_cvref_t<S>::char_type*)0, (std::streamsize)0));
-
-        template<class T>
-        using sequence_fn = decltype(std::begin(std::declval<T>()), std::end(std::declval<T>()),
-            std::size(std::declval<T>()));
-
-        template<class T>
-        using resize_fn = decltype(std::declval<T>().resize(0));
-
-        template<class T>
-        using tuple_fn = decltype(std::tuple_size<T>{});
-
-        template<class T>
-        using queue_fn = decltype(std::declval<T>().front(), std::empty(std::declval<T>()),
-            std::declval<T>().push(std::declval<typename std::remove_cvref_t<T>::value_type>()),
-            std::declval<T>().pop(), std::size(std::declval<T>()));
-
-        template<class T>
-        using stack_fn = decltype(std::declval<T>().top(), std::empty(std::declval<T>()),
-            std::declval<T>().push(std::declval<typename std::remove_cvref_t<T>::value_type>()),
-            std::declval<T>().pop(), std::size(std::declval<T>()));
-
-        template<class T>
-        using ordered_associative_fn = decltype(std::begin(std::declval<T>()), std::end(std::declval<T>()),
-            std::size(std::declval<T>()), std::declval<T>().clear(),
-            std::declval<T>().insert(std::declval<typename std::remove_cvref_t<T>::value_type>()));
-
-        template<class T>
-        using unordered_associative_fn = decltype(std::begin(std::declval<T>()), std::end(std::declval<T>()),
-            std::size(std::declval<T>()), std::declval<T>().bucket_count(), std::declval<T>().rehash(std::size_t{}),
-            std::declval<T>().reserve(0));
-
-        template<class To, class From>
-        using cast_fn = decltype(static_cast<To>(std::declval<From>()));
-
-        template<class T>
-        using optional_fn = decltype(std::declval<T>().has_value(),
-            std::declval<T>().emplace(std::declval<T>().value()));
-
-        template<class T>
-        using variant_fn = decltype(std::declval<T>().index(), std::declval<T>().valueless_by_exception(),
-            std::declval<T>().template emplace<0>(std::get<0>(std::declval<T>())));
-    }
-
-    using util::is_detected_v;
-
-    // has member serialize(Archive) function
-    template<class A, class T>
-    constexpr auto is_mem_serializable_v =
-        is_detected_v<detail::serialize_mem_fn, A, T >   // A&&, T&&
-        || is_detected_v<detail::serialize_mem_fn, A&, T >   // A&,  T&&
-        || is_detected_v<detail::serialize_mem_fn, A, T&>   // A&&, T&
-        || is_detected_v<detail::serialize_mem_fn, A&, T&>;  // A&,  T&
-
-    // has free serialize(Archive, T) function
-    template<class A, class T>
-    constexpr auto is_free_serializable_v = is_detected_v<detail::serialize_fn, A, T> // A&&, T&&
-        || is_detected_v<detail::serialize_fn, std::add_lvalue_reference_t<A>, T> // A&, T&&
-        || is_detected_v<detail::serialize_fn, A, std::add_lvalue_reference_t<T>> // A&&, T&
-        || is_detected_v<detail::serialize_fn, std::add_lvalue_reference_t<A>, std::add_lvalue_reference_t<T>>; // A&, T&
-
-    // serializable types are: trivial or have member serialilize or free serialize functions
-    template<class A, class T>
-    constexpr bool is_serializable_v = std::is_trivial_v<T> || is_mem_serializable_v<A, T> || is_free_serializable_v<A, T>;
+    // ── Streams ───────────────────────────────────────────────────────────────
 
     template<class S>
-    constexpr bool is_readable_v = is_detected_v<detail::read_fn, S>;
+    concept readable_stream = requires(S & s,
+        typename std::remove_cvref_t<S>::char_type * p, std::streamsize n) {
+        s.read(p, n);
+    };
 
     template<class S>
-    constexpr bool is_writable_v = is_detected_v<detail::write_fn, S>;
+    concept writable_stream = requires(S & s,
+        const typename std::remove_cvref_t<S>::char_type * p, std::streamsize n) {
+        s.write(p, n);
+    };
+
+    // achive stream must be either readable or writable, but not both (e.g. iostreams are not supported)
+    template<class S>
+    concept archive_stream = readable_stream<S> && !writable_stream<S> ||
+        writable_stream<S> && !readable_stream<S>;
+
+    // ── Archives ──────────────────────────────────────────────────────────────
+    // readable and writable archives can't be const
+    template<class A>
+    concept iarchive_like = requires { typename std::remove_cvref_t<A>::stream_type; }
+    && readable_stream<typename std::remove_cvref_t<A>::stream_type>
+        && !std::is_const_v<std::remove_reference_t<A>>;
 
     template<class A>
-    constexpr bool is_iarchive_v = is_readable_v<typename std::remove_cvref_t<A>::stream_type>;
+    concept oarchive_like = requires { typename std::remove_cvref_t<A>::stream_type; }
+    && writable_stream<typename std::remove_cvref_t<A>::stream_type>
+        && !std::is_const_v<std::remove_reference_t<A>>;
 
     template<class A>
-    constexpr bool is_oarchive_v = is_writable_v<typename std::remove_cvref_t<A>::stream_type>;
+    concept archive_like = iarchive_like<A> || oarchive_like<A>;
 
-    template<class A>
-    constexpr bool is_archive_v = is_iarchive_v<A> || is_oarchive_v<A>;
+    // ── Serializable ──────────────────────────────────────────────────────────
+    //
+    //  Detects: t.serialize(a) — lvalue object, lvalue or rvalue archive
+    //  (rvalue archive needed for: obj.serialize(WriteFileArchive("abc")))
 
-    template<class T>
-    constexpr bool is_resizable_v = is_detected_v<detail::resize_fn, T>;
+    template<class A, class T>
+    concept mem_serializable =
+        requires(T & t, A & a) { t.serialize(a); } ||
+        requires(T & t, A && a) { t.serialize(std::move(a)); };
+
+    //  Detects: serialize(a, t) — free function, same archive variations
+
+    template<class A, class T>
+    concept free_serializable =
+        requires(A & a, T & t) { serialize(a, t); } ||
+        requires(A && a, T & t) { serialize(std::move(a), t); };
+
+    template<class A, class T>
+    concept serializable =
+        std::is_trivial_v<std::remove_cvref_t<T>> ||
+        mem_serializable<A, T> ||
+        free_serializable<A, T>;
+
+    // ── Castable ──────────────────────────────────────────────────────────────
 
     template<class To, class From>
-    constexpr bool is_castable_v = is_detected_v<detail::cast_fn, To, From>;
+    concept castable = requires(From f) { static_cast<To>(f); };
 
-    //-----------------------------------------------------------------------------------------
-    // fixed size arrays
-    template<class T>
-    struct is_fixed_array : std::false_type {};
-
-    template<class T, std::size_t N>
-    struct is_fixed_array<T[N]> : std::true_type {};
-
-    template<class T, std::size_t N>
-    struct is_fixed_array<std::array<T, N>> : std::true_type {};
+    // ── Resizable ─────────────────────────────────────────────────────────────
 
     template<class T>
-    constexpr bool is_fixed_array_v = is_fixed_array<T>::value;
+    concept resizable = requires(std::remove_cvref_t<T>&t) { t.resize(std::size_t{}); };
 
-    //-----------------------------------------------------------------------------------------
-    // contiguous sequences of trivial types can be serialized as a single write/read
-    //-----------------------------------------------------------------------------------------
-    template<class T>
-    struct is_trivial_sequence : std::false_type {};
+    // ── Fixed-size arrays: T[N] and std::array<T,N> ───────────────────────────
+    //   Requires explicit specialization — no concept can distinguish
+    //   std::array from std::tuple without type-list inspection.
 
-    template<class T, class A>
-    struct is_trivial_sequence<std::vector<T, A>> : std::bool_constant<std::is_trivial_v<T>> {};
-
-    template<class T, class Traits, class A>
-    struct is_trivial_sequence <std::basic_string<T, Traits, A>> : std::bool_constant<std::is_trivial_v<T>> {};
+    template<class T>           struct is_fixed_array : std::false_type {};
+    template<class T, size_t N> struct is_fixed_array<T[N]> : std::true_type {};
+    template<class T, size_t N> struct is_fixed_array<std::array<T, N>> : std::true_type {};
 
     template<class T>
-    struct is_trivial_sequence <std::valarray<T>> : std::bool_constant<std::is_trivial_v<T>> {};
+    concept fixed_array = is_fixed_array<std::remove_cvref_t<T>>::value;
+
+    // ── Trivial sequences: bulk read/write as raw bytes ───────────────────────
+    //   Explicit specialization needed — trivial element type can't be
+    //   inferred from an iterator-based concept alone.
+
+    template<class T>               struct is_trivial_sequence : std::false_type {};
+    template<class T, class A>      struct is_trivial_sequence<std::vector<T, A>>
+    : std::bool_constant<std::is_trivial_v<T>> {};
+    template<class T, class Tr, class A> struct is_trivial_sequence<std::basic_string<T, Tr, A>>
+    : std::bool_constant<std::is_trivial_v<T>> {};
+    template<class T>               struct is_trivial_sequence<std::valarray<T>>
+    : std::bool_constant<std::is_trivial_v<T>> {};
 
     template<class T>
     constexpr bool is_trivial_sequence_v = is_trivial_sequence<std::remove_cvref_t<T>>::value;
 
-    //-----------------------------------------------------------------------------------------
-    // tuple/pair
-    template<class T>
-    constexpr bool is_tuple_v = is_detected_v<detail::tuple_fn, T> && !is_fixed_array_v<T>;
-
-    //-----------------------------------------------------------------------------------------
-    // non-trivial common sequences, resizable or fixed
-    template<class T>
-    constexpr bool is_common_sequence_v = is_detected_v<detail::sequence_fn, T>
-        && !is_trivial_sequence_v<T> && !std::is_trivial_v<std::remove_cvref_t<T>>
-        && (is_resizable_v<std::remove_cvref_t<T>> || is_fixed_array_v<std::remove_cvref_t<T>>);
-
-    //-----------------------------------------------------------------------------------------
-    // queue
-    template<class T>
-    constexpr bool is_queue_v = is_detected_v<detail::queue_fn, T>
-        && !is_detected_v<detail::resize_fn, T>;
-
-    //-----------------------------------------------------------------------------------------
-    // stack
-    template<class T>
-    constexpr bool is_stack_v = is_detected_v<detail::stack_fn, T>
-        && !is_detected_v<detail::resize_fn, T>;
-
-    //-----------------------------------------------------------------------------------------
-    // ordered associative containers
-    template<class T>
-    constexpr bool is_ordered_associative_v = is_detected_v<detail::ordered_associative_fn, T>
-        && !is_detected_v<detail::resize_fn, T>;
-
-    //-----------------------------------------------------------------------------------------
-    // unordered associative containers
-    template<class T>
-    constexpr bool is_unordered_associative_v = is_detected_v<detail::unordered_associative_fn, T>;
-
-    //-----------------------------------------------------------------------------------------
-    // optional
-    template<class T>
-    constexpr bool is_optional_v = is_detected_v < detail::optional_fn, T>;
-
-    //-----------------------------------------------------------------------------------------
-    // variant
-    template<class T>
-    constexpr bool is_variant_v = is_detected_v < detail::variant_fn, T>;
+    // ── Tuple/pair ────────────────────────────────────────────────────────────
 
     template<class T>
-    concept variant_c = requires { 
-        /*std::declval<T>().index();*/  
-        std::visit([](auto&&) {}, std::declval<T>()); 
-        std::variant_size_v<std::remove_cvref_t<T>>; };
+    concept tuple_like = requires { typename std::tuple_size<std::remove_cvref_t<T>>::type; }
+    && !fixed_array<T>;
+
+    // ── Common (non-trivial, resizable or fixed) sequences ────────────────────
+
+    template<class T>
+    concept common_sequence =
+        requires(std::remove_cvref_t<T>&t) { std::begin(t); std::end(t); std::size(t); }
+    && !is_trivial_sequence_v<T>
+        && !std::is_trivial_v<std::remove_cvref_t<T>>
+        && (resizable<T> || fixed_array<T>);
+
+    // ── Queue ─────────────────────────────────────────────────────────────────
+
+    template<class T>
+    concept queue_like =
+        requires(std::remove_cvref_t<T>&t) {
+        t.front();
+        std::empty(t);
+        std::size(t);
+        t.push(std::declval<typename std::remove_cvref_t<T>::value_type>());
+        t.pop();
+    } && !resizable<T>;
+
+    // ── Stack ─────────────────────────────────────────────────────────────────
+
+    template<class T>
+    concept stack_like =
+        requires(std::remove_cvref_t<T>&t) {
+        t.top();
+        std::empty(t);
+        std::size(t);
+        t.push(std::declval<typename std::remove_cvref_t<T>::value_type>());
+        t.pop();
+    } && !resizable<T>;
+
+    // ── Ordered associative containers ───────────────────────────────────────
+
+    template<class T>
+    concept ordered_associative =
+        requires(std::remove_cvref_t<T>&t) {
+        std::begin(t); std::end(t); std::size(t);
+        t.clear();
+        t.insert(std::declval<typename std::remove_cvref_t<T>::value_type>());
+    } && !resizable<T>;
+
+    // ── Unordered associative containers ─────────────────────────────────────
+
+    template<class T>
+    concept unordered_associative =
+        requires(std::remove_cvref_t<T>&t) {
+        std::begin(t); std::end(t); std::size(t);
+        t.bucket_count();
+        t.rehash(std::size_t{});
+        t.reserve(std::size_t{});
+    };
+
+    // ── Optional ─────────────────────────────────────────────────────────────
+
+    template<class T>
+    concept optional_like =
+        requires(std::remove_cvref_t<T>&t) {
+        t.has_value();
+        t.emplace(t.value());
+    };
+
+    // ── Variant ───────────────────────────────────────────────────────────────
+
+    template<class T>
+    concept variant_like = requires(T && t) {
+        std::visit([](auto&&) {}, std::forward<T>(t));
+        std::variant_size_v<std::remove_cvref_t<T>>;
+    };
 }

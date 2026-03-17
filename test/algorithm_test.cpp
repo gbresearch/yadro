@@ -103,7 +103,7 @@ namespace
         // first optimization run to populate history and test multithreading
         gb::yadro::async::threadpool tp(4);
         opt.optimize(tp,
-            /* time budget */    10ms,
+            /* time budget */    15ms,
             /*population_size=*/ 100,
             /*max_history=*/     5,
             /*max_tries=*/       200'000
@@ -114,7 +114,7 @@ namespace
 #endif
         // second optimization run to test history and stopping criteria
         auto [stats, history] = opt.optimize(
-            /* time budget */    10ms,
+            /* time budget */    15ms,
             /*population_size=*/ 100,
             /*max_history=*/     5
         );

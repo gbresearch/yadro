@@ -1383,7 +1383,7 @@ namespace gb::yadro::algorithm::conv {
                 self.diversity_epsilon
             );
 
-            if (gb::yadro::archive::is_iarchive_v<decltype(archive)>)
+            if (gb::yadro::archive::iarchive_like<decltype(archive)>)
             {
                 // only when loading do we need to validate, since the constructor already does that
                 self.validate_params(self.mutation_sigma_frac, self.eta, self.diversity_epsilon);
@@ -1857,7 +1857,7 @@ namespace gb::yadro::algorithm::conv {
 
             // chrom_hashes_ is derived from entries_ and is not persisted.
             // Rebuild it here so both save and load leave the object consistent.
-            if constexpr (gb::yadro::archive::is_iarchive_v<std::remove_cvref_t<decltype(archive)>>)
+            if constexpr (gb::yadro::archive::iarchive_like<decltype(archive)>)
                 self.rebuild_hash_set();
         }
 

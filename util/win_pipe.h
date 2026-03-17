@@ -52,8 +52,6 @@ namespace gb::yadro::util
 {
     struct owinpipe_stream;
     struct iwinpipe_stream;
-    using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
-    using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
 
     // single-instance server
     struct winpipe_server_t;
@@ -99,6 +97,7 @@ namespace gb::yadro::util
         HANDLE _pipe = INVALID_HANDLE_VALUE;
     };
 
+    using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
 
     //----------------------------------------------------------------------------------------------
     struct iwinpipe_stream
@@ -125,6 +124,7 @@ namespace gb::yadro::util
         HANDLE _pipe = INVALID_HANDLE_VALUE;
     };
 
+    using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
     
     //----------------------------------------------------------------------------------------------
     struct winpipe_base_t
@@ -146,7 +146,7 @@ namespace gb::yadro::util
         void set_send_receive_log(bool set) { _log_send_receive = set; }
         void log(auto&&...args) const { if (_log) _log->writeln(util::time_stamp(), ':', _pipe, ':', std::forward<decltype(args)>(args)...); }
 
-        template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
+        template<class T> requires(archive::serializable<iwinpipe_archive, std::remove_cvref_t<T>>)
         void receive(T& t) const
         {
             iwinpipe_archive a{ _pipe };
@@ -155,7 +155,7 @@ namespace gb::yadro::util
                 log("received: ", archive::serialization_size(t), " bytes");
         }
 
-        template<class T> requires(archive::is_serializable_v<iwinpipe_archive, std::remove_cvref_t<T>>)
+        template<class T> requires(archive::serializable<iwinpipe_archive, std::remove_cvref_t<T>>)
         T receive() const
         {
             T t;
@@ -166,7 +166,7 @@ namespace gb::yadro::util
         template<class T> requires(std::is_void_v<T>)
         auto receive() const { return std::tuple{}; }
 
-        template<class T> requires(archive::is_serializable_v<owinpipe_archive, std::remove_cvref_t<T>>)
+        template<class T> requires(archive::serializable<owinpipe_archive, std::remove_cvref_t<T>>)
         void send(const T& t) const
         {
             if (_log_send_receive)
