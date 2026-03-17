@@ -206,9 +206,8 @@ namespace gb::yadro::archive
         // fixed record size serialization with padding at the end of the record to reserve space for future expansion
         void serialize_with_padding(std::size_t record_size, std::uint8_t padding, auto&& ...ts)
         {
+            auto size = serialization_size(ts...);
             (*this)(decltype(ts)(ts)...);
-
-            auto size = serialization_size(decltype(ts)(ts)...);
             gb::yadro::util::gbassert(size <= record_size);
 
             for (; size < record_size; ++size)
@@ -916,7 +915,7 @@ namespace gb::yadro::archive
     }
 
 
-#if defined(clang_p1061)
+#if defined(__cpp_structured_bindings) && __cpp_structured_bindings >= 202411L
     // when compier supports variadic structured bindings, we can serialize aggregate-like types without defining custom serialize functions for them
     //---------------------------------------------------------------------
     // serialize aggregate-like types using variadic structured bindings
@@ -927,7 +926,7 @@ namespace gb::yadro::archive
     auto serialize(Archive&& a, T&& t)
     {
         auto&& [...fields] = std::forward<T>(t);
-        serialize(a, std::forward<std::remove_cvref_t<decltype(fields)>>(fields)...);
+        serialize(deltype(a)(a), std::forward<std::remove_cvref_t<decltype(fields)>>(fields)...);
     }
 #endif
 
