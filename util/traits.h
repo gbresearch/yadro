@@ -38,6 +38,13 @@
 namespace gb::yadro::util
 {
     //-------------------------------------------------------------------------
+    // explicitly_convertible_to concept: checks if From can be explicitly converted to To using static_cast
+    template<class From, class To>
+    concept explicitly_convertible_to =
+        std::default_initializable<From> &&
+        requires { static_cast<To>(std::declval<From>()); };
+
+    //-------------------------------------------------------------------------
     // callable (function, lambda) traits, deducing return type and parameters
 
     template<typename T>
