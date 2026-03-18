@@ -54,8 +54,8 @@ namespace gb::yadro::util
     {
         using namespace std::chrono;
         // Add the duration to the TDateTime epoch to get the system_clock time_point
-        return sys_days{ December / 30 / 1899 } + duration_cast<system_clock::duration>(
-            duration<double, std::ratio<86400>>(datetime));
+        return sys_days{ December / 30 / 1899 } +
+            duration_cast<seconds>(duration<double, std::ratio<86400>>(datetime));
     }
 
     //-------------------------------------------------------------------------
