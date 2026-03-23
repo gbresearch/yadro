@@ -172,24 +172,44 @@ namespace gb::yadro::container
 
     //-------------------------------------------------------------------------
     // Dominance (compile-time fold)
-    // determines with statistics dominates the other
+    // determines which statistics dominates the other
     //-------------------------------------------------------------------------
 
     template<typename... Objs>
     class dominates_t
     {
         static_assert(sizeof...(Objs) != 0);
-        std::tuple<Objs...> objs;
-    public:
-        using FirstObjective = std::tuple_element_t<0, decltype(objs)>;
-        using FirstProjection = typename FirstObjective::Projection;
-        using FirstDir = typename FirstObjective::Direction;
-        constexpr const auto& get_objs() const noexcept { return objs; }
-        constexpr const auto& get_proj0() const noexcept { return std::get<0>(objs).proj; }
 
+        using ObjTuple = std::tuple<Objs...>;
+        ObjTuple objs;
+
+    public:
+        template<size_t N>
+        using Objective = std::tuple_element_t<N, ObjTuple>;
+        
+        template<size_t N>
+        using Direction = typename Objective<N>::Direction;
+
+        template<size_t N>
+        using Projection = typename Objective<N>::Projection;
+
+        static constexpr size_t number_of_objectives = sizeof...(Objs);
+        static constexpr double min_epsilon = std::min({ Objs::epsilon()... });
+
+        // int directions used in SIMD version: +1 - maximize, -1 - minimize
+        static constexpr std::array< int, number_of_objectives> int_directions{ (std::is_same_v<typename Objs::Direction, maximize_t> ? 1 : -1)... };
+        
+        template<size_t N>
+        constexpr const auto& get_proj() const noexcept { return std::get<N>(objs).proj; }
+
+        template<size_t N>
+        constexpr auto get_proj(auto&& stat) const noexcept { return std::invoke(std::get<N>(objs).proj, stat); }
+
+        // constructors
         dominates_t() = default;
         explicit dominates_t(Objs&&... os) : objs(std::forward<Objs>(os)...) {}
 
+        // comparison returns true if it's better in at least one objective and not worse in the rest
         template<typename T>
         bool operator()(const T& a, const T& b) const noexcept
         {
@@ -244,8 +264,8 @@ namespace gb::yadro::container
         {
             if (data_.size() <= n) return;
 
-            using Dir = typename Dominates::FirstDir;
-            auto& proj = dominates_.get_proj0();
+            using Dir = typename Dominates::template Direction<0>;
+            auto& proj = dominates_.get_proj<0>();
 
             std::nth_element(data_.begin(), data_.begin() + n, data_.end(),
                 [&](const T& a, const T& b) {
@@ -275,7 +295,7 @@ namespace gb::yadro::container
     {
         struct cmp
         {
-            Dominates::FirstProjection proj;
+            typename Dominates::template Projection<0> proj;
             // comparison isn't entirely correct, addresses would change on copying
             bool operator()(const T& a, const T& b) const
             {
@@ -415,10 +435,12 @@ namespace gb::yadro::container
             return out;
         }
 
-        // exactly four objectives
-        template<typename S, typename Obj0, typename Obj1, typename Obj2, typename Obj3, typename...Objs>
+        // four or more objectives
+        template<typename S, typename Dominates>
         class pareto_set
         {
+            static_assert(Dominates::number_of_objectives > 3);
+
             struct pareto_node
             {
                 S stats;
@@ -426,9 +448,9 @@ namespace gb::yadro::container
             };
 
             std::vector<pareto_node> data_;
-            dominates_t<Obj0, Obj1, Obj2, Obj3, Objs...> dom;
+            Dominates dom;
 
-            static constexpr auto eps = std::min({ Obj0::epsilon(), Obj1::epsilon(), Obj2::epsilon(), Obj3::epsilon(), Objs::epsilon()... });
+            static constexpr auto eps = Dominates::min_epsilon;
 
             template<max_or_min_direction Dir>
             static constexpr int get_direction() {
@@ -483,8 +505,8 @@ namespace gb::yadro::container
             void resize(std::size_t n) noexcept
             {
                 if (data_.size() <= n) return;
-                auto& proj = dom.get_proj0();
-                using Dir = typename Obj0::Direction;
+                auto& proj = dom.get_proj<0>();
+                using Dir = typename Dominates::template Direction<0>;
 
                 std::nth_element(data_.begin(), data_.begin() + n, data_.end(),
                     [&](const auto& a, const auto& b) {
@@ -512,17 +534,22 @@ namespace gb::yadro::container
 
             bool dominates(const pareto_node& a, const pareto_node& b)
             {
-                if constexpr (sizeof...(Objs) == 0)
-                    return dominates_simd<get_direction<typename Obj0::Direction>(),
-                    get_direction<typename Obj1::Direction>(),
-                    get_direction<typename Obj2::Direction>(),
-                    get_direction<typename Obj3::Direction>()>(a.vec, b.vec, eps);
+                // Stage 0: 4 objectives fit SIMD, nothing else is necessary
+                if constexpr (Dominates::number_of_objectives == 4)
+                    return dominates_simd<
+                    Dominates::int_directions[0],
+                    Dominates::int_directions[1],
+                    Dominates::int_directions[2],
+                    Dominates::int_directions[3]
+                    >(a.vec, b.vec, eps);
 
                 // Stage 1: SIMD quick rejection
-                if (!dominates_simd<get_direction<typename Obj0::Direction>(),
-                    get_direction<typename Obj1::Direction>(),
-                    get_direction<typename Obj2::Direction>(),
-                    get_direction<typename Obj3::Direction>()>(a.vec, b.vec, eps))
+                if (!dominates_simd<
+                    Dominates::int_directions[0],
+                    Dominates::int_directions[1],
+                    Dominates::int_directions[2],
+                    Dominates::int_directions[3]
+                >(a.vec, b.vec, eps))
                     return false;
 
                 // Stage 2: exact validation
@@ -532,12 +559,13 @@ namespace gb::yadro::container
             vec4 project_stats(const S& s)
             {
                 return vec4{
-                        std::get<0>(dom.get_objs()).proj(s),
-                        std::get<1>(dom.get_objs()).proj(s),
-                        std::get<2>(dom.get_objs()).proj(s),
-                        std::get<3>(dom.get_objs()).proj(s)
+                    dom.get_proj<0>(s),
+                    dom.get_proj<1>(s),
+                    dom.get_proj<2>(s),
+                    dom.get_proj<3>(s),
                 };
             }
         };
+
     }
 }
