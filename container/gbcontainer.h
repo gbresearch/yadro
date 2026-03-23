@@ -37,3 +37,4 @@
 #include "tree.h"
 #include "lockfree_memo_table.h"
 #include "bounded_priority_queue.h"
+#include "pareto_front.h"

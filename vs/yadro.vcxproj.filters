@@ -175,6 +175,9 @@
     <ClInclude Include="..\async\async.h">
       <Filter>async</Filter>
     </ClInclude>
+    <ClInclude Include="..\container\pareto_front.h">
+      <Filter>container</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\container\tree.cpp">

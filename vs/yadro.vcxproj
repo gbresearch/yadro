@@ -138,6 +138,7 @@
     <ClInclude Include="..\container\lockfree_memo_table.h" />
     <ClInclude Include="..\container\matrix.h" />
     <ClInclude Include="..\container\matrix_functions.h" />
+    <ClInclude Include="..\container\pareto_front.h" />
     <ClInclude Include="..\container\static_string.h" />
     <ClInclude Include="..\container\static_vector.h" />
     <ClInclude Include="..\container\tensor.h" />
