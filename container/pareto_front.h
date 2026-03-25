@@ -283,6 +283,9 @@ namespace gb::yadro::container
         void clear() noexcept { data_.clear(); }
     };
 
+    template<typename S, typename Dominates>
+    inline auto make_pareto_set(Dominates d) { return pareto_set<S, Dominates>(std::move(d)); }
+
     //-------------------------------------------------------------------------
     // Pareto container (sorted by KeyProj)
     // ATTN: much slower than unordered container, has some comparison issues
@@ -384,6 +387,9 @@ namespace gb::yadro::container
 
         const auto& elements() const noexcept { return data_; }
     };
+
+    template<typename S, typename Dominates>
+    inline auto make_pareto_set_ordered(Dominates d) { return pareto_set_ordered<S, Dominates>(std::move(d)); }
 
     namespace simd
     {
@@ -567,5 +573,7 @@ namespace gb::yadro::container
             }
         };
 
+        template<typename S, typename Dominates>
+        inline auto make_pareto_set(Dominates d) { return simd::pareto_set<S, Dominates>(std::move(d)); }
     }
 }

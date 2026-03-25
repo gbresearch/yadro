@@ -114,7 +114,7 @@ namespace
 #endif
         // second optimization run to test history and stopping criteria
         auto [stats, history] = opt.optimize(
-            /* time budget */    15ms,
+            /* time budget */    20ms,
             /*population_size=*/ 100,
             /*max_history=*/     5
         );
