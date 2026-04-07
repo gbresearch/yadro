@@ -235,6 +235,8 @@ namespace gb::yadro::container
         pareto_set() = default;
         explicit pareto_set(Dominates d) : dominates_(std::move(d)) {}
 
+        auto& get_dominates() const noexcept { return dominates_; }
+
         void insert(const std::ranges::range auto& r)
         {
             for (auto& v : r)
@@ -317,6 +319,8 @@ namespace gb::yadro::container
         
         explicit pareto_set_ordered(Dominates d)
             : data_(cmp{ d.get_proj0()}), dominates_(std::move(d)) {}
+
+        auto& get_dominates() const noexcept { return dominates_; }
 
         void insert(const std::ranges::range auto& r)
         {
@@ -466,6 +470,8 @@ namespace gb::yadro::container
         public:
             pareto_set() = default;
             explicit pareto_set(auto&&... args) : dom(decltype(args)(args)) {}
+
+            auto& get_dominates() const noexcept { return dom; }
 
             void insert(const std::ranges::range auto& r)
             {

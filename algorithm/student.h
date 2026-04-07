@@ -31,7 +31,6 @@
 #include <cmath>
 #include <ranges>
 #include <utility>
-#include <iostream>
 #include "../util/gberror.h"
 
 namespace gb::yadro::algorithm
