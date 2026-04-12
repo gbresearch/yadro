@@ -1386,7 +1386,7 @@ namespace gb::yadro::algorithm::conv {
             if (gb::yadro::archive::iarchive_like<decltype(archive)>)
             {
                 // only when loading do we need to validate, since the constructor already does that
-                self.validate_params(self.mutation_sigma_frac, self.eta, self.diversity_epsilon);
+                self.validate_params(self.mutation_sigma_frac, self.eta, self.diversity_epsilon, self.random_reset_prob);
             }
         }
 
@@ -1429,6 +1429,11 @@ namespace gb::yadro::algorithm::conv {
         discrete_value_range() = default;
         explicit discrete_value_range(std::vector<T> vals)
             : allowed_values(std::move(vals)) {
+            normalize();
+        }
+
+        explicit discrete_value_range(std::initializer_list<T> vals)
+            : allowed_values(vals) {
             normalize();
         }
 
