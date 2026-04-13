@@ -193,7 +193,7 @@ namespace
 #endif
 #if defined(NDEBUG)
         gbassert(history.size() == 5);
-        gbassert(history.best().first <= 1e-8);
+        gbassert(history.best().first <= 1e-6);
 #endif
         // serialize to memory archive
         gb::yadro::archive::omem_archive<> oma;

@@ -163,21 +163,21 @@ namespace gb::yadro::util
     };
 
     //-------------------------------------------------------------------------
-    // compare two floating point numbers
-    inline auto almost_equal(std::floating_point auto first, std::floating_point auto second, std::floating_point auto error)
+    // compare two floating point numbers (std::abs is not implemented in constexpr context in C++20)
+    inline constexpr auto almost_equal(std::floating_point auto first, std::floating_point auto second, std::floating_point auto epsilon)
     {
-        return std::abs(first - second) <= error;
+        return first > second ? first - second < epsilon : second - first < epsilon;
     }
 
     //-------------------------------------------------------------------------
     // compare two floating point ranges
     inline auto almost_equal(std::ranges::sized_range auto&& first, std::ranges::sized_range auto&& second, 
-        std::floating_point auto error)
+        std::floating_point auto epsilon)
     {
         if (std::size(first) == std::size(second))
         {
             auto [i1, i2] = std::mismatch(std::begin(first), std::end(first), std::begin(second), std::end(second),
-                [&](auto&& value1, auto&& value2) { return almost_equal(value1, value2, error); });
+                [&](auto&& value1, auto&& value2) { return almost_equal(value1, value2, epsilon); });
             return i1 == std::end(first) && i2 == std::end(second);
         }
         return false;
