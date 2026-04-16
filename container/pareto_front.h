@@ -122,8 +122,8 @@ namespace gb::yadro::container
     inline constexpr double default_epsilon = 1e-6;
 
     // some statistical parameters need to be maximized, some minimized
-    struct maximize_t;
-    struct minimize_t;
+    struct maximize_t {};
+    struct minimize_t {};
 
     template<class Dir>
     concept max_or_min_direction = std::same_as<Dir, maximize_t> || std::same_as<Dir, minimize_t>;
@@ -143,6 +143,9 @@ namespace gb::yadro::container
     {
         Proj proj;
         static constexpr auto epsilon() { return Eps; }
+
+        objective_t() = default;
+        objective_t(Proj p, Dir d) : proj(std::move(p)) {}
 
         using Projection = Proj;
         using Direction = Dir;
@@ -169,6 +172,9 @@ namespace gb::yadro::container
             return true;
         }
     };
+
+    template<typename Proj, max_or_min_direction Dir>
+    objective_t(Proj, Dir) -> objective_t<Proj, Dir>;
 
     //-------------------------------------------------------------------------
     // Dominance (compile-time fold)
