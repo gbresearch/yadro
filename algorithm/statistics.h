@@ -43,6 +43,19 @@
 namespace gb::yadro::algorithm
 {
     //--------------------------------------------------------------------------------------------
+    // 1090-sigmoid function: maps x10 to 0.1 and x90 to 0.9, with a smooth transition in between
+    inline double sigmoid1090(double x, double x10, double x90) {
+        if (x10 == x90) {
+            throw std::invalid_argument("x10 must be different from x90");
+        }
+
+        auto x50 = 0.5 * (x10 + x90);
+        auto k = 2.0 * std::log(9.0) / (x90 - x10);
+
+        return 1.0 / (1.0 + std::exp(-k * (x - x50)));
+    }
+
+    //--------------------------------------------------------------------------------------------
     // Function to compute mean and standard deviation
     template <std::ranges::sized_range Sequence>
         requires requires(typename Sequence::value_type t) { { static_cast<double>(t) }; }

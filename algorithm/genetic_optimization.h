@@ -1443,9 +1443,11 @@ namespace gb::yadro::algorithm::conv {
             return *this;
         }
 
-        auto& get_allowed_values() const noexcept { return allowed_values; }
-        auto& get_value(std::size_t index) const { return allowed_values[index]; }
-        auto size() const noexcept { return allowed_values.size(); }
+        [[nodiscard]] auto get_min_value() const noexcept { util::gbassert(!allowed_values.empty()); return allowed_values.front(); }
+        [[nodiscard]] auto get_max_value() const noexcept { util::gbassert(!allowed_values.empty()); return allowed_values.back(); }
+        [[nodiscard]] auto& get_allowed_values() const noexcept { return allowed_values; }
+        [[nodiscard]] auto& get_value(std::size_t index) const { return allowed_values[index]; }
+        [[nodiscard]] auto size() const noexcept { return allowed_values.size(); }
 
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {

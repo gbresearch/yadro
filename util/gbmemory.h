@@ -35,6 +35,13 @@
 
 namespace gb::yadro::util
 {
+    // make_unique_copy - make a unique_ptr deducing type from a forwarding reference, copying or moving the value into the unique_ptr
+    // this is similar to new auto(t) but returns a unique_ptr instead of a raw pointer
+    template<class T>
+    auto make_unique_copy(T&& t) {
+        return std::make_unique<std::remove_cvref_t<T>>(std::forward<T>(t));
+    }
+
     //-------------------------------------------------------------------------
     // create_unique - make_unique missing overloads
     // clang bug: https://github.com/llvm/llvm-project/issues/106182
