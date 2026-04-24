@@ -164,7 +164,8 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // compare two floating point numbers (std::abs is not implemented in constexpr context in C++20)
-    inline constexpr auto almost_equal(std::floating_point auto first, std::floating_point auto second, std::floating_point auto epsilon)
+    template<std::floating_point T>
+    inline constexpr auto almost_equal(T first, T second, T epsilon = std::numeric_limits<T>::epsilon())
     {
         return first > second ? first - second < epsilon : second - first < epsilon;
     }

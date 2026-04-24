@@ -39,20 +39,85 @@
 #include <numbers>
 #include <utility>
 #include "../util/gberror.h"
+#include "../util/misc.h"
 
 namespace gb::yadro::algorithm
 {
     //--------------------------------------------------------------------------------------------
     // 1090-sigmoid function: maps x10 to 0.1 and x90 to 0.9, with a smooth transition in between
     inline double sigmoid1090(double x, double x10, double x90) {
-        if (x10 == x90) {
-            throw std::invalid_argument("x10 must be different from x90");
-        }
+        util::gbassert(!util::almost_equal(x10, x90) && "x10 must not be equal to x90");
 
         auto x50 = 0.5 * (x10 + x90);
         auto k = 2.0 * std::log(9.0) / (x90 - x10);
 
         return 1.0 / (1.0 + std::exp(-k * (x - x50)));
+    }
+
+    //--------------------------------------------------------------------------------------------
+    // Gaussian Filter, smooth curve
+    // Constraints:
+    // - f(center) = 1.0 exactly
+    // - f(left50) = 0.5 exactly
+    // - f(right50) = 0.5 exactly
+    // - center is the global maximum
+    inline double gauss_filter(double x, double left50, double center, double right50) {
+        util::gbassert(left50 < center && center < right50 && "Require left50 < center < right50");
+
+        // Solve for sigma: exp(-(x-center)^2 / (2 * sigma^2)) = 0.5
+        // -(x-center)^2 / (2 * sigma^2) = ln(0.5)
+        // sigma^2 = -(x-center)^2 / (2 * ln(0.5))
+        // We can use a pre-calculated divisor: -2 * ln(0.5) = 1.38629436112
+        const double log_half_inv = 1.38629436111989;
+
+        double diff = x - center;
+        double dist50;
+
+        if (x <= center) {
+            dist50 = center - left50;
+        }
+        else {
+            dist50 = right50 - center;
+        }
+
+        // f(x) = exp(- (x-center)^2 / (dist50^2 / ln(2)) )
+        // This simplifies to:
+        double exponent = -(diff * diff) / ((dist50 * dist50) / 0.69314718056);
+        return std::exp(exponent);
+    }
+
+    /**
+     * Double Sigmoid Filter (Stitched)
+     * Constraints:
+     * - f(center) = 1.0 exactly
+     * - f(left50) = 0.5 exactly
+     * - f(right50) = 0.5 exactly
+     * - center is the global maximum
+     * kink at the center for asymmetric curve
+     * slower decaying than Gaussian filter
+     */
+    inline double sigmoid_filter(double x, double left50, double center, double right50) {
+        util::gbassert(left50 < center && center < right50 && "Require left50 < center < right50");
+
+        // Logistic function: f(x) = L / (1 + exp(-k(x - x0)))
+        // We want f(center) = 1.0. 
+        // Since the standard sigmoid 1/(1+exp(0)) is 0.5, we use L = 2.0.
+
+        if (x <= center) {
+            // We need 2.0 / (1 + exp(-k * (left50 - center))) = 0.5
+            // (1 + exp(-k * (left50 - center))) = 4
+            // exp(-k * (left50 - center)) = 3
+            // -k * (left50 - center) = ln(3)
+            // k = ln(3) / (center - left50)
+            const double k = 1.098612288668109691395 / (center - left50); // ln(3)
+            return 2.0 / (1.0 + std::exp(-k * (x - center)));
+        }
+        else {
+            // For the right side, k must be positive to ensure it decays as x increases
+            // we use the same logic but flip the sign in the exponent.
+            const double k = 1.098612288668109691395 / (right50 - center);
+            return 2.0 / (1.0 + std::exp(k * (x - center)));
+        }
     }
 
     //--------------------------------------------------------------------------------------------
