@@ -38,6 +38,7 @@
 #include <concepts>
 #include <numbers>
 #include <utility>
+#include <limits>
 #include "../util/gberror.h"
 #include "../util/misc.h"
 
@@ -122,24 +123,52 @@ namespace gb::yadro::algorithm
 
     //--------------------------------------------------------------------------------------------
     // Function to compute mean and standard deviation
-    template <std::ranges::sized_range Sequence>
-        requires requires(typename Sequence::value_type t) { { static_cast<double>(t) }; }
-    std::pair<double, double> mean_stddev(const Sequence& data) 
+    
+    enum class VarianceType {
+        Population, // Divide by N
+        Sample      // Divide by N - 1
+    };
+
+    /**
+     * Calculates mean and standard deviation using Welford's Algorithm.
+     * Returns {NaN, NaN} if the calculation is mathematically undefined for the given input.
+     */
+    template <std::ranges::input_range R>
+        requires std::convertible_to<std::ranges::range_value_t<R>, double>
+    auto mean_stddev(const R& data, VarianceType type = VarianceType::Population)
+        -> std::pair<double, double>
     {
-        size_t n = data.size();
-        if (n == 0) return { 0.0, 0.0 };
+        double mean = 0.0;
+        double m2 = 0.0;
+        size_t n = 0;
 
-        auto [sum, sum_sq] = std::accumulate(data.begin(), data.end(), std::pair{ 0.0, 0.0 },
-            [](auto acc, auto value) {
-                auto val = static_cast<double>(value);
-                return std::pair{ acc.first + val, acc.second + val * val };
-            });
+        for (const auto& value : data) {
+            const double x = static_cast<double>(value);
+            ++n;
+            const double delta = x - mean;
+            mean += delta / n;
+            const double delta2 = x - mean;
+            m2 += delta * delta2;
+        }
 
-        auto mean = sum / n;
-        auto variance = sum_sq / n - mean * mean;
-        auto stddev = std::sqrt(variance);
+        // Handle undefined cases
+        const double nan = std::numeric_limits<double>::quiet_NaN();
 
-        return { mean, stddev };
+        if (n == 0) {
+            return { nan, nan };
+        }
+
+        if (type == VarianceType::Sample && n < 2) {
+            // Sample variance requires at least two data points
+            return { mean, nan };
+        }
+
+        const double divisor = (type == VarianceType::Population)
+            ? static_cast<double>(n)
+            : static_cast<double>(n - 1);
+
+        const double variance = m2 / divisor;
+        return { mean, std::sqrt(variance) };
     }
 
     //--------------------------------------------------------------------------------------------
