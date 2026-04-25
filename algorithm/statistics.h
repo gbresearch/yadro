@@ -65,26 +65,10 @@ namespace gb::yadro::algorithm
     inline double gauss_filter(double x, double left50, double center, double right50) {
         util::gbassert(left50 < center && center < right50 && "Require left50 < center < right50");
 
-        // Solve for sigma: exp(-(x-center)^2 / (2 * sigma^2)) = 0.5
-        // -(x-center)^2 / (2 * sigma^2) = ln(0.5)
-        // sigma^2 = -(x-center)^2 / (2 * ln(0.5))
-        // We can use a pre-calculated divisor: -2 * ln(0.5) = 1.38629436112
-        const double log_half_inv = 1.38629436111989;
-
         double diff = x - center;
-        double dist50;
-
-        if (x <= center) {
-            dist50 = center - left50;
-        }
-        else {
-            dist50 = right50 - center;
-        }
-
+        double dist50 = diff < 0 ? center - left50 : right50 - center;
         // f(x) = exp(- (x-center)^2 / (dist50^2 / ln(2)) )
-        // This simplifies to:
-        double exponent = -(diff * diff) / ((dist50 * dist50) / 0.69314718056);
-        return std::exp(exponent);
+        return std::exp(-(diff * diff) / ((dist50 * dist50) / 0.69314718056));
     }
 
     /**
@@ -100,25 +84,11 @@ namespace gb::yadro::algorithm
     inline double sigmoid_filter(double x, double left50, double center, double right50) {
         util::gbassert(left50 < center && center < right50 && "Require left50 < center < right50");
 
-        // Logistic function: f(x) = L / (1 + exp(-k(x - x0)))
-        // We want f(center) = 1.0. 
-        // Since the standard sigmoid 1/(1+exp(0)) is 0.5, we use L = 2.0.
-
-        if (x <= center) {
-            // We need 2.0 / (1 + exp(-k * (left50 - center))) = 0.5
-            // (1 + exp(-k * (left50 - center))) = 4
-            // exp(-k * (left50 - center)) = 3
-            // -k * (left50 - center) = ln(3)
-            // k = ln(3) / (center - left50)
-            const double k = 1.098612288668109691395 / (center - left50); // ln(3)
-            return 2.0 / (1.0 + std::exp(-k * (x - center)));
-        }
-        else {
-            // For the right side, k must be positive to ensure it decays as x increases
-            // we use the same logic but flip the sign in the exponent.
-            const double k = 1.098612288668109691395 / (right50 - center);
-            return 2.0 / (1.0 + std::exp(k * (x - center)));
-        }
+        auto k = x <= center 
+            ? 1.098612288668109691395 / (center - left50)
+            : 1.098612288668109691395 / (center - right50);
+        
+        return 2.0 / (1.0 + std::exp(-k * (x - center)));
     }
 
     //--------------------------------------------------------------------------------------------
