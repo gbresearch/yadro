@@ -2705,17 +2705,26 @@ namespace gb::yadro::algorithm::conv {
         }
     public:
         // -------------------------------------------------------------------------
-        // soft_reset()
+        // soft_reset(reset_flag)
         //
-        // FIX #15/#12: Resets population, statistics, history, and stagnation state
+        // Resets population, statistics, history, and stagnation state
         // while RETAINING the memo table.  Use when restarting the search in the
         // same fitness landscape with different GA parameters.
+        // reset_flag controls whether clean population is retained, used for multi-stage optimization
         // -------------------------------------------------------------------------
-        void soft_reset() {
+        enum class reset_flag { all, keep_population};
+
+        void soft_reset(reset_flag flag = reset_flag::all) {
             {
                 // Lock both mutexes at once to prevent deadlock.
                 std::scoped_lock lk(stats_mutex_, history_mutex_);
-                population_.clear();
+                if(flag == reset_flag::all)
+                    population_.clear();
+                else
+                {
+                    for (auto& chromosome : population_)
+                        chromosome.second = std::nullopt;
+                }
                 stats_ = {};
                 history_ = history_t{ std::numeric_limits<size_t>::max(), compare_ };
             }
@@ -2727,14 +2736,24 @@ namespace gb::yadro::algorithm::conv {
         }
 
         // -------------------------------------------------------------------------
-        // clear()
+        // clear(reset_flag)
         //
-        // FIX #15: Full reset including the memo table.
-        //          Use soft_reset() to keep cached evaluations across runs.
+        // Full reset including the memo table.
+        // Use soft_reset() to keep cached evaluations across runs.
+        // reset_flag controls whether clean population is retained, used for multi-stage optimization
         // -------------------------------------------------------------------------
-        void clear() {
-            soft_reset();
+        void clear(reset_flag flag = reset_flag::all) {
+            soft_reset(flag);
             memo_table_.reset();
+        }
+
+        // -------------------------------------------------------------------------
+        // inject_chromosome() - inject an unevaluated chromosome to the population
+        // 
+        // can be used if there are known good chromosome to speed up optimization
+        // -------------------------------------------------------------------------
+        void inject_chromosome(const chromosome_t& chrom) {
+            population_.push_back({ chrom, std::nullopt });
         }
 
         // -------------------------------------------------------------------------
