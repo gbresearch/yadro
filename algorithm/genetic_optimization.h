@@ -2736,15 +2736,25 @@ namespace gb::yadro::algorithm::conv {
         }
 
         // -------------------------------------------------------------------------
-        // clear(reset_flag)
+        // clear()
         //
         // Full reset including the memo table.
         // Use soft_reset() to keep cached evaluations across runs.
-        // reset_flag controls whether clean population is retained, used for multi-stage optimization
         // -------------------------------------------------------------------------
-        void clear(reset_flag flag = reset_flag::all) {
-            soft_reset(flag);
-            memo_table_.reset();
+        void clear() {
+            soft_reset(reset_flag::all);
+            reset_memo_table();
+        }
+
+        // -------------------------------------------------------------------------
+        // clear_phase()
+        //
+        // Full reset including the memo table, but keeps uninitialized population
+        // -------------------------------------------------------------------------
+        void clear_phase()
+        {
+            soft_reset(reset_flag::keep_population);
+            reset_memo_table();
         }
 
         // -------------------------------------------------------------------------
@@ -3305,18 +3315,49 @@ namespace gb::yadro::algorithm::conv {
         mutable std::optional<
             sharded_lockfree_memo_table<xxhash128, memo_fn_t, target_t, /*NumShards=*/128>
         > memo_table_;
-        mutable std::once_flag memo_init_once_;
+        mutable std::atomic<bool> memo_ready_{ false };  // replaces once_flag
+        mutable std::mutex        memo_init_mutex_;       // guards initialization only
 
         void ensure_memo_table() const {
-            std::call_once(memo_init_once_, [this] {
+            // Fast path: already initialized, no lock needed
+            if (memo_ready_.load(std::memory_order_acquire)) return;
+
+            // Slow path: first call or after reset — take lock and re-check
+            std::lock_guard lk(memo_init_mutex_);
+            if (!memo_table_.has_value()) {
                 memo_fn_t counting_fn =
                     [this](typename Wrapper::value_type... args) -> target_t {
                     fn_call_count_.fetch_add(1, std::memory_order_relaxed);
                     return target_fn_(args...);
                     };
                 memo_table_.emplace(config.memo_capacity, std::move(counting_fn));
-                });
+                memo_ready_.store(true, std::memory_order_release);
+            }
         }
+
+        void reset_memo_table() {
+            std::lock_guard lk(memo_init_mutex_);
+            memo_ready_.store(false, std::memory_order_relaxed);
+            memo_table_.reset();
+        }
+
+        //mutable std::once_flag memo_init_once_;
+
+        //void reset_memo_table() {
+        //    memo_table_.reset();
+        //    memo_init_once_ = std::once_flag{}; // re-arm so ensure_memo_table() re-initializes
+        //}
+
+        //void ensure_memo_table() const {
+        //    std::call_once(memo_init_once_, [this] {
+        //        memo_fn_t counting_fn =
+        //            [this](typename Wrapper::value_type... args) -> target_t {
+        //            fn_call_count_.fetch_add(1, std::memory_order_relaxed);
+        //            return target_fn_(args...);
+        //            };
+        //        memo_table_.emplace(config.memo_capacity, std::move(counting_fn));
+        //        });
+        //}
 
         // NOTE: This function is only ever called from evaluate_all_single()
         // and evaluate_all_parallel() — never from outside optimize().
@@ -3326,6 +3367,7 @@ namespace gb::yadro::algorithm::conv {
 
         [[nodiscard]] target_t evaluate_chromosome(const chromosome_t& chrom) const {
             ensure_memo_table();
+            assert(memo_table_.has_value() && "memo_table_ must be initialized after ensure_memo_table()");
             total_eval_requests_.fetch_add(1, std::memory_order_relaxed);
             return std::apply([&](const auto&... args) {
                 return memo_table_->get_or_compute(args...);
