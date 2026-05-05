@@ -3341,24 +3341,6 @@ namespace gb::yadro::algorithm::conv {
             memo_table_.reset();
         }
 
-        //mutable std::once_flag memo_init_once_;
-
-        //void reset_memo_table() {
-        //    memo_table_.reset();
-        //    memo_init_once_ = std::once_flag{}; // re-arm so ensure_memo_table() re-initializes
-        //}
-
-        //void ensure_memo_table() const {
-        //    std::call_once(memo_init_once_, [this] {
-        //        memo_fn_t counting_fn =
-        //            [this](typename Wrapper::value_type... args) -> target_t {
-        //            fn_call_count_.fetch_add(1, std::memory_order_relaxed);
-        //            return target_fn_(args...);
-        //            };
-        //        memo_table_.emplace(config.memo_capacity, std::move(counting_fn));
-        //        });
-        //}
-
         // NOTE: This function is only ever called from evaluate_all_single()
         // and evaluate_all_parallel() — never from outside optimize().
         // The atomics fn_call_count_ and total_eval_requests_ therefore have
