@@ -77,7 +77,7 @@ namespace
         conv::genetic_optimization_t opt([&](auto x, auto y, auto z, auto v)
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
             std::less<double>{},
-            discrete_value_range<int>({0, -1, 1, -2, 2, 3, 4, 10}).set_mutation_params(0.7, 2),
+            discrete_value_range<int>({0, -1, 1, -2, 2, 3, 4, 10}).set_mutation_parameters(0.7, 2),
             min_max_value_range<std::int64_t>{-10, 10},
             min_max_value_range<float>{-10, 10},
             min_max_value_range<double>{-10, 10}
@@ -145,7 +145,7 @@ namespace
         conv::genetic_optimization_t opt([&](auto x, auto y, auto z, auto v)
             { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
             std::less<double>{},
-            discrete_value_range<int>({ 0, -1, 1, -2, 2, 3, 4, 10 }).set_mutation_params(0.7, 2),
+            discrete_value_range<int>({ 0, -1, 1, -2, 2, 3, 4, 10 }).set_mutation_parameters(0.7, 2),
             min_max_value_range<std::int64_t>{-10, 10},
             min_max_value_range<float>{-10, 10},
             min_max_value_range<double>{-10, 10}

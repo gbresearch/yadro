@@ -1437,7 +1437,7 @@ namespace gb::yadro::algorithm::conv {
             normalize();
         }
 
-        auto& set_mutation_params(double local_mutation_prob, int local_mutation_radius) {
+        auto& set_mutation_parameters(double local_mutation_prob, int local_mutation_radius) {
             this->local_mutation_prob = local_mutation_prob;
             this->local_mutation_radius = local_mutation_radius;
             return *this;
