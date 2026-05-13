@@ -121,6 +121,7 @@
     <ClInclude Include="..\algorithm\discrete_transform.h" />
     <ClInclude Include="..\algorithm\gbalgorithm.h" />
     <ClInclude Include="..\algorithm\genetic_optimization.h" />
+    <ClInclude Include="..\algorithm\hmm.h" />
     <ClInclude Include="..\algorithm\mackinnon.h" />
     <ClInclude Include="..\algorithm\regression_analysis.h" />
     <ClInclude Include="..\algorithm\statistics.h" />

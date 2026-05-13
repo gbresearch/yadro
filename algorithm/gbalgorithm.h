@@ -36,3 +36,4 @@
 #include "chebyshev.h"
 #include "mackinnon.h"
 #include "adf_test.h"
+#include "hmm.h"

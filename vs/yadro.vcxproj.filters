@@ -178,6 +178,9 @@
     <ClInclude Include="..\container\pareto_front.h">
       <Filter>container</Filter>
     </ClInclude>
+    <ClInclude Include="..\algorithm\hmm.h">
+      <Filter>algorithm</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\container\tree.cpp">
