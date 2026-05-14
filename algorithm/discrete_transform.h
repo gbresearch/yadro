@@ -35,11 +35,15 @@
 #include <cmath>
 #include <numbers>
 #include <ranges>
+#include <span>
+#include <immintrin.h>   // AVX2 / FMA intrinsics
 #include "../util/gberror.h"
 
 namespace gb::yadro::algorithm
 {
-    // recursive implementation of the Fast Fourier Transform
+    // simple recursive implementation of the Fast Fourier Transform, in-place, for sequences of size that is a power of 2
+    // no scaling is applied to the output (i.e. the DFT is unnormalized, and the inverse DFT must be divided by N).
+    // This implementation is not optimized for performance, but serves as a clear and educational example of the FFT algorithm.
     inline void fft_recursive(std::vector<std::complex<double>>& a) 
     {
         size_t N = a.size();
@@ -63,17 +67,181 @@ namespace gb::yadro::algorithm
         }
     }
 
-    // Decompose a signal into its frequency components using the Fast Fourier Transform
-    // Returns a vector of tuples, each containing the magnitude, frequency, and phase of a component
-    // The components are sorted by magnitude in descending order
-    // The frequency is normalized to the range [0, 1], where 1 corresponds to the Nyquist frequency
-    // The phase is in radians
-    // The input data must have a size that is a power of 2
-    template <std::ranges::sized_range Sequence>
-    std::vector<std::tuple<double, double, double>> fft_decompose(const Sequence& data)
+    // AVX2-optimized iterative Cooley-Tukey FFT for sequences of size that is a power of 2, using separate real and imaginary arrays (SoA layout).
+#ifdef __AVX2__
+#pragma message("FFT: AVX2 enabled; using AVX2 implementation")
+
+    namespace detail {
+        // ─────────────────────────────────────────────
+        //  Internal helpers
+        // ─────────────────────────────────────────────
+
+        /// Bit-reversal permutation in-place (SoA).
+        inline void bit_reverse(std::vector<double>& re, std::vector<double>& im)
+        {
+            const std::size_t N = re.size();
+            for (std::size_t i = 1, j = 0; i < N; ++i) {
+                std::size_t bit = N >> 1;
+                for (; j & bit; bit >>= 1) j ^= bit;
+                j ^= bit;
+                if (i < j) {
+                    std::swap(re[i], re[j]);
+                    std::swap(im[i], im[j]);
+                }
+            }
+        }
+
+        /// Scalar Cooley-Tukey butterfly for a single group.
+        inline void scalar_stage(std::vector<double>& re, std::vector<double>& im,
+            std::size_t base, std::size_t half,
+            const std::vector<double>& twRe,
+            const std::vector<double>& twIm)
+        {
+            for (std::size_t k = 0; k < half; ++k) {
+                const double tRe = twRe[k] * re[base + k + half] - twIm[k] * im[base + k + half];
+                const double tIm = twRe[k] * im[base + k + half] + twIm[k] * re[base + k + half];
+                const double uRe = re[base + k];
+                const double uIm = im[base + k];
+                re[base + k] = uRe + tRe;  im[base + k] = uIm + tIm;
+                re[base + k + half] = uRe - tRe;  im[base + k + half] = uIm - tIm;
+            }
+        }
+
+        /// AVX2 + FMA butterfly for one group, 4 butterflies per iteration.
+        /// Requires half >= 4 and twiddle arrays aligned/padded to multiple of 4.
+        inline void avx2_stage(std::vector<double>& re, std::vector<double>& im,
+            std::size_t base, std::size_t half,
+            const std::vector<double>& twRe,
+            const std::vector<double>& twIm)
+        {
+            std::size_t k = 0;
+            for (; k + 4 <= half; k += 4) {
+                // ── Load twiddle factors W[k..k+3] ──────────────────────────────
+                __m256d wRe = _mm256_loadu_pd(&twRe[k]);
+                __m256d wIm = _mm256_loadu_pd(&twIm[k]);
+
+                // ── Load "odd" half: b = a[base + k + half] ──────────────────────
+                __m256d bRe = _mm256_loadu_pd(&re[base + k + half]);
+                __m256d bIm = _mm256_loadu_pd(&im[base + k + half]);
+
+                // ── Complex multiply t = W * b ────────────────────────────────────
+                //    tRe = wRe*bRe - wIm*bIm   (FMA: -(wIm*bIm) + wRe*bRe)
+                //    tIm = wRe*bIm + wIm*bRe   (FMA:   wIm*bRe  + wRe*bIm)
+                __m256d tRe = _mm256_fmsub_pd(wRe, bRe, _mm256_mul_pd(wIm, bIm));
+                __m256d tIm = _mm256_fmadd_pd(wIm, bRe, _mm256_mul_pd(wRe, bIm));
+
+                // ── Load "even" half: a = a[base + k] ───────────────────────────
+                __m256d aRe = _mm256_loadu_pd(&re[base + k]);
+                __m256d aIm = _mm256_loadu_pd(&im[base + k]);
+
+                // ── Butterfly: upper = a + t,  lower = a - t ─────────────────────
+                _mm256_storeu_pd(&re[base + k], _mm256_add_pd(aRe, tRe));
+                _mm256_storeu_pd(&im[base + k], _mm256_add_pd(aIm, tIm));
+                _mm256_storeu_pd(&re[base + k + half], _mm256_sub_pd(aRe, tRe));
+                _mm256_storeu_pd(&im[base + k + half], _mm256_sub_pd(aIm, tIm));
+            }
+
+            // ── Scalar tail (k..half-1) if half is not a multiple of 4 ──────────
+            for (; k < half; ++k) {
+                const double tRe = twRe[k] * re[base + k + half] - twIm[k] * im[base + k + half];
+                const double tIm = twRe[k] * im[base + k + half] + twIm[k] * re[base + k + half];
+                const double uRe = re[base + k];
+                const double uIm = im[base + k];
+                re[base + k] = uRe + tRe;  im[base + k] = uIm + tIm;
+                re[base + k + half] = uRe - tRe;  im[base + k + half] = uIm - tIm;
+            }
+        }
+
+    } // namespace detail
+
+    /// Core transform.  re/im must have the same power-of-2 size.
+    /// sign = -1 → forward FFT,  +1 → inverse FFT (caller must divide by N).
+    inline void fft_avx2(std::vector<double>& re, std::vector<double>& im,
+        int sign = -1)
+    {
+        const std::size_t N = re.size();
+        util::gbassert(N == im.size());
+        util::gbassert(N > 0 && (N & (N - 1)) == 0 && "N must be a power of 2");
+        if (N <= 1) return;
+
+        // ── 1. Bit-reversal permutation ──────────────────────────────────────
+        detail::bit_reverse(re, im);
+
+        // ── 2. Iterative Cooley-Tukey stages (len = 2, 4, 8, …, N) ──────────
+        for (std::size_t len = 2; len <= N; len <<= 1) {
+            const std::size_t half = len >> 1;
+            const double angle = sign * 2.0 * std::numbers::pi / static_cast<double>(len);
+
+            // Precompute twiddle factors W_len^0 … W_len^{half-1}  (once per stage)
+            // Pad to next multiple of 4 so the AVX2 loop never reads past the end.
+            const std::size_t pad = (half + 3) & ~std::size_t{ 3 };
+            std::vector<double> twRe(pad, 0.0), twIm(pad, 0.0);
+            for (std::size_t k = 0; k < half; ++k) {
+                twRe[k] = std::cos(angle * static_cast<double>(k));
+                twIm[k] = std::sin(angle * static_cast<double>(k));
+            }
+
+            // Apply butterflies across every group of size `len`
+            for (std::size_t base = 0; base < N; base += len) {
+                if (half >= 4)
+                    detail::avx2_stage(re, im, base, half, twRe, twIm);
+                else
+                    detail::scalar_stage(re, im, base, half, twRe, twIm);
+            }
+        }
+    }
+
+    /// Convenience overload: AoS → SoA → transform → AoS.
+    /// Matches the interface of the original fft_recursive().
+    inline void fft_avx2(std::vector<std::complex<double>>& a, int sign = -1)
+    {
+        const std::size_t N = a.size();
+        std::vector<double> re(N), im(N);
+        for (std::size_t i = 0; i < N; ++i) { re[i] = a[i].real(); im[i] = a[i].imag(); }
+        fft_avx2(re, im, sign);
+        for (std::size_t i = 0; i < N; ++i) a[i] = { re[i], im[i] };
+    }
+
+    /// Inverse FFT (normalised).
+    inline void ifft_avx2(std::vector<double>& re, std::vector<double>& im)
+    {
+        fft_avx2(re, im, +1);
+        const double inv = 1.0 / static_cast<double>(re.size());
+        for (auto& v : re) v *= inv;
+        for (auto& v : im) v *= inv;
+    }
+#else
+#pragma message("FFT: AVX2 not enabled; using slow scalar implementation")
+#endif
+
+    // Public API: in-place FFT for power-of-2 sizes, dispatching to the appropriate implementation.
+    inline void fft(std::vector<std::complex<double>>& a)
+    {
+#ifdef __AVX2__
+        fft_avx2(a);
+#else
+        fft_recursive(a);
+#endif
+    }
+
+    // In-place inverse FFT using the conjugation method.
+    inline void ifft(std::vector<std::complex<double>>& a)
+    {
+        for (auto& x : a)
+            x = conj(x);
+
+        fft(a);
+
+        for (auto& x : a)
+            x = conj(x) / static_cast<double>(a.size());
+    }
+
+    // Compute the Discrete Fourier Transform (DFT) of a sequence using the Fast Fourier Transform (FFT) algorithm.
+    template <std::ranges::random_access_range Sequence>
+    std::vector<std::complex<double>> dft(const Sequence& data)
     {
         static_assert(std::is_convertible_v<std::ranges::range_value_t<Sequence>, double>, "Data must be convertible to double");
-        size_t data_size = data.size();
+        size_t data_size = std::ranges::size(data);
         util::gbassert(data_size != 0, "data must not be empty");
         util::gbassert((data_size & (data_size - 1)) == 0, "Data size must be a power of 2");
 
@@ -81,54 +249,23 @@ namespace gb::yadro::algorithm
         for (size_t i = 0; i < data_size; ++i) {
             x[i] = std::complex<double>(data[i], 0.0);
         }
-
-        fft_recursive(x);
-
-        // Store only positive frequency components
-        std::vector<std::tuple<double, double, double>> components;
-        for (size_t k = 0; k <= data_size / 2; ++k) {
-            // negative frequencies are discarded, positive frequencies are doubled
-            auto magnitude = (k == 0 ? 1 : 2) * std::abs(x[k]) / data_size;
-            auto frequency = static_cast<double>(k) / data_size;
-            auto phase = std::atan2(x[k].imag(), x[k].real());
-            components.emplace_back(magnitude, frequency, phase);
-        }
-
-        // Sort components by magnitude in descending order
-        std::sort(components.begin(), components.end(), [](auto a, auto b) { return std::get<0>(a) > std::get<0>(b); });
-
-        return components;
-    }
-
-    // In-place inverse FFT using the conjugation method.
-    inline void ifft(std::vector<std::complex<double>>& a) 
-    {
-        for (auto& x : a)
-            x = conj(x);
-    
-        fft_recursive(a);
-        
-        for (auto& x : a)
-            x = conj(x) / static_cast<double>(a.size());
-    }
-
-    // Helper: Compute next power of 2 ? n.
-    inline size_t next_power_of_two(size_t n) 
-    {
-        size_t power = 1;
-        while (power < n)
-            power *= 2;
-        return power;
+        fft(x);
+        return x;
     }
 
     // Bluestein's algorithm for arbitrary-length FFT.
-    // Computes the unnormalized DFT, then returns only the positive frequency components
-    // (indices 0 .. floor(N/2)) as tuples: (magnitude, frequency, phase),
-    // with the same normalization as our power-of-2 FFT (i.e. we later divide by N).
-    template <std::ranges::sized_range Sequence>
-    std::vector<std::tuple<double, double, double>> bluestein(const Sequence& data) 
+    // Computes the unnormalized DFT, then returns all N frequency components as complex numbers.
+    // no scaling is applied to the output (i.e. the DFT is unnormalized, and the inverse DFT must be divided by N).
+    template <std::ranges::random_access_range Sequence>
+    std::vector<std::complex<double>> bluestein_dft(const Sequence& data)
     {
-        size_t N = data.size();
+        auto next_power_of_two = [](size_t n) {
+            size_t power = 1;
+            while (power < n)
+                power *= 2;
+            return power;
+            };
+        size_t N = std::ranges::size(data);
         // Choose M as the next power of 2 >= 2*N - 1.
         size_t M = next_power_of_two(2 * N - 1);
 
@@ -152,8 +289,9 @@ namespace gb::yadro::algorithm
         // Compute FFTs of A and B (length M).
         std::vector<std::complex<double>> A_fft = A;
         std::vector<std::complex<double>> B_fft = B;
-        fft_recursive(A_fft);
-        fft_recursive(B_fft);
+
+        fft(A_fft);
+        fft(B_fft);
 
         // Pointwise multiply: C = A_fft * B_fft.
         std::vector<std::complex<double>> C(M);
@@ -168,21 +306,30 @@ namespace gb::yadro::algorithm
 
         // Now compute the DFT result:
         //   X[k] = exp(-i pi k^2/N) * C[k]    for k = 0,...,N-1,
-        // and then normalize by dividing by N.
         std::vector<std::complex<double>> X(N);
         for (size_t k = 0; k < N; k++) {
             double angle = -std::numbers::pi * (static_cast<double>(k * k)) / N;
             X[k] = C[k] * std::exp(std::complex<double>(0, angle));
-            X[k] /= static_cast<double>(N);
         }
+        return X;
+    }
+
+    // Decompose a signal into its frequency components
+    // Returns a vector of tuples, each containing the magnitude, frequency, and phase of a component
+    // The components are sorted by magnitude in descending order
+    // The frequency is normalized to the range [0, 1], where 1 corresponds to the Nyquist frequency
+    // The phase is in radians
+    inline std::vector<std::tuple<double, double, double>> decompose_signal(const std::vector<std::complex<double>>& signal)
+    {
+        size_t N = signal.size();
 
         // Extract only the positive frequency components (DC through Nyquist).
         size_t upper = (N % 2 == 0) ? (N / 2 + 1) : ((N + 1) / 2);
         std::vector<std::tuple<double, double, double>> components;
         for (size_t k = 0; k < upper; k++) {
-            double magnitude = (k == 0 ? 1 : 2) * std::abs(X[k]);
+            double magnitude = (k == 0 ? 1 : 2) * std::abs(signal[k])/N;
             double frequency = static_cast<double>(k) / N;
-            double phase = std::atan2(X[k].imag(), X[k].real());
+            double phase = std::atan2(signal[k].imag(), signal[k].real());
             components.emplace_back(magnitude, frequency, phase);
         }
 
@@ -191,5 +338,4 @@ namespace gb::yadro::algorithm
 
         return components;
     }
-
 }
