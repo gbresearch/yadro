@@ -10,14 +10,21 @@
 
 namespace gb::yadro::algorithm
 {
-    // Fit a 2-state HMM to the signs of data, using the Baum–Welch algorithm with scaling for numerical stability
+    /*
+        Purpose:
+        Fit a 2‑state HMM to the sign changes of a 1‑D time series.
+        The implementation uses a scaled forward–backward recursion (Baum–Welch) to avoid underflow.
+        After training it exposes the transition matrix A, emission matrix B, the initial distribution pi, 
+        the expected sojourn time of each state, and a stationary‑weighted mean sojourn time.
+    */
+    
     struct hmm_2state_t
     {
-        double A[2][2]{};   // transitions
-        double B[2][2]{};   // emissions: B[i][0]=P(-1), B[i][1]=P(+1)
-        double pi[2]{};     // initial distribution
+        std::array<std::array<double, 2>, 2> A{};   // transitions
+        std::array<std::array<double, 2>, 2> B{};   // emissions: B[i][0]=P(-1), B[i][1]=P(+1)
+        std::array<double, 2> pi{};     // initial distribution
 
-        double sojourn[2]{};    // expected duration in each state (bars)
+        std::array<double, 2> sojourn{};    // expected duration in each state (bars)
         double mean_sojourn{};  // stationary-weighted mean sojourn
 
         bool   valid{ false };    // set true if fit succeeded
@@ -29,95 +36,100 @@ namespace gb::yadro::algorithm
         double      tol = 1e-6)
     {
         hmm_2state_t m;
+        constexpr double eps = std::numeric_limits<double>::epsilon();
+
+        const std::size_t data_size = std::ranges::size(data);
+
+        if (data_size < 20) // too few data points to fit reliably
+            return m;
 
         // Build observation sequence: 0 = down/flat, 1 = up
         std::vector<int> obs;
-        obs.reserve(data.size() - 1);
-        for (std::size_t i = 1; i < data.size(); ++i) {
-            obs.push_back(data[i] > data[i - 1] ? 1 : 0);
+        obs.reserve(data_size - 1);                                     // <-- reserve once
+
+        for (auto it_prev = std::ranges::begin(data), it_curr = std::ranges::next(it_prev); 
+            it_curr != std::ranges::end(data); ++it_prev, ++it_curr) {
+            obs.push_back(*it_curr > *it_prev ? 1 : 0);
         }
 
-        const std::size_t size = obs.size();
-        if (size < 20)
-            return m;
-
         // ---- Initialise parameters ------------------------------------
-        m.A[0][0] = 0.9;  m.A[0][1] = 0.1;
-        m.A[1][0] = 0.1;  m.A[1][1] = 0.9;
-        m.B[0][0] = 0.7;  m.B[0][1] = 0.3;
-        m.B[1][0] = 0.3;  m.B[1][1] = 0.7;
-        m.pi[0] = 0.5;  m.pi[1] = 0.5;
+        m.A = { {{0.9, 0.1}, {0.1, 0.9}} };
+        m.B = { {{0.7, 0.3}, {0.3, 0.7}} };
+        m.pi = { 0.5, 0.5 };
+
+        const std::size_t size = obs.size();
 
         // Scaled forward–backward
         std::vector<std::array<double, 2>> alpha(size), beta(size), gamma(size);
         std::vector<std::array<std::array<double, 2>, 2>> xi(size - 1);
         std::vector<double> c(size); // scaling factors
 
-        double prev_log_likelihood = -std::numeric_limits<double>::infinity();
+        auto prev_log_likelihood = -std::numeric_limits<double>::infinity();
 
         for (std::size_t iter = 0; iter < max_iter; ++iter)
         {
             // ---- Forward with scaling ----
-            double sum0 = 0.0;
-            for (int s = 0; s < 2; ++s) {
+            auto sum0 = 0.0;
+            for (auto s = 0; s < 2; ++s) {
                 alpha[0][s] = m.pi[s] * m.B[s][obs[0]];
                 sum0 += alpha[0][s];
             }
             if (sum0 <= 0.0) return m;
             c[0] = 1.0 / sum0;
-            for (int s = 0; s < 2; ++s)
+            for (auto s = 0; s < 2; ++s)
                 alpha[0][s] *= c[0];
 
             for (std::size_t t = 1; t < size; ++t) {
-                double sum = 0.0;
-                for (int j = 0; j < 2; ++j) {
-                    double a = 0.0;
-                    for (int i = 0; i < 2; ++i)
+                auto sum = 0.0;
+                for (auto j = 0; j < 2; ++j) {
+                    auto a = 0.0;
+                    for (auto i = 0; i < 2; ++i)
                         a += alpha[t - 1][i] * m.A[i][j];
                     alpha[t][j] = a * m.B[j][obs[t]];
                     sum += alpha[t][j];
                 }
                 if (sum <= 0.0) return m;
                 c[t] = 1.0 / sum;
-                for (int j = 0; j < 2; ++j)
+                for (auto j = 0; j < 2; ++j)
                     alpha[t][j] *= c[t];
             }
 
-            double log_lik = 0.0;
-            for (std::size_t t = 0; t < size; ++t)
-                log_lik -= std::log(c[t]);
+            /* log‑likelihood -------------------------------------------- */
+            auto log_lik = 0.0;
+            for (auto ci : c) log_lik -= std::log(ci);
 
             // ---- Backward with scaling ----
-            beta[size - 1][0] = beta[size - 1][1] = 1.0 * c[size - 1];
+            beta[size - 1] = { c[size - 1], c[size - 1] };
+
             for (std::size_t t = size - 1; t-- > 0; ) {
-                for (int i = 0; i < 2; ++i) {
-                    double b = 0.0;
-                    for (int j = 0; j < 2; ++j)
+                for (auto i = 0; i < 2; ++i) {
+                    auto b = 0.0;
+                    for (auto j = 0; j < 2; ++j)
                         b += m.A[i][j] * m.B[j][obs[t + 1]] * beta[t + 1][j];
                     beta[t][i] = b * c[t];
                 }
             }
 
             // ---- Gamma and Xi ----
-            for (std::size_t t = 0; t < size; ++t) {
-                double denom = 0.0;
-                for (int i = 0; i < 2; ++i)
+            for (std::size_t t = 0; t < size; ++t) {    
+                auto denom = 0.0;
+                for (auto i = 0; i < 2; ++i)
                     denom += alpha[t][i] * beta[t][i];
-                if (denom <= 0.0) denom = 1e-300;
+                denom = std::max(denom, eps); // avoid division by zero
 
-                for (int i = 0; i < 2; ++i)
+                for (auto i = 0; i < 2; ++i)
                     gamma[t][i] = (alpha[t][i] * beta[t][i]) / denom;
 
                 if (t < size - 1) {
-                    double denom_xi = 0.0;
-                    for (int i = 0; i < 2; ++i)
-                        for (int j = 0; j < 2; ++j)
+                    auto denom_xi = 0.0;
+                    for (auto i = 0; i < 2; ++i)
+                        for (auto j = 0; j < 2; ++j)
                             denom_xi += alpha[t][i] * m.A[i][j] *
                             m.B[j][obs[t + 1]] * beta[t + 1][j];
-                    if (denom_xi <= 0.0) denom_xi = 1e-300;
+                    denom_xi = std::max(denom_xi, eps); // avoid division by zero
 
-                    for (int i = 0; i < 2; ++i)
-                        for (int j = 0; j < 2; ++j)
+                    for (auto i = 0; i < 2; ++i)
+                        for (auto j = 0; j < 2; ++j)
                             xi[t][i][j] = alpha[t][i] * m.A[i][j] *
                             m.B[j][obs[t + 1]] * beta[t + 1][j] /
                             denom_xi;
@@ -125,31 +137,31 @@ namespace gb::yadro::algorithm
             }
 
             // ---- M-step ----
-            for (int i = 0; i < 2; ++i)
+            for (auto i = 0; i < 2; ++i)
                 m.pi[i] = gamma[0][i];
 
-            for (int i = 0; i < 2; ++i)
+            for (auto i = 0; i < 2; ++i)
             {
-                double sum_gamma = 0.0;
-                double sum_xi[2]{ 0.0, 0.0 };
+                auto sum_gamma = 0.0;
+                auto sum_xi = std::array<double, 2>{ 0.0, 0.0 };
 
                 for (std::size_t t = 0; t < size - 1; ++t) {
                     sum_gamma += gamma[t][i];
-                    for (int j = 0; j < 2; ++j)
+                    for (auto j = 0; j < 2; ++j)
                         sum_xi[j] += xi[t][i][j];
                 }
 
-                const double denom = sum_gamma + 1e-300;
-                for (int j = 0; j < 2; ++j)
+                const auto denom = sum_gamma + 1e-300;
+                for (auto j = 0; j < 2; ++j)
                     m.A[i][j] = sum_xi[j] / denom;
 
                 // Emissions
-                double sum_g = 0.0, sum_g1 = 0.0;
+                auto sum_g = 0.0, sum_g1 = 0.0;
                 for (std::size_t t = 0; t < size; ++t) {
                     sum_g += gamma[t][i];
                     sum_g1 += gamma[t][i] * obs[t];
                 }
-                const double denom_e = sum_g + 1e-300;
+                const auto denom_e = std::max(sum_g, eps);
                 m.B[i][1] = sum_g1 / denom_e;
                 m.B[i][0] = 1.0 - m.B[i][1];
             }
@@ -160,20 +172,18 @@ namespace gb::yadro::algorithm
         }
 
         // Sojourn times
-        for (int i = 0; i < 2; ++i) {
-            const double stay = std::clamp(m.A[i][i], 0.0, 0.999999);
+        for (auto i = 0; i < 2; ++i) {
+            const auto stay = std::clamp(m.A[i][i], 0.0, 1.0 - eps);
             m.sojourn[i] = 1.0 / (1.0 - stay);
         }
 
         // Stationary distribution for 2-state chain
-        const double denom = m.A[0][1] + m.A[1][0];
-        if (denom <= 0.0)
-            return m;
-
-        const double pi0 = m.A[1][0] / denom;
-        const double pi1 = 1.0 - pi0;
-
-        m.mean_sojourn = pi0 * m.sojourn[0] + pi1 * m.sojourn[1];
+        const auto denom = m.A[0][1] + m.A[1][0];
+        if (denom > eps) {
+            const auto pi0 = m.A[1][0] / denom;
+            const auto pi1 = 1.0 - pi0;
+            m.mean_sojourn = pi0 * m.sojourn[0] + pi1 * m.sojourn[1];
+        }
         m.valid = std::isfinite(m.mean_sojourn) && m.mean_sojourn > 0.0;
 
         return m;
