@@ -470,7 +470,7 @@ namespace
     {
         std::vector<double> data(1024);
         std::generate(data.begin(), data.end(), [n = 0]() mutable { return std::sin(n++ * 0.1); });
-        auto components = decompose_signal(dft(data));
+        auto components = decompose_signal(dft(data), { .include_dc = true, .two_sided = false, .sort = true });
         gbassert(components.size() == 513);
 
         auto calc_error = [](auto&& data, auto&& components)
@@ -504,7 +504,7 @@ namespace
         }
 
         // Compute the Bluestein FFT (returns sorted positive frequency components).
-        auto sortedComponents = decompose_signal(bluestein_dft(test_data));
+        auto sortedComponents = decompose_signal(bluestein_dft(test_data), {.include_dc = true, .two_sided = false, .sort = true});
         gbassert(sortedComponents.size() == 501);
 
         auto [magnitude, frequency, phase] = sortedComponents[0];

@@ -35,7 +35,6 @@
 #include <cmath>
 #include <numbers>
 #include <ranges>
-#include <span>
 #include <immintrin.h>   // AVX2 / FMA intrinsics
 #include "../util/gberror.h"
 
@@ -44,13 +43,13 @@ namespace gb::yadro::algorithm
     // simple recursive implementation of the Fast Fourier Transform, in-place, for sequences of size that is a power of 2
     // no scaling is applied to the output (i.e. the DFT is unnormalized, and the inverse DFT must be divided by N).
     // This implementation is not optimized for performance, but serves as a clear and educational example of the FFT algorithm.
-    inline void fft_recursive(std::vector<std::complex<double>>& a) 
+    inline void fft_recursive(std::vector<std::complex<double>>& a)
     {
         size_t N = a.size();
         if (N <= 1) return;
 
         std::vector<std::complex<double>> even(N / 2), odd(N / 2);
-        for (size_t i = 0; i < N / 2; ++i) 
+        for (size_t i = 0; i < N / 2; ++i)
         {
             even[i] = a[i * 2];
             odd[i] = a[i * 2 + 1];
@@ -59,7 +58,7 @@ namespace gb::yadro::algorithm
         fft_recursive(even);
         fft_recursive(odd);
 
-        for (size_t k = 0; k < N / 2; ++k) 
+        for (size_t k = 0; k < N / 2; ++k)
         {
             std::complex<double> t = std::polar(1.0, -2 * std::numbers::pi * k / N) * odd[k];
             a[k] = even[k] + t;
@@ -314,28 +313,130 @@ namespace gb::yadro::algorithm
         return X;
     }
 
-    // Decompose a signal into its frequency components
-    // Returns a vector of tuples, each containing the magnitude, frequency, and phase of a component
-    // The components are sorted by magnitude in descending order
-    // The frequency is normalized to the range [0, 1], where 1 corresponds to the Nyquist frequency
-    // The phase is in radians
-    inline std::vector<std::tuple<double, double, double>> decompose_signal(const std::vector<std::complex<double>>& signal)
+    /* ======================================================================
+       A single resolved frequency component from a DFT output.
+       ====================================================================== */
+    struct spectral_component
     {
-        size_t N = signal.size();
+        double magnitude;   // amplitude of this component
+        double freq_norm;   // frequency in cycles-per-sample ∈ [0, 0.5]
+        // multiply by sample_rate to get physical frequency
+        double phase;       // radians ∈ (−π, π], measured at the first sample
+    };
 
-        // Extract only the positive frequency components (DC through Nyquist).
-        size_t upper = (N % 2 == 0) ? (N / 2 + 1) : ((N + 1) / 2);
-        std::vector<std::tuple<double, double, double>> components;
-        for (size_t k = 0; k < upper; k++) {
-            double magnitude = (k == 0 ? 1 : 2) * std::abs(signal[k])/N;
-            double frequency = static_cast<double>(k) / N;
-            double phase = std::atan2(signal[k].imag(), signal[k].real());
-            components.emplace_back(magnitude, frequency, phase);
+    /* ======================================================================
+       Configuration for decompose_signal.
+       ====================================================================== */
+    struct decompose_cfg
+    {
+        /* Return only k = 0..N/2 (positive frequencies + DC + Nyquist).
+           For a real-valued input signal this is the complete non-redundant
+           content; bins N/2+1..N-1 are conjugate mirrors.                  */
+        bool positive_only = true;
+
+        /* Include k = 0 (DC component, i.e. the signal mean).
+           Usually excluded: including it can dominate spectral distance
+           comparisons.                                                      */
+        bool include_dc = false;
+
+        /* Amplitude normalization.
+
+           Two conventions in common use:
+
+             two_sided = true  (default):
+               Divide all bins by N.  Correct for a two-sided spectrum
+               where conjugate bins are both present.  A sinusoid of amplitude
+               A produces two bins each with magnitude A/2 after this division;
+               their sum recovers A.
+
+             two_sided = false:
+               Divide all bins except DC and Nyquist by N/2, and DC/Nyquist
+               by N.  Correct for a one-sided spectrum: a sinusoid of
+               amplitude A produces one bin with magnitude A.
+
+           When normalize = false, raw DFT magnitudes are returned.          */
+        bool normalize = true;
+        bool two_sided = true;
+
+        /* Sort output by magnitude descending.
+           Disabled by default: sorting destroys the frequency-index ordering
+           that most processing code (spectral distance, peak detection)
+           depends on.  Enable only for human-readable reports.              */
+        bool sort = false;
+    };
+
+    /* ======================================================================
+       Decompose DFT output into (magnitude, frequency, phase) components.
+
+       Input: the complex coefficient vector from any DFT routine
+              (bluestein_dft, radix2_fft, etc.).
+
+       Output: one spectral_component per selected bin, in bin-index order
+               unless cfg.sort = true.
+
+       freq_norm = k / N ∈ [0, 0.5].  Nyquist is at freq_norm = 0.5
+       To convert to physical frequency: freq_hz = freq_norm * sample_rate_hz.
+       ====================================================================== */
+    inline std::vector<spectral_component>
+        decompose_signal(const std::vector<std::complex<double>>& dft, const decompose_cfg& cfg = {})
+    {
+        const auto N = dft.size();
+        if (N == 0) return {};
+
+        /* ---- Frequency index range ------------------------------------ */
+        const std::size_t k_start = cfg.include_dc ? 0 : 1;
+
+        /* For even N: positive frequencies are 0..N/2 (Nyquist at N/2).
+           For odd  N: positive frequencies are 0..(N-1)/2.
+           Integer division N/2 handles both cases correctly.             */
+        const std::size_t k_end = cfg.positive_only ? (N / 2) : (N - 1);
+
+        std::vector<spectral_component> out;
+        out.reserve(k_end - k_start + 1);
+
+        const double nd = static_cast<double>(N);
+
+        for (std::size_t k = k_start; k <= k_end; ++k)
+        {
+            const auto c = dft[k];
+            auto mag = std::abs(c);
+
+            if (cfg.normalize)
+            {
+                /* One-sided amplitude correction:
+                   All bins except DC (k=0) and Nyquist (k=N/2 for even N)
+                   appear as conjugate pairs in the full two-sided spectrum.
+                   For a one-sided representation each of those bins should
+                   carry the full amplitude of the corresponding sinusoid,
+                   so we multiply by 2 (equivalently divide by N/2 rather
+                   than N).  DC and Nyquist have no conjugate and divide
+                   by N only.                                              */
+                if (cfg.two_sided)
+                {
+                    mag /= nd;
+                }
+                else
+                {
+                    const bool is_dc = (k == 0);
+                    const bool is_nyquist = (N % 2 == 0) && (k == N / 2);
+                    mag /= (is_dc || is_nyquist) ? nd : nd * 0.5;
+                }
+            }
+
+            /* freq_norm = cycles per sample.
+               Nyquist is at k = N/2, freq_norm = 0.5.                   */
+            const double freq_norm = static_cast<double>(k) / nd;
+            const double phase = std::arg(c);
+
+            out.push_back({ mag, freq_norm, phase });
         }
 
-        // Sort the components by magnitude in descending order.
-        std::sort(components.begin(), components.end(), [](const auto& a, const auto& b) { return get<0>(a) > get<0>(b); });
+        if (cfg.sort)
+        {
+            std::sort(out.begin(), out.end(), [](const spectral_component& a, const spectral_component& b)
+                { return a.magnitude > b.magnitude; });
+        }
 
-        return components;
+        return out;
     }
 }
