@@ -206,7 +206,7 @@ namespace gb::sim
         template<class Signal, class Compare>
         struct conditional_event
         {
-            conditional_event(conditional_event&& other) : _s(other._s), _old_value(std::move(_old_value)) {}
+            conditional_event(conditional_event&& other) : _s(other._s), _old_value(std::move(other._old_value)) {}
             conditional_event(Signal& s, Compare comp = {}) : _s(s), _old_value(s.read()) {}
             void bind(auto fun) { _s.bind(always_callback(std::move(fun))); }
             void bind_once(auto fun) { _s.bind_once(wait_callback(std::move(fun))); }
@@ -294,7 +294,7 @@ namespace gb::sim::coroutines
     {
         using base = gb::sim::detail::conditional_event<Signal, Compare>;
         using base::base;
-
+        conditional_event(Signal& s, Compare comp = {}) : base(s, comp) {}
         void await_suspend(auto h) { base::bind_once([h] { h.resume(); }); }
         void await_resume() {}
         auto await_ready() { return false; }

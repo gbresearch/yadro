@@ -39,7 +39,7 @@ namespace gb::sim::fibers
     using namespace gb::yadro;
     
     //---------------------------------------------------------------------------------------------
-    void __stdcall fiber_loop(void* f)
+    __declspec(noinline)void __stdcall fiber_loop(void* f)
     {
         if (auto t = static_cast<fiber*>(f); t)
             t->execute();
@@ -51,17 +51,16 @@ namespace gb::sim::fibers
     {
         _win_fiber = ::CreateFiber(stack_size, &fiber_loop, this);
         util::gbassert(_win_fiber);
-        resume();
     }
     //---------------------------------------------------------------------------------------------
-    fiber::~fiber()
+    __declspec(noinline) fiber::~fiber()
     {
         if(_win_fiber)
             ::DeleteFiber(_win_fiber);
     }
 
     //---------------------------------------------------------------------------------------------
-    void fiber::execute() 
+    __declspec(noinline) void fiber::execute()
     {
         while (!_finished) 
         {
@@ -72,35 +71,35 @@ namespace gb::sim::fibers
     }
 
     //---------------------------------------------------------------------------------------------
-    void fiber::suspend() 
+    __declspec(noinline) void fiber::suspend()
     {   // call from this fiber
         ::SwitchToFiber(_scheduler._main_fiber);
     }
 
     //---------------------------------------------------------------------------------------------
-    void fiber::resume()
+    __declspec(noinline) void fiber::resume()
     {   // call from main fiber
         ::SwitchToFiber(_win_fiber);
     }
 
     //---------------------------------------------------------------------------------------------
-    void fiber::finish() { _finished = true; }
+    __declspec(noinline) void fiber::finish() { _finished = true; }
 
     //---------------------------------------------------------------------------------------------
-    void fiber::wait(sim_time_t t) 
+    __declspec(noinline) void fiber::wait(sim_time_t t) 
     {
         _scheduler.schedule([this] { resume(); }, t);
         suspend();
     }
 
     //---------------------------------------------------------------------------------------------
-    auto fiber::get_sim_time() const -> sim_time_t
+    __declspec(noinline) auto fiber::get_sim_time() const -> sim_time_t
     {
         return _scheduler.current_time();
     }
 
     //---------------------------------------------------------------------------------------------
-    fiber* this_fiber() 
+    __declspec(noinline) fiber* this_fiber() 
     { 
         auto f = static_cast<fiber*>(GetFiberData());
         util::gbassert(f, "must be called from a fiber");

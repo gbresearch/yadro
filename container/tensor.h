@@ -77,7 +77,7 @@ namespace gb::yadro::container
         static consteval auto size() { return (D*...*Ds); }
         static consteval auto cardinality() { return sizeof ...(Ds) + 1; }
         
-        static constexpr auto dimension(auto index)
+        static constexpr auto dimension(std::size_t index)
         {
             gb::yadro::util::gbassert(index < cardinality());
             if constexpr (sizeof ...(Ds) != 0)

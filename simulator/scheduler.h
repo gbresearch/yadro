@@ -144,25 +144,28 @@ namespace gb::sim::fibers
         auto forever(std::convertible_to<std::function<void()>> auto&& call_back)
         {
             _fibers.push_back(std::make_unique<fiber>(*this, decltype(call_back)(call_back)));
+            _fibers.back()->resume();
             return _fibers.back().get();
         }
 
         auto forever(auto&& call_back, auto&&... args) requires(sizeof ...(args) != 0)
         {
             _fibers.push_back(std::make_unique<fiber>(*this, 
-                [cb = gb::yadro::util::fwd_wrapper{ call_back }, arg_tup = gb::yadro::util::fwd_tuple(decltype(args)(args)... )]
+                [cb = gb::yadro::util::fwd_wrapper{ decltype(call_back)(call_back) }, arg_tup = gb::yadro::util::fwd_tuple(decltype(args)(args)... )]
                 { 
                     std::apply([&](auto&&...args) {
                         std::invoke(cb.get(), decltype(args)(args)...);
                         }, arg_tup);
                 }));
+            _fibers.back()->resume();
             return _fibers.back().get();
         }
 
         auto once(std::convertible_to<std::function<void()>> auto&& call_back)
         {
-            _called_once.emplace(std::make_unique<fiber>(*this,
-                [this, cb = gb::yadro::util::fwd_wrapper{ call_back }]
+
+            auto f = std::make_unique<fiber>(*this,
+                [this, cb = gb::yadro::util::fwd_wrapper{ decltype(call_back)(call_back) }]
                 {
                     std::invoke(cb.get());
                     finish();
@@ -173,7 +176,10 @@ namespace gb::sim::fibers
                         _called_once.erase(tmp_unique);
                         tmp_unique.release();
                         });
-                }));
+                });
+            auto [it, success] = _called_once.emplace(std::move(f));
+            gb::yadro::util::gbassert(success, "fiber was not added to the set");
+            it->get()->resume();
         }
 
         void reset()

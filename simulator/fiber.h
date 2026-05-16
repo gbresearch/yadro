@@ -38,7 +38,7 @@ namespace gb::sim::fibers
         // fibers are neither copiable nor movable
         fiber(const fiber&) = delete;
         auto& operator= (const fiber&) = delete;
-        fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size = 4096);
+        fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size = 8192);
         ~fiber();
         void suspend();
         void resume();

@@ -334,7 +334,9 @@ namespace
         // test fiber waiting on event
         event e1;
         printer(e1, "e1");
-        sch.once([&] { ss << get_sim_time() << ": enter fiber #1\n"; wait(e1); ss << get_sim_time() << ": fiber #1 resumed after wait\n"; });
+        sch.once([&] { 
+            ss << get_sim_time() << ": enter fiber #1\n";  wait(e1); ss << get_sim_time() << ": fiber #1 resumed after wait\n"; 
+            });
         sch.schedule(e1, 1);
         sch.run();
         gbassert(ss.str() == "0: enter fiber #1\n1: e1 triggered\n1: fiber #1 resumed after wait\n");

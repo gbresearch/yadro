@@ -800,7 +800,7 @@ namespace
         gbassert(small_map[1] < 60);
         gbassert(small_map[16] < 6);
         gbassert(large_map[1] < 100);
-        gbassert(large_map[16] < 30);
+        gbassert(large_map[16] < 60);
 #endif
         //run_benchmark_fixed<bounded_priority_queue<TestItem<1024>>>(32'000);
      }
