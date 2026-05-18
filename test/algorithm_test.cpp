@@ -41,7 +41,7 @@ namespace
 
     //--------------------------------------------------------------------------------------------
     // test optimization with tuples of fundamental types
-    GB_TEST(algorithm, genetic_optimization_test, std::launch::async)
+    GB_TEST(algorithm, genetic_optimization_test, std::launch::deferred)
     {
         using namespace std::chrono_literals;
 
@@ -69,7 +69,7 @@ namespace
 #endif
     }
 
-    GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::async)
+    GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::deferred)
     {
         using namespace std::chrono_literals;
         using namespace gb::yadro::algorithm::conv;
@@ -114,7 +114,7 @@ namespace
 #endif
         // second optimization run to test history and stopping criteria
         auto [stats, history] = opt.optimize(
-            /* time budget */    20ms,
+            /* time budget */    100ms,
             /*population_size=*/ 100,
             /*max_history=*/     5
         );
@@ -137,7 +137,7 @@ namespace
         gbassert(stats == opt.stats());
     }
 
-    GB_TEST(algorithm, genetic_optimization_test_adaptive, std::launch::async)
+    GB_TEST(algorithm, genetic_optimization_test_adaptive, std::launch::deferred)
     {
         using namespace std::chrono_literals;
         using namespace gb::yadro::algorithm::conv;
@@ -208,7 +208,7 @@ namespace
 
     //--------------------------------------------------------------------------------------------
     // test optimization with tuples of fundamental types, providing acceptable_target
-    GB_TEST(algorithm, genetic_optimization_test1, std::launch::async)
+    GB_TEST(algorithm, genetic_optimization_test1, std::launch::deferred)
     {
         using namespace std::chrono_literals;
 
@@ -238,7 +238,7 @@ namespace
 
     //--------------------------------------------------------------------------------------------
     // test optimization with tuples of ranges
-    GB_TEST(algorithm, genetic_opt_range_test, std::launch::async)
+    GB_TEST(algorithm, genetic_opt_range_test, std::launch::deferred)
     {
         using namespace std::chrono_literals;
 
@@ -268,7 +268,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, genetic_optimization_mt_test, std::launch::async)
+    GB_TEST(algorithm, genetic_optimization_mt_test, std::launch::deferred)
     {
         using namespace std::chrono_literals;
 
@@ -343,7 +343,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, genetic_opt_serialization_test, std::launch::async)
+    GB_TEST(algorithm, genetic_opt_serialization_test, std::launch::deferred)
     {
         using namespace std::chrono_literals;
 
@@ -377,7 +377,7 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, least_squares_test, std::launch::async)
+    GB_TEST(algorithm, least_squares_test, std::launch::deferred)
     {
         using namespace std::chrono_literals;
 

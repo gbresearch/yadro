@@ -60,7 +60,7 @@ namespace gb::yadro::util
     //-----------------------------------------------------------------------------------------------------------------
     struct tester
     {
-        gb::yadro::async::threadpool _pool;
+        std::unique_ptr<gb::yadro::async::threadpool> _pool;
         std::unordered_map<std::string, std::vector<test_base*>> _tests;
         mutable logger _log;
 
@@ -80,6 +80,11 @@ namespace gb::yadro::util
                 for (auto& test : rec.second)
                     if(test->_policy == std::launch::async)
                         test->_policy = policy;
+            
+            if (policy == std::launch::async)
+                get()._pool = std::make_unique<gb::yadro::async::threadpool>();
+            else
+                get()._pool.reset();
         }
         
         static void disable_suites(auto&& ... names)
@@ -165,8 +170,8 @@ namespace gb::yadro::util
                             }
                         };
 
-                        if (test->_policy == std::launch::async)
-                            futures.push_back(_pool(test_run));
+                        if (test->_policy == std::launch::async && _pool)
+                            futures.push_back(_pool->submit(test_run));
                         else
                             test_run();
                     }
@@ -180,6 +185,9 @@ namespace gb::yadro::util
 
             for (auto&& f : futures)
                 f.get();
+            
+            _pool.reset(); // destroy pool, no longer needed
+
             if (_verbose)
             {
                 _log.writeln("run time: ",
