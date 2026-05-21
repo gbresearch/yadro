@@ -57,6 +57,7 @@ namespace gb::yadro::container
         using string_view = std::basic_string_view<CharT>;
         using string_type = std::basic_string<CharT>;
         using path_view = std::initializer_list<string_view>;
+        using path_span = std::span<const string_view>;
 
         struct string_ref
         {
@@ -189,6 +190,11 @@ namespace gb::yadro::container
 
         [[nodiscard]] node_id find(path_view path) const
         {
+            return find(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] node_id find(path_span path) const
+        {
             node_id parent = root_node;
             for (auto part : path) {
                 auto key = find_string(part);
@@ -206,10 +212,20 @@ namespace gb::yadro::container
 
         [[nodiscard]] bool contains(path_view path) const
         {
+            return contains(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] bool contains(path_span path) const
+        {
             return find(path) != invalid_node;
         }
 
         [[nodiscard]] const value_type* get(path_view path) const
+        {
+            return get(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] const value_type* get(path_span path) const
         {
             auto node = find(path);
             return node == invalid_node ? nullptr : std::addressof(_tree.get_value(node).value);
@@ -217,11 +233,21 @@ namespace gb::yadro::container
 
         [[nodiscard]] value_type* get(path_view path)
         {
+            return get(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] value_type* get(path_span path)
+        {
             auto node = find(path);
             return node == invalid_node ? nullptr : std::addressof(_tree.get_value(node).value);
         }
 
         node_id set(path_view path, value_type value)
+        {
+            return set(path_span{ path.begin(), path.size() }, std::move(value));
+        }
+
+        node_id set(path_span path, value_type value)
         {
             auto node = ensure_path(path);
             _tree.get_value(node).value = std::move(value);
@@ -233,7 +259,17 @@ namespace gb::yadro::container
             return set(path, value_type{ std::monostate{} });
         }
 
+        node_id set(path_span path, std::nullptr_t)
+        {
+            return set(path, value_type{ std::monostate{} });
+        }
+
         node_id set(path_view path, bool value)
+        {
+            return set(path, value_type{ value });
+        }
+
+        node_id set(path_span path, bool value)
         {
             return set(path, value_type{ value });
         }
@@ -248,7 +284,22 @@ namespace gb::yadro::container
                 return set(path, value_type{ static_cast<std::uint64_t>(value) });
         }
 
+        template<std::integral IntT>
+            requires(!std::same_as<std::remove_cv_t<IntT>, bool>)
+        node_id set(path_span path, IntT value)
+        {
+            if constexpr (std::is_signed_v<IntT>)
+                return set(path, value_type{ static_cast<std::int64_t>(value) });
+            else
+                return set(path, value_type{ static_cast<std::uint64_t>(value) });
+        }
+
         node_id set(path_view path, float value)
+        {
+            return set(path, static_cast<double>(value));
+        }
+
+        node_id set(path_span path, float value)
         {
             return set(path, static_cast<double>(value));
         }
@@ -258,7 +309,17 @@ namespace gb::yadro::container
             return set(path, value_type{ value });
         }
 
+        node_id set(path_span path, double value)
+        {
+            return set(path, value_type{ value });
+        }
+
         node_id set(path_view path, const CharT* value)
+        {
+            return set(path, string_view{ value });
+        }
+
+        node_id set(path_span path, const CharT* value)
         {
             return set(path, string_view{ value });
         }
@@ -268,27 +329,57 @@ namespace gb::yadro::container
             return set(path, value_type{ string_ref{ intern(value) } });
         }
 
+        node_id set(path_span path, string_view value)
+        {
+            return set(path, value_type{ string_ref{ intern(value) } });
+        }
+
         node_id set(path_view path, const string_type& value)
+        {
+            return set(path, string_view{ value });
+        }
+
+        node_id set(path_span path, const string_type& value)
         {
             return set(path, string_view{ value });
         }
 
         node_id set_array(path_view path, std::span<const std::int64_t> values)
         {
+            return set_array(path_span{ path.begin(), path.size() }, values);
+        }
+
+        node_id set_array(path_span path, std::span<const std::int64_t> values)
+        {
             return set(path, value_type{ int_array_ref{ _int_arrays.insert(values) } });
         }
 
         node_id set_array(path_view path, std::span<const std::uint64_t> values)
+        {
+            return set_array(path_span{ path.begin(), path.size() }, values);
+        }
+
+        node_id set_array(path_span path, std::span<const std::uint64_t> values)
         {
             return set(path, value_type{ uint_array_ref{ _uint_arrays.insert(values) } });
         }
 
         node_id set_array(path_view path, std::span<const double> values)
         {
+            return set_array(path_span{ path.begin(), path.size() }, values);
+        }
+
+        node_id set_array(path_span path, std::span<const double> values)
+        {
             return set(path, value_type{ double_array_ref{ _double_arrays.insert(values) } });
         }
 
         node_id set_string_array(path_view path, std::initializer_list<string_view> values)
+        {
+            return set_string_array(path_span{ path.begin(), path.size() }, std::span<const string_view>{ values.begin(), values.size() });
+        }
+
+        node_id set_string_array(path_span path, std::span<const string_view> values)
         {
             std::vector<string_id> ids;
             ids.reserve(values.size());
@@ -299,6 +390,11 @@ namespace gb::yadro::container
         }
 
         node_id set_blob(path_view path, std::span<const std::byte> values)
+        {
+            return set_blob(path_span{ path.begin(), path.size() }, values);
+        }
+
+        node_id set_blob(path_span path, std::span<const std::byte> values)
         {
             return set(path, value_type{ blob_ref{ _blobs.insert(values) } });
         }
@@ -413,7 +509,7 @@ namespace gb::yadro::container
             return id;
         }
 
-        node_id ensure_path(path_view path)
+        node_id ensure_path(path_span path)
         {
             node_id parent = root_node;
             for (auto part : path) {

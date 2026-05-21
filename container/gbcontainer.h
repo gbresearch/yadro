@@ -40,3 +40,4 @@
 #include "pareto_front.h"
 #include "datapool.h"
 #include "gbdb.h"
+#include "gbdb_json.h"

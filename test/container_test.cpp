@@ -32,6 +32,7 @@
 #include "../container/gbcontainer.h"
 #include "../container/datapool.h"
 #include "../container/gbdb.h"
+#include "../container/gbdb_json.h"
 #include "../archive/archive.h"
 #include "../async/async.h"
 #include <vector>
@@ -1163,6 +1164,73 @@ namespace
         gbassert(restored_blob.size() == 3);
         gbassert(restored_blob[0] == std::byte{ 1 });
         gbassert(restored_blob[2] == std::byte{ 3 });
+    }
+
+    GB_TEST(container, gbdb_json_writer_test)
+    {
+        json_db db;
+        db.set({ "market", "active" }, true);
+        db.set({ "market", "symbol" }, std::string_view{ "AAPL" });
+        db.set({ "market", "price" }, 193.25);
+
+        std::array<std::int64_t, 3> prices{ 190, 191, 193 };
+        db.set_array({ "market", "history" }, std::span{ prices });
+        db.set_string_array({ "market", "venues" }, { "nasdaq", "arca" });
+
+        json_write_options options;
+        options.pretty = false;
+        options.sort_keys = true;
+
+        auto text = write_json(db, options);
+        gbassert(text == R"({"market":{"active":true,"history":[190,191,193],"price":193.25,"symbol":"AAPL","venues":["nasdaq","arca"]}})");
+    }
+
+    GB_TEST(container, gbdb_json_builder_test)
+    {
+        json_db_builder builder;
+        builder.begin_object();
+        builder.key("market");
+        builder.begin_object();
+        builder.key("symbol");
+        builder.string_value("MSFT");
+        builder.key("history");
+        builder.begin_array();
+        builder.int_value(420);
+        builder.int_value(421);
+        builder.int_value(422);
+        builder.end_array();
+        builder.end_object();
+        builder.end_object();
+
+        auto db = std::move(builder).finish();
+
+        auto symbol_ref = std::get<json_db::string_ref>(*db.get({ "market", "symbol" }));
+        gbassert(db.string(symbol_ref) == "MSFT");
+
+        auto history_ref = std::get<json_db::int_array_ref>(*db.get({ "market", "history" }));
+        auto history = db.array(history_ref);
+        gbassert(history.size() == 3);
+        gbassert(history[0] == 420);
+        gbassert(history[2] == 422);
+    }
+
+    GB_TEST(container, gbdb_json_reader_is_opt_in_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            auto db = read_json(R"({"market":{"symbol":"AAPL","history":[190,191,193]}})");
+
+            auto symbol_ref = std::get<json_db::string_ref>(*db.get({ "market", "symbol" }));
+            gbassert(db.string(symbol_ref) == "AAPL");
+
+            auto history_ref = std::get<json_db::uint_array_ref>(*db.get({ "market", "history" }));
+            auto history = db.array(history_ref);
+            gbassert(history.size() == 3);
+            gbassert(history[0] == 190);
+            gbassert(history[2] == 193);
+        }
+        else {
+            must_throw<std::logic_error>([] { [[maybe_unused]] auto db = read_json(R"({"x":1})"); });
+        }
     }
 
     GB_TEST(container, indexed_tree_delete_subtree_detaches_all_descendants_test)
