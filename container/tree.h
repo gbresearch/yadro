@@ -27,11 +27,15 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include <cstdint>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <type_traits>
 #include <algorithm>
 #include <stdexcept>
+#include "../archive/archive.h"
 
 namespace gb::yadro::container
 {
@@ -60,10 +64,13 @@ namespace gb::yadro::container
         auto& get_data() const { return data; }
 
         template<class Ar>
-        void serialize(Ar&& archive)
+        void serialize(this auto&& self, Ar&& ar)
         {
             static_assert(std::is_default_constructible_v<T>);
-            std::invoke(std::forward<Ar>(archive), data, parent, child, sibling);
+            std::invoke(std::forward<Ar>(ar), self.data,
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.parent),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.child),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.sibling));
         }
     };
 
@@ -87,11 +94,14 @@ namespace gb::yadro::container
         auto& get_data() const { return *static_cast<const T*>(this); }
 
         template<class Ar>
-        void serialize(Ar&& archive)
+        void serialize(this auto&& self, Ar&& ar)
         {
             static_assert(std::is_default_constructible_v<T>);
-            auto& data = get_data();
-            std::invoke(std::forward<Ar>(archive), data, parent, child, sibling);
+            auto&& data = self.get_data();
+            std::invoke(std::forward<Ar>(ar), data,
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.parent),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.child),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.sibling));
         }
     };
 
@@ -109,9 +119,12 @@ namespace gb::yadro::container
         {}
 
         template<class Ar>
-        void serialize(Ar&& archive)
+        void serialize(this auto&& self, Ar&& ar)
         {
-            std::invoke(std::forward<Ar>(archive), parent, child, sibling);
+            std::invoke(std::forward<Ar>(ar),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.parent),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.child),
+                gb::yadro::archive::serialize_as<std::uint64_t>(self.sibling));
         }
     };
 
@@ -241,10 +254,53 @@ namespace gb::yadro::container
         auto empty() const { return nodes_size() == 0; }
 
         template<class Ar>
-        void serialize(Ar&& archive)
+        void serialize(this auto&& self, Ar&& archive)
         {
-            archive(_nodes);
-            //std::invoke(std::forward<Ar>(archive), _nodes);
+            if constexpr (gb::yadro::archive::iarchive_like<Ar>)
+            {
+                static_assert(!std::is_const_v<std::remove_reference_t<decltype(self)>>);
+
+                std::uint64_t node_count{};
+                archive(node_count);
+                if (node_count > static_cast<std::uint64_t>((std::numeric_limits<index_t>::max)()))
+                    throw std::out_of_range("Archived tree node count exceeds index range");
+
+                self.clear();
+                for (std::uint64_t i = 0; i < node_count; ++i)
+                {
+                    index_t parent{};
+                    index_t child{};
+                    index_t sibling{};
+
+                    if constexpr (has_data)
+                    {
+                        static_assert(std::is_default_constructible_v<T>);
+                        T data{};
+                        archive(data,
+                            gb::yadro::archive::serialize_as<std::uint64_t>(parent),
+                            gb::yadro::archive::serialize_as<std::uint64_t>(child),
+                            gb::yadro::archive::serialize_as<std::uint64_t>(sibling));
+                        self.emplace_back(parent, child, sibling, std::move(data));
+                    }
+                    else
+                    {
+                        archive(
+                            gb::yadro::archive::serialize_as<std::uint64_t>(parent),
+                            gb::yadro::archive::serialize_as<std::uint64_t>(child),
+                            gb::yadro::archive::serialize_as<std::uint64_t>(sibling));
+                        self.emplace_back(parent, child, sibling);
+                    }
+                }
+            }
+            else
+            {
+                auto node_count = self.nodes_size();
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(node_count));
+                for (index_t index = 0; index < node_count; ++index)
+                {
+                    self.get_node(index).serialize(archive);
+                }
+            }
         }
 
         auto& get_nodes() { return _nodes; }

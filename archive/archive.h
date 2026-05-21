@@ -36,8 +36,8 @@
 #include <cassert>
 #include <array>
 #include <vector>
+#include <queue>
 #include <tuple>
-#include <optional>
 #include <span>
 #include <ranges>
 #include <expected>

@@ -1170,6 +1170,55 @@ namespace
         gbassert(dst_count == 2);
     }
 
+    GB_TEST(container, indexed_tree_serialization_test)
+    {
+        static_assert(requires(const indexed_tree<int>& tree, omem_archive<>& archive) { tree.serialize(archive); });
+        static_assert(requires(const indexed_tree<void>& tree, omem_archive<>& archive) { tree.serialize(archive); });
+
+        indexed_tree<int> tree(10);
+        auto child1 = tree.insert_child(0, 20);
+        auto child2 = tree.insert_child(0, 30);
+        auto grandchild = tree.insert_child(child1, 40);
+
+        gbassert(serialization_size(tree) == 120);
+
+        omem_archive<> out;
+        const auto& const_tree = tree;
+        out(const_tree);
+
+        indexed_tree<int> restored;
+        imem_archive in(std::move(out));
+        in(restored);
+
+        gbassert(restored.get_nodes().size() == tree.get_nodes().size());
+        gbassert(restored.get_value(0) == 10);
+        gbassert(restored.get_value(child1) == 20);
+        gbassert(restored.get_value(child2) == 30);
+        gbassert(restored.get_value(grandchild) == 40);
+        gbassert(restored.get_child(0) == child2);
+        gbassert(restored.get_sibling(child2) == child1);
+        gbassert(restored.get_child(child1) == grandchild);
+
+        indexed_tree<void> void_tree;
+        auto void_child1 = void_tree.insert_child(0);
+        auto void_child2 = void_tree.insert_child(0);
+
+        gbassert(serialization_size(void_tree) == 80);
+
+        omem_archive<> void_out;
+        const auto& const_void_tree = void_tree;
+        void_out(const_void_tree);
+
+        indexed_tree<void> restored_void;
+        imem_archive void_in(std::move(void_out));
+        void_in(restored_void);
+
+        gbassert(restored_void.get_nodes().size() == void_tree.get_nodes().size());
+        gbassert(restored_void.get_child(0) == void_child2);
+        gbassert(restored_void.get_sibling(void_child2) == void_child1);
+        gbassert(restored_void.get_sibling(void_child1) == restored_void.invalid_index);
+    }
+
     GB_TEST(container, indexed_tree_clear_test)
     {
         indexed_tree<int> tree(10);
