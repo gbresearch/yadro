@@ -30,8 +30,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <concepts>
 #include <initializer_list>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -59,36 +62,72 @@ namespace gb::yadro::container
         {
             string_id id{};
             friend bool operator==(const string_ref&, const string_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
         };
 
         struct int_array_ref
         {
             unique_data_pool<std::int64_t>::array_id id{};
             friend bool operator==(const int_array_ref&, const int_array_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
         };
 
         struct uint_array_ref
         {
             unique_data_pool<std::uint64_t>::array_id id{};
             friend bool operator==(const uint_array_ref&, const uint_array_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
         };
 
         struct double_array_ref
         {
             unique_data_pool<double>::array_id id{};
             friend bool operator==(const double_array_ref&, const double_array_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
         };
 
         struct string_array_ref
         {
             unique_data_pool<string_id>::array_id id{};
             friend bool operator==(const string_array_ref&, const string_array_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
         };
 
         struct blob_ref
         {
             duplicate_data_pool<std::byte>::array_id id{};
             friend bool operator==(const blob_ref&, const blob_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
         };
 
         using value_type = std::variant<
@@ -108,6 +147,12 @@ namespace gb::yadro::container
         {
             string_id key{};
             value_type value{};
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.key), self.value);
+            }
         };
 
         using tree_type = indexed_tree<node_payload>;
@@ -303,6 +348,33 @@ namespace gb::yadro::container
             return _tree;
         }
 
+        template<class Ar>
+        void serialize(this auto&& self, Ar&& archive)
+        {
+            if constexpr (gb::yadro::archive::iarchive_like<Ar>) {
+                static_assert(!std::is_const_v<std::remove_reference_t<decltype(self)>>);
+
+                self.reset_empty();
+                self.load_string_pool(archive);
+                self.load_array_pool(archive, self._int_arrays);
+                self.load_array_pool(archive, self._uint_arrays);
+                self.load_array_pool(archive, self._double_arrays);
+                self.load_array_pool(archive, self._string_arrays);
+                self.load_array_pool(archive, self._blobs);
+                archive(self._tree);
+                self.rebuild_indexes();
+            }
+            else {
+                self.save_string_pool(archive);
+                self.save_array_pool(archive, self._int_arrays);
+                self.save_array_pool(archive, self._uint_arrays);
+                self.save_array_pool(archive, self._double_arrays);
+                self.save_array_pool(archive, self._string_arrays);
+                self.save_array_pool(archive, self._blobs);
+                archive(self._tree);
+            }
+        }
+
     private:
         static constexpr string_id invalid_string = (std::numeric_limits<string_id>::max)();
 
@@ -359,6 +431,98 @@ namespace gb::yadro::container
                 parent = child;
             }
             return parent;
+        }
+
+        void reset_empty()
+        {
+            _strings = string_pool_type{};
+            _string_lookup.clear();
+            _int_arrays = unique_data_pool<std::int64_t>{};
+            _uint_arrays = unique_data_pool<std::uint64_t>{};
+            _double_arrays = unique_data_pool<double>{};
+            _string_arrays = unique_data_pool<string_id>{};
+            _blobs = duplicate_data_pool<std::byte>{};
+            _tree = tree_type(node_payload{});
+            _child_index.clear();
+            _node_count = 1;
+            _tree.get_value(root_node).key = intern({});
+        }
+
+        template<class Ar>
+        void save_string_pool(Ar& archive) const
+        {
+            auto count = _strings.string_count();
+            archive(gb::yadro::archive::serialize_as<std::uint64_t>(count));
+            for (string_id id = 0; id < count; ++id) {
+                string_type value{ _strings.view(id) };
+                archive(value);
+            }
+        }
+
+        template<class Ar>
+        void load_string_pool(Ar& archive)
+        {
+            std::uint64_t count{};
+            archive(gb::yadro::archive::serialize_as<std::uint64_t>(count));
+            for (std::uint64_t i = 0; i < count; ++i) {
+                string_type value;
+                archive(value);
+                auto id = intern(value);
+                if (id != static_cast<string_id>(i))
+                    throw std::runtime_error("gbdb string pool archive has non-canonical string order");
+            }
+        }
+
+        template<class Ar, class Pool>
+        static void save_array_pool(Ar& archive, const Pool& pool)
+        {
+            using array_id = typename Pool::array_id;
+            using value_type = typename Pool::value_type;
+
+            auto count = pool.array_count();
+            archive(gb::yadro::archive::serialize_as<std::uint64_t>(count));
+            for (array_id id = 0; id < count; ++id) {
+                auto data = pool.span(id);
+                std::vector<value_type> values(data.begin(), data.end());
+                archive(values);
+            }
+        }
+
+        template<class Ar, class Pool>
+        static void load_array_pool(Ar& archive, Pool& pool)
+        {
+            using array_id = typename Pool::array_id;
+            using value_type = typename Pool::value_type;
+
+            pool = Pool{};
+            std::uint64_t count{};
+            archive(gb::yadro::archive::serialize_as<std::uint64_t>(count));
+            for (std::uint64_t i = 0; i < count; ++i) {
+                std::vector<value_type> values;
+                archive(values);
+                auto id = pool.insert(values);
+                if (id != static_cast<array_id>(i))
+                    throw std::runtime_error("gbdb data pool archive has non-canonical array order");
+            }
+        }
+
+        void rebuild_indexes()
+        {
+            _string_lookup.clear();
+            auto string_count = _strings.string_count();
+            _string_lookup.reserve(string_count);
+            for (string_id id = 0; id < string_count; ++id)
+                _string_lookup.emplace(string_type{ _strings.view(id) }, id);
+
+            _child_index.clear();
+            _node_count = static_cast<node_id>(_tree.get_nodes().size());
+            _child_index.reserve(_node_count);
+
+            for (node_id node = 1; node < _node_count; ++node) {
+                auto parent = _tree.get_parent(node);
+                if (parent != invalid_node)
+                    _child_index.emplace(child_key{ parent, _tree.get_value(node).key }, node);
+            }
         }
 
         string_pool_type _strings;

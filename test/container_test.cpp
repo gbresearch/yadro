@@ -1110,6 +1110,61 @@ namespace
         gbassert(db.get({ "config", "missing" }) == nullptr);
     }
 
+    GB_TEST(container, gbdb_serialization_test)
+    {
+        json_db db;
+        db.set({ "market", "symbol" }, std::string_view{ "AAPL" });
+        db.set({ "market", "price" }, 193.25);
+        db.set({ "market", "active" }, true);
+
+        std::array<std::int64_t, 3> prices{ 190, 191, 193 };
+        db.set_array({ "market", "history" }, std::span{ prices });
+        db.set_string_array({ "market", "venues" }, { "nasdaq", "arca" });
+
+        std::array blob{ std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 } };
+        db.set_blob({ "market", "raw" }, std::span{ blob });
+
+        omem_archive<> out;
+        const auto& const_db = db;
+        out(const_db);
+
+        json_db restored;
+        imem_archive in(std::move(out));
+        in(restored);
+
+        gbassert(restored.node_count() == db.node_count());
+        gbassert(restored.contains({ "market", "symbol" }));
+
+        auto symbol_ref = std::get<json_db::string_ref>(*restored.get({ "market", "symbol" }));
+        gbassert(restored.string(symbol_ref) == "AAPL");
+
+        auto* price = restored.get({ "market", "price" });
+        gbassert(price != nullptr);
+        gbassert(std::get<double>(*price) == 193.25);
+
+        auto* active = restored.get({ "market", "active" });
+        gbassert(active != nullptr);
+        gbassert(std::get<bool>(*active));
+
+        auto history_ref = std::get<json_db::int_array_ref>(*restored.get({ "market", "history" }));
+        auto history = restored.array(history_ref);
+        gbassert(history.size() == 3);
+        gbassert(history[0] == 190);
+        gbassert(history[2] == 193);
+
+        auto venues_ref = std::get<json_db::string_array_ref>(*restored.get({ "market", "venues" }));
+        auto venues = restored.array(venues_ref);
+        gbassert(venues.size() == 2);
+        gbassert(restored.string(venues[0]) == "nasdaq");
+        gbassert(restored.string(venues[1]) == "arca");
+
+        auto blob_ref = std::get<json_db::blob_ref>(*restored.get({ "market", "raw" }));
+        auto restored_blob = restored.blob(blob_ref);
+        gbassert(restored_blob.size() == 3);
+        gbassert(restored_blob[0] == std::byte{ 1 });
+        gbassert(restored_blob[2] == std::byte{ 3 });
+    }
+
     GB_TEST(container, indexed_tree_delete_subtree_detaches_all_descendants_test)
     {
         indexed_tree<int> tree(10);
