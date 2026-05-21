@@ -214,6 +214,8 @@ namespace gb::yadro::container
         void move_subtree_after_sibling(index_t sibling, index_t node);
         void move_children(index_t from_parent, index_t to_parent);
 
+        indexed_tree canonical_tree() const;
+
         // searches
         template<class Predicate>
         index_t find_ancestor(index_t node, Predicate pred) const;
@@ -306,6 +308,11 @@ namespace gb::yadro::container
         auto& get_nodes() { return _nodes; }
 
     private:
+        struct no_root_t {};
+
+        indexed_tree(no_root_t)
+        {}
+
         container_t _nodes;
 
         void destroy_subtree(index_t node);
@@ -472,6 +479,67 @@ namespace gb::yadro::container
         {
             move_subtree(to_parent, child);
         }
+    }
+
+    //---------------------------------------------------------------------
+    template<class T, template<class> class StorageT>
+    indexed_tree<T, StorageT> indexed_tree<T, StorageT>::canonical_tree() const
+    {
+        indexed_tree result(no_root_t{});
+        const auto node_count = nodes_size();
+        if (node_count == 0)
+            return result;
+
+        std::vector<bool> reachable(node_count);
+        auto mark_reachable = [&](auto&& self, index_t node)->void
+        {
+            if (!is_valid_index(node) || reachable[node])
+                return;
+
+            reachable[node] = true;
+            for (auto child = get_child(node); child != invalid_index; child = get_sibling(child))
+            {
+                self(self, child);
+            }
+        };
+
+        mark_reachable(mark_reachable, 0);
+
+        std::vector<index_t> old_to_new(node_count, invalid_index);
+        for (index_t index = 0; index < node_count; ++index)
+        {
+            if (reachable[index])
+            {
+                old_to_new[index] = result.nodes_size();
+                if constexpr (has_data)
+                {
+                    result.emplace_back(invalid_index, invalid_index, invalid_index, get_node(index).get_data());
+                }
+                else
+                {
+                    result.emplace_back(invalid_index, invalid_index, invalid_index);
+                }
+            }
+        }
+
+        auto map_index = [&](index_t index)
+        {
+            return index != invalid_index && index < node_count ? old_to_new[index] : invalid_index;
+        };
+
+        for (index_t index = 0; index < node_count; ++index)
+        {
+            if (reachable[index])
+            {
+                auto& node = result.get_node(old_to_new[index]);
+                const auto& source_node = get_node(index);
+                node.parent = map_index(source_node.parent);
+                node.child = map_index(source_node.child);
+                node.sibling = map_index(source_node.sibling);
+            }
+        }
+
+        return result;
     }
 
     //---------------------------------------------------------------------

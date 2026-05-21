@@ -1270,6 +1270,35 @@ namespace
         gbassert(restored_void.get_sibling(void_child1) == restored_void.invalid_index);
     }
 
+    GB_TEST(container, indexed_tree_canonical_tree_test)
+    {
+        indexed_tree<int> tree(10);
+        auto child1 = tree.insert_child(0, 20);
+        auto child2 = tree.insert_child(0, 30);
+        auto grandchild = tree.insert_child(child1, 100);
+        auto child3 = tree.insert_child(0, 40);
+        auto detached = tree.insert_child(0, 50);
+        auto detached_child = tree.insert_child(detached, 60);
+
+        tree.detach_subtree(detached);
+        tree.delete_subtree(child1);
+
+        auto canonical = tree.canonical_tree();
+
+        gbassert(canonical.get_nodes().size() == 3);
+        gbassert(canonical.get_value(0) == 10);
+        gbassert(canonical.get_value(1) == 30);
+        gbassert(canonical.get_value(2) == 40);
+        gbassert(canonical.get_parent(0) == canonical.invalid_index);
+        gbassert(canonical.get_parent(1) == 0);
+        gbassert(canonical.get_parent(2) == 0);
+        gbassert(canonical.get_child(0) == 2);
+        gbassert(canonical.get_sibling(2) == 1);
+        gbassert(canonical.get_sibling(1) == canonical.invalid_index);
+        gbassert(canonical.get_child(1) == canonical.invalid_index);
+        gbassert(canonical.get_child(2) == canonical.invalid_index);
+    }
+
     GB_TEST(container, indexed_tree_clear_test)
     {
         indexed_tree<int> tree(10);
