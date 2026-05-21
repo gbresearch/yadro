@@ -30,6 +30,7 @@
 #include "../util/misc.h"
 #include "../util/hash_util.h"
 #include "../container/gbcontainer.h"
+#include "../container/datapool.h"
 #include "../archive/archive.h"
 #include "../async/async.h"
 #include <vector>
@@ -63,6 +64,39 @@ namespace
         {
             ++destructor_count;
         }
+    };
+
+    struct data_pool_lifetime_tracker
+    {
+        static inline int constructor_count = 0;
+        static inline int destructor_count = 0;
+
+        int value = 0;
+
+        explicit data_pool_lifetime_tracker(int value) : value(value)
+        {
+            ++constructor_count;
+        }
+
+        data_pool_lifetime_tracker(const data_pool_lifetime_tracker& other) : value(other.value)
+        {
+            ++constructor_count;
+        }
+
+        data_pool_lifetime_tracker(data_pool_lifetime_tracker&& other) noexcept : value(other.value)
+        {
+            ++constructor_count;
+        }
+
+        data_pool_lifetime_tracker& operator=(const data_pool_lifetime_tracker&) = default;
+        data_pool_lifetime_tracker& operator=(data_pool_lifetime_tracker&&) noexcept = default;
+
+        ~data_pool_lifetime_tracker()
+        {
+            ++destructor_count;
+        }
+
+        friend bool operator==(const data_pool_lifetime_tracker&, const data_pool_lifetime_tracker&) = default;
     };
 
     GB_TEST(container, static_string_test)
@@ -905,6 +939,104 @@ namespace
         // Delete entire subtree rooted at c1
         tree.delete_subtree(c1);
         gbassert(tree.get_child(0) == tree.invalid_index);
+    }
+
+    GB_TEST(container, data_pool_duplicate_insert_erase_compact_test)
+    {
+        static_assert(sizeof(duplicate_data_pool<int>::array_record) == 24);
+
+        duplicate_data_pool<int> pool;
+
+        auto a0 = pool.insert(std::array{ 1, 2, 3 });
+        auto a1 = pool.insert(std::array{ 1, 2, 3 });
+        auto a2 = pool.insert(std::array{ 4, 5 });
+
+        gbassert(a0 == 0);
+        gbassert(a1 == 1);
+        gbassert(a2 == 2);
+        gbassert(pool.array_count() == 3);
+        gbassert(pool.size(a0) == 3);
+        gbassert(pool.live_size(a0) == 3);
+        gbassert(pool(a0, 1) == 2);
+        gbassert(pool.span(a2)[1] == 5);
+        gbassert(pool.hash(a0) == pool.hash(a1));
+
+        pool.erase(a0, 1);
+        gbassert(pool.size(a0) == 3);
+        gbassert(pool.live_size(a0) == 2);
+        gbassert(!pool.is_live(a0, 1));
+        gbassert(pool.is_live(a0, 2));
+
+        pool.compact();
+        gbassert(pool.size(a0) == 2);
+        gbassert(pool.live_size(a0) == 2);
+        gbassert(pool(a0, 0) == 1);
+        gbassert(pool(a0, 1) == 3);
+        gbassert(pool(a1, 2) == 3);
+
+        auto a3 = pool.insert(std::array{ 1, 3 });
+        gbassert(pool.hash(a0) == pool.hash(a3));
+    }
+
+    GB_TEST(container, data_pool_unique_arrays_test)
+    {
+        unique_data_pool<int> pool;
+
+        auto a0 = pool.insert(std::array{ 7, 8, 9 });
+        auto a1 = pool.insert(std::array{ 7, 8, 9 });
+        auto a2 = pool.insert(std::array{ 7, 8 });
+
+        gbassert(a0 == a1);
+        gbassert(a2 != a0);
+        gbassert(pool.array_count() == 2);
+        gbassert(pool.size(a0) == 3);
+        gbassert(pool(a0, 2) == 9);
+    }
+
+    GB_TEST(container, data_pool_non_trivial_lifetime_test)
+    {
+        data_pool_lifetime_tracker::constructor_count = 0;
+        data_pool_lifetime_tracker::destructor_count = 0;
+
+        {
+            duplicate_data_pool<data_pool_lifetime_tracker> pool;
+            std::array values{
+                data_pool_lifetime_tracker{ 1 },
+                data_pool_lifetime_tracker{ 2 },
+                data_pool_lifetime_tracker{ 3 }
+            };
+
+            auto id = pool.insert(values);
+            auto before_erase = data_pool_lifetime_tracker::destructor_count;
+            pool.erase(id, 1);
+            gbassert(data_pool_lifetime_tracker::destructor_count == before_erase + 1);
+            gbassert(pool.live_size(id) == 2);
+
+            pool.compact();
+            gbassert(pool.size(id) == 2);
+            gbassert(pool(id, 0).value == 1);
+            gbassert(pool(id, 1).value == 3);
+        }
+
+        gbassert(data_pool_lifetime_tracker::constructor_count == data_pool_lifetime_tracker::destructor_count);
+    }
+
+    GB_TEST(container, string_pool_zero_padded_c_str_test)
+    {
+        static_assert(sizeof(string_pool::string_record) == 16);
+
+        string_pool pool;
+
+        auto s0 = pool.insert(std::string_view{ "alpha" });
+        auto s1 = pool.insert(std::string_view{ "alpha" });
+        auto s2 = pool.insert(std::string_view{ "beta" });
+
+        gbassert(s0 == s1);
+        gbassert(s2 != s0);
+        gbassert(pool.size(s0) == 5);
+        gbassert(std::string_view(pool.c_str(s0)) == "alpha");
+        gbassert(pool.c_str(s0)[pool.size(s0)] == '\0');
+        gbassert(pool.view(s2) == "beta");
     }
 
     GB_TEST(container, indexed_tree_delete_subtree_detaches_all_descendants_test)

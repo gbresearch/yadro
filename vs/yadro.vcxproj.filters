@@ -181,6 +181,9 @@
     <ClInclude Include="..\algorithm\hmm.h">
       <Filter>algorithm</Filter>
     </ClInclude>
+    <ClInclude Include="..\container\datapool.h">
+      <Filter>container</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\container\tree.cpp">
