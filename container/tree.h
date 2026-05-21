@@ -43,7 +43,7 @@ namespace gb::yadro::container
     template<class T, class index_t, bool = std::is_class_v<T>> struct tree_node;
 
     //---------------------------------------------------------------------
-    // tree_node contains data
+    // Node storage for scalar and non-class payload types.
     template<class T, class index_t>
     struct tree_node<T, index_t, false> final
     {
@@ -75,7 +75,7 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------
-    // tree_node derives from data class (to use empty class optimization)
+    // Node storage for class payload types, using inheritance for empty base optimization.
     template<class T, class index_t>
     struct tree_node<T, index_t, true> final : T
     {
@@ -106,7 +106,7 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------
-    // tree_node doesn't carry data in any way
+    // Node storage for trees that only represent topology.
     template<class index_t>
     struct tree_node<void, index_t, false> final
     {
@@ -129,6 +129,7 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------
+    // Adapter layer for storage containers used by indexed_tree.
     template<class StorageT>
     struct storage_traits final
     {
@@ -147,10 +148,12 @@ namespace gb::yadro::container
     };
 
     //---------------------------------------------------------------------
+    // Default contiguous node storage for indexed_tree.
     template<class T>
     using vector_storage = std::vector<T>;
 
     //---------------------------------------------------------------------
+    // A compact tree whose links are stable indices into the node storage.
     template<class T, template<class> class StorageT = vector_storage>
     struct indexed_tree final
     {
@@ -161,21 +164,22 @@ namespace gb::yadro::container
         using index_t = typename container_t::size_type;
         enum : index_t { invalid_index = (index_t)(-1) };
 
-        // constructor creates a root node
+        // Construct a tree with a single root node.
         indexed_tree(auto&& ... args)
         {
             emplace_back(invalid_index, invalid_index, invalid_index, std::forward<decltype(args)>(args)...);
         }
 
-        // test index
+        // Return whether an index names an allocated node slot.
         auto is_valid_index(index_t index) const { return index < nodes_size(); }
 
+        // Return whether a node is detached from any parent.
         auto is_orphan(index_t index) const
         {
             return index < nodes_size() && get_node(index).parent == invalid_index;
         }
 
-        // accessors
+        // Return the payload stored in a node.
         template<class TT = T, bool = rebind<TT>::has_data>
         auto& get_value(index_t node)
         {
@@ -188,73 +192,104 @@ namespace gb::yadro::container
             return get_node(node).get_data();
         }
 
+        // Return topology links for a node, or invalid_index for invalid_index input.
         auto get_parent(index_t node) const { return node != invalid_index ? get_node(node).parent : node; }
         auto get_child(index_t node) const { return node != invalid_index ? get_node(node).child : node; }
         auto get_sibling(index_t node) const { return node != invalid_index ? get_node(node).sibling : node; }
 
         // insertions and deletions
 
+        // Insert a new first child of parent in O(1).
         template<class...Args>
         auto insert_child(index_t parent, Args&&...);
 
+        // Insert a new node immediately after an existing sibling.
         template<class...Args>
         auto insert_after_sibling(index_t sibling, Args&&...);
 
+        // Detach a subtree without removing its nodes from storage.
         auto detach_subtree(index_t node);
+
+        // Attach a detached subtree as the first child of another node.
         auto attach_subtree(index_t to_parent, index_t node);
+
+        // Attach a detached subtree immediately after an existing sibling.
         auto attach_subtree_after_sibling(index_t sibling, index_t node);
 
+        // Logically remove a subtree from the tree topology; storage is preserved.
         void delete_subtree(index_t node);
 
-        // copies and moves (order is not preserved)
+        // Copy a subtree under a parent; sibling order is not preserved.
         auto copy_subtree(index_t to_parent, index_t node);
+
+        // Copy a subtree immediately after a sibling; descendant order is not preserved.
         auto copy_subtree_after_sibling(index_t sibling, index_t node);
+
+        // Copy all children from one parent to another.
         void copy_children(index_t from_parent, index_t to_parent);
+
+        // Move a subtree under a new parent.
         void move_subtree(index_t to_parent, index_t node);
+
+        // Move a subtree immediately after a sibling.
         void move_subtree_after_sibling(index_t sibling, index_t node);
+
+        // Move all children from one parent to another.
         void move_children(index_t from_parent, index_t to_parent);
 
+        // Return a compact copy containing only nodes reachable from the root.
         indexed_tree canonical_tree() const;
 
-        // searches
+        // Find the first ancestor matching a predicate.
         template<class Predicate>
         index_t find_ancestor(index_t node, Predicate pred) const;
 
+        // Find the first direct child matching a predicate.
         template<class Predicate>
         index_t find_child(index_t parent, Predicate pred) const;
 
+        // Find the first node in a sibling chain matching a predicate.
         template<class Predicate>
         index_t find_sibling(index_t node, Predicate pred) const;
 
+        // Find the first matching node in depth-first order.
         template<class Predicate>
         index_t find_depth_first(index_t node, Predicate pred) const;
 
+        // Find the first matching node in breadth-first order.
         template<class Predicate>
         index_t find_breadth_first(index_t node, Predicate pred) const;
 
-        // iterations
+        // Visit direct children until completion or visitor early-exit.
         template<class Function>
         index_t foreach_child(index_t parent, Function vis) const;
 
+        // Visit a sibling chain until completion or visitor early-exit.
         template<class Function>
         auto foreach_sibling(index_t node, Function vis) const;
 
+        // Visit nodes in depth-first order until completion or visitor early-exit.
         template<class Function>
         auto foreach_depth_first(index_t parent, Function vis) const;
 
+        // Visit nodes in breadth-first order until completion or visitor early-exit.
         template<class Function>
         auto foreach_breadth_first(index_t parent, Function vis) const;
 
-        // reordering
+        // Reverse the sibling order of a node's direct children.
         void reverse_children(index_t parent);
 
+        // Sort a node's direct children with a comparator over node indices.
         template<class Compare>
         void sort_children(index_t parent, Compare comp);
 
+        // Remove all stored nodes.
         void clear() { storage_traits<container_t>::clear(_nodes); }
 
+        // Return whether storage contains no nodes.
         auto empty() const { return nodes_size() == 0; }
 
+        // Serialize node storage and index links.
         template<class Ar>
         void serialize(this auto&& self, Ar&& archive)
         {
@@ -305,18 +340,22 @@ namespace gb::yadro::container
             }
         }
 
+        // Expose node storage for tests and low-level integrations.
         auto& get_nodes() { return _nodes; }
 
     private:
         struct no_root_t {};
 
+        // Construct an empty storage object for canonicalization and archive load.
         indexed_tree(no_root_t)
         {}
 
         container_t _nodes;
 
+        // Detach all descendants of a logical subtree root.
         void destroy_subtree(index_t node);
 
+        // Bounds-checked node access.
         auto& get_node(index_t index) 
         { 
             if (!is_valid_index(index)) 
@@ -333,6 +372,7 @@ namespace gb::yadro::container
         template<class...Args>
         void emplace_back(Args&& ...args) { storage_traits<container_t>::template emplace_back(_nodes, std::forward<Args>(args)...); }
 
+        // Number of allocated node slots, including detached logical deletions.
         constexpr auto nodes_size() const { return storage_traits<container_t>::size(_nodes); }
     };
 
