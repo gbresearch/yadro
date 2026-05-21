@@ -804,4 +804,380 @@ namespace
 #endif
         //run_benchmark_fixed<bounded_priority_queue<TestItem<1024>>>(32'000);
      }
+
+    GB_TEST(container, indexed_tree_basic_test)
+    {
+        indexed_tree<int> tree(42);
+        gbassert(tree.get_value(0) == 42);
+        gbassert(tree.get_parent(0) == tree.invalid_index);
+        gbassert(tree.get_child(0) == tree.invalid_index);
+        gbassert(tree.get_sibling(0) == tree.invalid_index);
+        gbassert(tree.is_orphan(0));
+        gbassert(tree.is_valid_index(0));
+        gbassert(!tree.is_valid_index(999));
+        gbassert(!tree.empty());
+    }
+
+    GB_TEST(container, indexed_tree_insert_children_test)
+    {
+        indexed_tree<int> tree(10);
+        
+        // Insert first child
+        auto child1 = tree.insert_child(0, 20);
+        gbassert(child1 == 1);
+        gbassert(tree.get_value(child1) == 20);
+        gbassert(tree.get_parent(child1) == 0);
+        gbassert(tree.get_child(0) == child1);
+
+        // Insert second child
+        auto child2 = tree.insert_child(0, 30);
+        gbassert(child2 == 2);
+        gbassert(tree.get_value(child2) == 30);
+        gbassert(tree.get_parent(child2) == 0);
+        gbassert(tree.get_child(0) == child2);
+        gbassert(tree.get_sibling(child2) == child1);
+        gbassert(tree.get_sibling(child1) == tree.invalid_index);
+
+        // Insert third child
+        auto child3 = tree.insert_child(0, 40);
+        gbassert(child3 == 3);
+        gbassert(tree.get_child(0) == child3);
+        gbassert(tree.get_sibling(child3) == child2);
+    }
+
+    GB_TEST(container, indexed_tree_insert_siblings_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_after_sibling(c1, 30);
+        
+        gbassert(c2 == 2);
+        gbassert(tree.get_sibling(c1) == c2);
+        gbassert(tree.get_parent(c2) == 0);
+        gbassert(tree.get_value(c2) == 30);
+    }
+
+    GB_TEST(container, indexed_tree_detach_attach_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto gc1 = tree.insert_child(c1, 100);
+        
+        // Detach c1
+        tree.detach_subtree(c1);
+        gbassert(tree.get_parent(c1) == tree.invalid_index);
+        gbassert(tree.get_sibling(c1) == tree.invalid_index);
+        gbassert(tree.get_child(0) == c2);  // c2 becomes first child
+        
+        // Attach c1 as child of c2
+        tree.attach_subtree(c2, c1);
+        gbassert(tree.get_parent(c1) == c2);
+        gbassert(tree.get_child(c2) == c1);
+    }
+
+    GB_TEST(container, indexed_tree_delete_subtree_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto gc1 = tree.insert_child(c1, 100);
+        auto gc2 = tree.insert_child(c1, 200);
+        
+        // Delete entire subtree rooted at c1
+        tree.delete_subtree(c1);
+        gbassert(tree.get_child(0) == tree.invalid_index);
+    }
+
+    GB_TEST(container, indexed_tree_copy_subtree_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto gc1 = tree.insert_child(c1, 100);
+        auto gc2 = tree.insert_child(c1, 200);
+        
+        auto c2 = tree.insert_child(0, 30);
+        auto copy = tree.copy_subtree(c2, c1);
+        
+        // Verify copy has same structure and values
+        gbassert(tree.get_value(copy) == 20);
+        gbassert(tree.get_parent(copy) == c2);
+        
+        // Count children of copy (should be 2)
+        int count = 0;
+        tree.foreach_child(copy, [&](auto n) { count++; });
+        gbassert(count == 2);
+    }
+
+    GB_TEST(container, indexed_tree_move_subtree_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto gc1 = tree.insert_child(c1, 100);
+        
+        auto c2 = tree.insert_child(0, 30);
+        tree.move_subtree(c2, c1);
+        
+        gbassert(tree.get_parent(c1) == c2);
+        gbassert(tree.get_child(c2) == c1);
+    }
+
+    GB_TEST(container, indexed_tree_find_ancestor_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto gc1 = tree.insert_child(c1, 100);
+        auto ggc1 = tree.insert_child(gc1, 200);
+        
+        auto found = tree.find_ancestor(ggc1, [&](auto n) { 
+            return tree.get_value(n) == 20; 
+        });
+        gbassert(found == c1);
+        
+        auto not_found = tree.find_ancestor(ggc1, [&](auto n) { 
+            return tree.get_value(n) == 999; 
+        });
+        gbassert(not_found == tree.invalid_index);
+    }
+
+    GB_TEST(container, indexed_tree_find_child_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto c3 = tree.insert_child(0, 40);
+        
+        auto found = tree.find_child(0, [&](auto n) { 
+            return tree.get_value(n) == 30; 
+        });
+        gbassert(found == c2);
+    }
+
+    GB_TEST(container, indexed_tree_find_sibling_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto c3 = tree.insert_child(0, 40);
+        
+        auto found = tree.find_sibling(c3, [&](auto n) { 
+            return tree.get_value(n) == 20; 
+        });
+        gbassert(found == c1);
+    }
+
+    GB_TEST(container, indexed_tree_find_depth_first_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto gc1 = tree.insert_child(c1, 100);
+        auto c2 = tree.insert_child(0, 30);
+        
+        auto found = tree.find_depth_first(0, [&](auto n) { 
+            return tree.get_value(n) == 100; 
+        });
+        gbassert(found == gc1);
+    }
+
+    GB_TEST(container, indexed_tree_find_breadth_first_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto gc1 = tree.insert_child(c1, 100);
+        
+        auto found = tree.find_breadth_first(0, [&](auto n) { 
+            return tree.get_value(n) == 30; 
+        });
+        gbassert(found == c2);  // Should find c2 before gc1 (breadth-first)
+    }
+
+    GB_TEST(container, indexed_tree_foreach_child_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto c3 = tree.insert_child(0, 40);
+        
+        std::vector<int> values;
+        tree.foreach_child(0, [&](auto n) { 
+            values.push_back(tree.get_value(n)); 
+        });
+        gbassert(values == std::vector{ 40, 30, 20 });
+    }
+
+    GB_TEST(container, indexed_tree_foreach_sibling_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_after_sibling(c1, 30);
+        auto c3 = tree.insert_after_sibling(c2, 40);
+        
+        std::vector<int> values;
+        tree.foreach_sibling(c1, [&](auto n) { 
+            values.push_back(tree.get_value(n)); 
+        });
+        gbassert(values == std::vector{ 20, 30, 40 });
+    }
+
+    GB_TEST(container, indexed_tree_foreach_early_exit_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto c3 = tree.insert_child(0, 40);
+        
+        int count = 0;
+        tree.foreach_child(0, [&](auto n) { 
+            count++;
+            return count < 2;  // Stop after second child
+        });
+        gbassert(count == 2);
+    }
+
+    GB_TEST(container, indexed_tree_reverse_children_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 20);
+        auto c2 = tree.insert_child(0, 30);
+        auto c3 = tree.insert_child(0, 40);
+        
+        tree.reverse_children(0);
+        
+        // After reverse, order should be c1, c2, c3
+        std::vector<int> values;
+        tree.foreach_child(0, [&](auto n) { 
+            values.push_back(tree.get_value(n)); 
+        });
+        gbassert(values == std::vector{ 20, 30, 40 });
+    }
+
+    GB_TEST(container, indexed_tree_sort_children_test)
+    {
+        indexed_tree<int> tree(10);
+        auto c1 = tree.insert_child(0, 50);
+        auto c2 = tree.insert_child(0, 20);
+        auto c3 = tree.insert_child(0, 40);
+        auto c4 = tree.insert_child(0, 10);
+        
+        tree.sort_children(0, [&](auto a, auto b) { 
+            return tree.get_value(a) < tree.get_value(b); 
+        });
+        
+        std::vector<int> values;
+        tree.foreach_child(0, [&](auto n) { 
+            values.push_back(tree.get_value(n)); 
+        });
+        gbassert(values == std::vector{ 10, 20, 40, 50 });
+    }
+
+    GB_TEST(container, indexed_tree_void_data_test)
+    {
+        indexed_tree<void> tree;
+        gbassert(!tree.has_data);
+        
+        auto c1 = tree.insert_child(0);
+        auto c2 = tree.insert_child(0);
+        gbassert(tree.is_valid_index(c1));
+        gbassert(tree.is_valid_index(c2));
+        
+        int count = 0;
+        tree.foreach_child(0, [&](auto n) { count++; });
+        gbassert(count == 2);
+    }
+
+    GB_TEST(container, indexed_tree_bounds_checking_test)
+    {
+        indexed_tree<int> tree(10);
+        
+        // Valid access
+        auto val = tree.get_value(0);
+        gbassert(val == 10);
+        
+        // Invalid access should throw
+        try {
+            tree.get_value(999);
+            gbassert(false);  // Should not reach here
+        } catch (const std::out_of_range&) {
+            gbassert(true);
+        }
+    }
+
+    GB_TEST(container, indexed_tree_complex_hierarchy_test)
+    {
+        indexed_tree<std::string> tree("root");
+        
+        auto folder1 = tree.insert_child(0, "folder1");
+        auto folder2 = tree.insert_child(0, "folder2");
+        
+        auto file1 = tree.insert_child(folder1, "file1.txt");
+        auto file2 = tree.insert_child(folder1, "file2.txt");
+        auto subfolder = tree.insert_child(folder1, "subfolder");
+        
+        auto file3 = tree.insert_child(subfolder, "file3.txt");
+        
+        // Count all files in folder1 subtree
+        int file_count = 0;
+        tree.foreach_depth_first(folder1, [&](auto n) { 
+            if (tree.get_value(n).find(".txt") != std::string::npos) {
+                file_count++;
+            }
+        });
+        gbassert(file_count == 3);
+    }
+
+    GB_TEST(container, indexed_tree_move_children_test)
+    {
+        indexed_tree<int> tree(10);
+        
+        auto src = tree.insert_child(0, 100);
+        auto dst = tree.insert_child(0, 200);
+        
+        auto src_c1 = tree.insert_child(src, 1);
+        auto src_c2 = tree.insert_child(src, 2);
+        auto src_c3 = tree.insert_child(src, 3);
+        
+        tree.move_children(src, dst);
+        
+        // Source should have no children
+        gbassert(tree.get_child(src) == tree.invalid_index);
+        
+        // Destination should have children
+        int count = 0;
+        tree.foreach_child(dst, [&](auto n) { count++; });
+        gbassert(count == 3);
+    }
+
+    GB_TEST(container, indexed_tree_copy_children_test)
+    {
+        indexed_tree<int> tree(10);
+        
+        auto src = tree.insert_child(0, 100);
+        auto dst = tree.insert_child(0, 200);
+        
+        auto src_c1 = tree.insert_child(src, 1);
+        auto src_c2 = tree.insert_child(src, 2);
+        
+        tree.copy_children(src, dst);
+        
+        // Source should still have children
+        int src_count = 0;
+        tree.foreach_child(src, [&](auto n) { src_count++; });
+        gbassert(src_count == 2);
+        
+        // Destination should have copies
+        int dst_count = 0;
+        tree.foreach_child(dst, [&](auto n) { dst_count++; });
+        gbassert(dst_count == 2);
+    }
+
+    GB_TEST(container, indexed_tree_clear_test)
+    {
+        indexed_tree<int> tree(10);
+        tree.insert_child(0, 20);
+        tree.insert_child(0, 30);
+        gbassert(!tree.empty());
+        
+        tree.clear();
+        gbassert(tree.empty());
+    }
 }

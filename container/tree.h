@@ -30,6 +30,8 @@
 #include <memory>
 #include <vector>
 #include <type_traits>
+#include <algorithm>
+#include <stdexcept>
 
 namespace gb::yadro::container
 {
@@ -252,8 +254,18 @@ namespace gb::yadro::container
 
         void destroy_subtree(index_t node);
 
-        auto& get_node(index_t index) { return storage_traits< container_t>::template get(_nodes, index); }
-        auto& get_node(index_t index) const { return storage_traits<container_t>::template get(_nodes, index); }
+        auto& get_node(index_t index) 
+        { 
+            if (!is_valid_index(index)) 
+                throw std::out_of_range("Invalid tree node index");
+            return storage_traits< container_t>::template get(_nodes, index); 
+        }
+        auto& get_node(index_t index) const 
+        { 
+            if (!is_valid_index(index)) 
+                throw std::out_of_range("Invalid tree node index");
+            return storage_traits<container_t>::template get(_nodes, index); 
+        }
 
         template<class...Args>
         void emplace_back(Args&& ...args) { storage_traits<container_t>::template emplace_back(_nodes, std::forward<Args>(args)...); }
@@ -401,7 +413,10 @@ namespace gb::yadro::container
     template<class T, template<class> class StorageT>
     void indexed_tree<T, StorageT>::move_children(index_t from_parent, index_t to_parent)
     {
-        foreach_child(from_parent, [&](auto n) { move_subtree(to_parent, n); });
+        for (auto child = get_child(from_parent); child != invalid_index; child = get_child(from_parent))
+        {
+            move_subtree(to_parent, child);
+        }
     }
 
     //---------------------------------------------------------------------
@@ -484,7 +499,8 @@ namespace gb::yadro::container
             return invalid_index;
         };
 
-        std::vector<index_t> in_nodes(node, 1);
+        std::vector<index_t> in_nodes;
+        in_nodes.push_back(node);
         std::vector<index_t> out_nodes;
 
         while (!in_nodes.empty())
@@ -589,14 +605,49 @@ namespace gb::yadro::container
     template<class T, template<class> class StorageT>
     void indexed_tree<T, StorageT>::reverse_children(index_t parent)
     {
-        for (index_t child = invalid_index, sib = get_child(parent); sib != invalid_index; )
+        index_t new_first_child = invalid_index;
+        for (auto sib = get_child(parent); sib != invalid_index; )
         {
             auto& sib_node = get_node(sib);
             auto next_sibling = sib_node.sibling;
-            sib_node.sibling = child;
-            child = sib;
+            sib_node.sibling = new_first_child;
+            new_first_child = sib;
             sib = next_sibling;
         }
+        // Update parent's child pointer to the new first child (the old last child)
+        get_node(parent).child = new_first_child;
+    }
+
+    //---------------------------------------------------------------------
+    template<class T, template<class> class StorageT>
+    template<class Compare>
+    void indexed_tree<T, StorageT>::sort_children(index_t parent, Compare comp)
+    {
+        // Collect all children indices
+        std::vector<index_t> children;
+        for (auto child = get_child(parent); child != invalid_index; child = get_sibling(child))
+        {
+            children.push_back(child);
+        }
+
+        if (children.size() <= 1)
+            return; // Nothing to sort
+
+        // Sort children by comparator
+        std::sort(children.begin(), children.end(), [&](index_t a, index_t b)
+        {
+            return std::invoke(comp, a, b);
+        });
+
+        // Rebuild sibling links in sorted order
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            get_node(children[i]).parent = parent;
+            get_node(children[i]).sibling = (i + 1 < children.size()) ? children[i + 1] : invalid_index;
+        }
+
+        // Update parent's child pointer
+        get_node(parent).child = children[0];
     }
     //---------------------------------------------------------------------
 }
