@@ -1214,6 +1214,81 @@ namespace
         gbassert(history[2] == 422);
     }
 
+    GB_TEST(container, gbdb_json_insert_replace_existing_test)
+    {
+        json_db target;
+        target.set({ "market", "symbol" }, "AAPL");
+        target.set({ "market", "old" }, 1);
+        target.set({ "config", "enabled" }, true);
+
+        json_db source;
+        source.set({ "market", "symbol" }, "MSFT");
+        source.set({ "market", "price" }, 420.5);
+
+        insert_json(target, source, json_merge_policy::replace_existing);
+
+        auto symbol_ref = std::get<json_db::string_ref>(*target.get({ "market", "symbol" }));
+        gbassert(target.string(symbol_ref) == "MSFT");
+
+        auto* price = target.get({ "market", "price" });
+        gbassert(price != nullptr);
+        gbassert(std::get<double>(*price) == 420.5);
+
+        gbassert(target.contains({ "market", "old" }));
+        gbassert(std::get<std::int64_t>(*target.get({ "market", "old" })) == 1);
+        gbassert(std::get<bool>(*target.get({ "config", "enabled" })));
+    }
+
+    GB_TEST(container, gbdb_json_insert_reject_existing_test)
+    {
+        json_db target;
+        target.set({ "market", "symbol" }, "AAPL");
+
+        json_db source;
+        source.set({ "market", "symbol" }, "MSFT");
+        source.set({ "config", "enabled" }, true);
+
+        must_throw<std::logic_error>([&] {
+            insert_json(target, source, json_merge_policy::reject_existing);
+        });
+
+        auto symbol_ref = std::get<json_db::string_ref>(*target.get({ "market", "symbol" }));
+        gbassert(target.string(symbol_ref) == "AAPL");
+        gbassert(!target.contains({ "config", "enabled" }));
+    }
+
+    GB_TEST(container, gbdb_json_insert_rejects_shape_conflict_test)
+    {
+        json_db target;
+        target.set({ "market", "symbol" }, "AAPL");
+
+        json_db source;
+        source.set({ "market" }, 1);
+
+        must_throw<std::logic_error>([&] {
+            insert_json(target, source, json_merge_policy::replace_existing);
+        });
+    }
+
+    GB_TEST(container, gbdb_json_write_subtree_test)
+    {
+        json_db db;
+        db.set({ "market", "symbol" }, "AAPL");
+        db.set({ "market", "price" }, 193.25);
+        db.set({ "config", "enabled" }, true);
+
+        json_write_options options;
+        options.pretty = false;
+        options.sort_keys = true;
+
+        auto text = write_json_subtree(db, "market", options);
+        gbassert(text == R"({"market":{"price":193.25,"symbol":"AAPL"}})");
+
+        must_throw<std::logic_error>([&] {
+            [[maybe_unused]] auto missing = write_json_subtree(db, "missing", options);
+        });
+    }
+
     GB_TEST(container, gbdb_json_reader_is_opt_in_test)
     {
         if constexpr (gbdb_json_axe_enabled) {

@@ -80,6 +80,12 @@ namespace gb::yadro::container
         bool ascii_only = false;
     };
 
+    enum class json_merge_policy
+    {
+        replace_existing,
+        reject_existing
+    };
+
     class json_db_builder
     {
     public:
@@ -393,6 +399,30 @@ namespace gb::yadro::container
                 return std::move(_out).str();
             }
 
+            [[nodiscard]] std::string write_subtree(json_db::string_view key)
+            {
+                auto node = _db.find({ key });
+                if (node == json_db::invalid_node)
+                    throw std::logic_error("JSON subtree key was not found");
+
+                _out << '{';
+                if (_options.pretty)
+                    _out << '\n';
+                if (_options.pretty)
+                    write_indent(1);
+                write_string(key);
+                _out << ':';
+                if (_options.pretty)
+                    _out << ' ';
+                write_node(node, 1);
+                if (_options.pretty) {
+                    _out << '\n';
+                    write_indent(0);
+                }
+                _out << '}';
+                return std::move(_out).str();
+            }
+
         private:
             [[nodiscard]] bool has_children(json_db::node_id node) const
             {
@@ -574,6 +604,169 @@ namespace gb::yadro::container
             const json_db& _db;
             const json_write_options& _options;
             std::ostringstream _out;
+        };
+
+        class json_db_merger
+        {
+        public:
+            json_db_merger(json_db& target, const json_db& source, json_merge_policy policy)
+                : _target(target), _source(source), _policy(policy)
+            {}
+
+            void merge()
+            {
+                for (auto child = _source.tree().get_child(json_db::root_node); child != json_db::invalid_node; child = _source.tree().get_sibling(child)) {
+                    _path.clear();
+                    _path.push_back(_source.key(child));
+                    validate_node(child);
+                }
+
+                for (auto child = _source.tree().get_child(json_db::root_node); child != json_db::invalid_node; child = _source.tree().get_sibling(child)) {
+                    _path.clear();
+                    _path.push_back(_source.key(child));
+                    merge_node(child);
+                }
+            }
+
+        private:
+            [[nodiscard]] static bool has_children(const json_db& db, json_db::node_id node)
+            {
+                return db.tree().get_child(node) != json_db::invalid_node;
+            }
+
+            [[nodiscard]] static bool has_value(const json_db::value_type& value)
+            {
+                return !std::holds_alternative<std::monostate>(value);
+            }
+
+            [[nodiscard]] std::span<const json_db::string_view> path_span() const
+            {
+                return { _path.data(), _path.size() };
+            }
+
+            [[nodiscard]] json_db::node_id find_target() const
+            {
+                return _target.find(path_span());
+            }
+
+            void validate_node(json_db::node_id source_node)
+            {
+                auto source_has_children = has_children(_source, source_node);
+                auto& source_value = _source.value(source_node);
+                if (source_has_children && has_value(source_value))
+                    throw std::logic_error("JSON insert cannot represent a source node with both a value and child members");
+
+                auto target_node = find_target();
+                auto target_exists = target_node != json_db::invalid_node;
+                if (_policy == json_merge_policy::reject_existing && target_exists)
+                    throw std::logic_error("JSON insert would modify an existing element");
+
+                if (target_exists) {
+                    auto target_has_children = has_children(_target, target_node);
+                    auto target_has_value = has_value(_target.value(target_node));
+
+                    // This is a registry-style merge, not destructive replacement: without subtree erase,
+                    // changing an object into a value would leave old child keys attached.
+                    if (!source_has_children && target_has_children)
+                        throw std::logic_error("JSON insert cannot replace an existing object with a value");
+                    if (source_has_children && target_has_value)
+                        throw std::logic_error("JSON insert cannot replace an existing value with an object");
+                }
+
+                if (source_has_children) {
+                    for (auto child = _source.tree().get_child(source_node); child != json_db::invalid_node; child = _source.tree().get_sibling(child)) {
+                        _path.push_back(_source.key(child));
+                        validate_node(child);
+                        _path.pop_back();
+                    }
+                }
+            }
+
+            void merge_node(json_db::node_id source_node)
+            {
+                auto source_has_children = has_children(_source, source_node);
+                if (source_has_children) {
+                    _target.set(path_span(), nullptr);
+                    for (auto child = _source.tree().get_child(source_node); child != json_db::invalid_node; child = _source.tree().get_sibling(child)) {
+                        _path.push_back(_source.key(child));
+                        merge_node(child);
+                        _path.pop_back();
+                    }
+                    return;
+                }
+
+                assign_value(_source.value(source_node));
+            }
+
+            void assign_value(const json_db::value_type& value)
+            {
+                std::visit([&](const auto& v) { assign_variant(v); }, value);
+            }
+
+            void assign_variant(std::monostate)
+            {
+                _target.set(path_span(), nullptr);
+            }
+
+            void assign_variant(bool value)
+            {
+                _target.set(path_span(), value);
+            }
+
+            void assign_variant(std::int64_t value)
+            {
+                _target.set(path_span(), value);
+            }
+
+            void assign_variant(std::uint64_t value)
+            {
+                _target.set(path_span(), value);
+            }
+
+            void assign_variant(double value)
+            {
+                _target.set(path_span(), value);
+            }
+
+            void assign_variant(json_db::string_ref ref)
+            {
+                _target.set(path_span(), _source.string(ref));
+            }
+
+            void assign_variant(json_db::int_array_ref ref)
+            {
+                _target.set_array(path_span(), _source.array(ref));
+            }
+
+            void assign_variant(json_db::uint_array_ref ref)
+            {
+                _target.set_array(path_span(), _source.array(ref));
+            }
+
+            void assign_variant(json_db::double_array_ref ref)
+            {
+                _target.set_array(path_span(), _source.array(ref));
+            }
+
+            void assign_variant(json_db::string_array_ref ref)
+            {
+                auto ids = _source.array(ref);
+                std::vector<json_db::string_view> values;
+                values.reserve(ids.size());
+                for (auto id : ids)
+                    values.push_back(_source.string(id));
+                _target.set_string_array(path_span(), values);
+            }
+
+            void assign_variant(json_db::blob_ref ref)
+            {
+                _target.set_blob(path_span(), _source.blob(ref));
+            }
+
+            json_db& _target;
+            const json_db& _source;
+            json_merge_policy _policy;
+            std::vector<json_db::string_view> _path;
         };
 
 #if GB_YADRO_GBDB_JSON_HAS_AXE
@@ -764,6 +957,11 @@ namespace gb::yadro::container
         return detail::json_writer{ db, options }.write();
     }
 
+    [[nodiscard]] inline std::string write_json_subtree(const json_db& db, json_db::string_view key, const json_write_options& options = {})
+    {
+        return detail::json_writer{ db, options }.write_subtree(key);
+    }
+
     inline void write_json_file(const json_db& db, const std::filesystem::path& file, const json_write_options& options = {})
     {
         std::ofstream out(file, std::ios::binary);
@@ -771,6 +969,20 @@ namespace gb::yadro::container
             throw std::runtime_error("Failed to open JSON file for writing");
         auto text = write_json(db, options);
         out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+
+    inline void write_json_subtree_file(const json_db& db, json_db::string_view key, const std::filesystem::path& file, const json_write_options& options = {})
+    {
+        std::ofstream out(file, std::ios::binary);
+        if (!out)
+            throw std::runtime_error("Failed to open JSON file for writing");
+        auto text = write_json_subtree(db, key, options);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+
+    inline void insert_json(json_db& target, const json_db& source, json_merge_policy policy = json_merge_policy::replace_existing)
+    {
+        detail::json_db_merger{ target, source, policy }.merge();
     }
 
     [[nodiscard]] inline json_db read_json(std::string_view text, const json_read_options& options = {})
@@ -791,6 +1003,16 @@ namespace gb::yadro::container
         std::ostringstream buffer;
         buffer << in.rdbuf();
         return read_json(buffer.str(), options);
+    }
+
+    inline void insert_json(json_db& target, std::string_view text, json_merge_policy policy = json_merge_policy::replace_existing, const json_read_options& options = {})
+    {
+        insert_json(target, read_json(text, options), policy);
+    }
+
+    inline void insert_json_file(json_db& target, const std::filesystem::path& file, json_merge_policy policy = json_merge_policy::replace_existing, const json_read_options& options = {})
+    {
+        insert_json(target, read_json_file(file, options), policy);
     }
 }
 
