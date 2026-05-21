@@ -46,6 +46,25 @@ namespace
     using namespace gb::yadro::archive;
     using namespace gb::yadro::matrix_operators;
 
+    struct indexed_tree_lifetime_tracker
+    {
+        static inline int destructor_count = 0;
+
+        int value = 0;
+
+        indexed_tree_lifetime_tracker() = default;
+        explicit indexed_tree_lifetime_tracker(int value) : value(value) {}
+        indexed_tree_lifetime_tracker(const indexed_tree_lifetime_tracker&) = default;
+        indexed_tree_lifetime_tracker(indexed_tree_lifetime_tracker&&) noexcept = default;
+        indexed_tree_lifetime_tracker& operator=(const indexed_tree_lifetime_tracker&) = default;
+        indexed_tree_lifetime_tracker& operator=(indexed_tree_lifetime_tracker&&) noexcept = default;
+
+        ~indexed_tree_lifetime_tracker()
+        {
+            ++destructor_count;
+        }
+    };
+
     GB_TEST(container, static_string_test)
     {
         static_string<1> s1;
@@ -886,6 +905,38 @@ namespace
         // Delete entire subtree rooted at c1
         tree.delete_subtree(c1);
         gbassert(tree.get_child(0) == tree.invalid_index);
+    }
+
+    GB_TEST(container, indexed_tree_delete_subtree_detaches_all_descendants_test)
+    {
+        indexed_tree<int> tree(10);
+        auto child = tree.insert_child(0, 20);
+        auto grandchild1 = tree.insert_child(child, 100);
+        auto grandchild2 = tree.insert_child(child, 200);
+        auto grandchild3 = tree.insert_child(child, 300);
+
+        tree.delete_subtree(child);
+
+        gbassert(tree.get_child(0) == tree.invalid_index);
+        gbassert(tree.get_parent(child) == tree.invalid_index);
+        gbassert(tree.get_parent(grandchild1) == tree.invalid_index);
+        gbassert(tree.get_parent(grandchild2) == tree.invalid_index);
+        gbassert(tree.get_parent(grandchild3) == tree.invalid_index);
+    }
+
+    GB_TEST(container, indexed_tree_delete_subtree_preserves_storage_lifetime_test)
+    {
+        indexed_tree<indexed_tree_lifetime_tracker> tree(10);
+        tree.get_nodes().reserve(8);
+        indexed_tree_lifetime_tracker::destructor_count = 0;
+
+        auto child = tree.insert_child(0, 20);
+        auto grandchild1 = tree.insert_child(child, 100);
+        auto grandchild2 = tree.insert_child(child, 200);
+
+        tree.delete_subtree(child);
+
+        gbassert(indexed_tree_lifetime_tracker::destructor_count == 0);
     }
 
     GB_TEST(container, indexed_tree_copy_subtree_test)

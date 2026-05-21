@@ -395,11 +395,10 @@ namespace gb::yadro::container
     void indexed_tree<T, StorageT>::destroy_subtree(index_t node)
     {
         get_node(node).parent = invalid_index;
-        if constexpr (has_data)
+        for (auto child = get_child(node); child != invalid_index; child = get_child(node))
         {
-            std::destroy_at(std::addressof(get_value(node)));
+            delete_subtree(child);
         }
-        foreach_child(node, [&](auto n) { delete_subtree(n); });
     }
 
     //---------------------------------------------------------------------
