@@ -31,6 +31,7 @@
 #include "../util/hash_util.h"
 #include "../container/gbcontainer.h"
 #include "../container/datapool.h"
+#include "../container/gbdb.h"
 #include "../archive/archive.h"
 #include "../async/async.h"
 #include <vector>
@@ -1037,6 +1038,76 @@ namespace
         gbassert(std::string_view(pool.c_str(s0)) == "alpha");
         gbassert(pool.c_str(s0)[pool.size(s0)] == '\0');
         gbassert(pool.view(s2) == "beta");
+    }
+
+    GB_TEST(container, gbdb_scalar_and_string_values_test)
+    {
+        json_db db;
+        static_assert(sizeof(json_db::node_payload) <= 32);
+
+        auto symbol = db.set({ "market", "symbol" }, std::string_view{ "AAPL" });
+        auto price = db.set({ "market", "price" }, 193.25);
+        auto volume = db.set({ "market", "volume" }, 123456789ll);
+
+        gbassert(symbol != json_db::invalid_node);
+        gbassert(price != json_db::invalid_node);
+        gbassert(volume != json_db::invalid_node);
+        gbassert(db.node_count() == 5);
+        gbassert(db.key(symbol) == "symbol");
+
+        auto* symbol_value = db.get({ "market", "symbol" });
+        gbassert(symbol_value != nullptr);
+        auto symbol_ref = std::get<json_db::string_ref>(*symbol_value);
+        gbassert(db.string(symbol_ref) == "AAPL");
+
+        auto* price_value = db.get({ "market", "price" });
+        gbassert(price_value != nullptr);
+        gbassert(std::get<double>(*price_value) == 193.25);
+
+        auto* volume_value = db.get({ "market", "volume" });
+        gbassert(volume_value != nullptr);
+        gbassert(std::get<std::int64_t>(*volume_value) == 123456789ll);
+
+        db.set({ "market", "symbol" }, std::string_view{ "MSFT" });
+        gbassert(db.node_count() == 5);
+        auto updated_symbol_ref = std::get<json_db::string_ref>(*db.get({ "market", "symbol" }));
+        gbassert(db.string(updated_symbol_ref) == "MSFT");
+    }
+
+    GB_TEST(container, gbdb_array_values_are_pooled_test)
+    {
+        json_db db;
+        std::array<std::int64_t, 3> values{ 1, 2, 3 };
+
+        db.set_array({ "series", "a" }, std::span{ values });
+        db.set_array({ "series", "b" }, std::span{ values });
+        db.set_string_array({ "series", "labels" }, { "bid", "ask" });
+
+        auto a_ref = std::get<json_db::int_array_ref>(*db.get({ "series", "a" }));
+        auto b_ref = std::get<json_db::int_array_ref>(*db.get({ "series", "b" }));
+        gbassert(a_ref == b_ref);
+
+        auto stored_values = db.array(a_ref);
+        gbassert(stored_values.size() == 3);
+        gbassert(stored_values[0] == 1);
+        gbassert(stored_values[2] == 3);
+
+        auto labels_ref = std::get<json_db::string_array_ref>(*db.get({ "series", "labels" }));
+        auto labels = db.array(labels_ref);
+        gbassert(labels.size() == 2);
+        gbassert(db.string(labels[0]) == "bid");
+        gbassert(db.string(labels[1]) == "ask");
+    }
+
+    GB_TEST(container, gbdb_missing_paths_test)
+    {
+        json_db db;
+        db.set({ "config", "enabled" }, true);
+
+        gbassert(db.contains({ "config", "enabled" }));
+        gbassert(!db.contains({ "config", "missing" }));
+        gbassert(db.find({ "config", "missing" }) == json_db::invalid_node);
+        gbassert(db.get({ "config", "missing" }) == nullptr);
     }
 
     GB_TEST(container, indexed_tree_delete_subtree_detaches_all_descendants_test)

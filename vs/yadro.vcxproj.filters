@@ -184,6 +184,9 @@
     <ClInclude Include="..\container\datapool.h">
       <Filter>container</Filter>
     </ClInclude>
+    <ClInclude Include="..\container\gbdb.h">
+      <Filter>container</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\container\tree.cpp">
