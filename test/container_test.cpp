@@ -124,6 +124,13 @@ namespace
         std::filesystem::create_directories(path);
     }
 
+    inline std::string md5_test_bytes(std::span<const std::byte> bytes)
+    {
+        gb::yadro::util::md5 hash;
+        hash.update(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+        return hash.finalize().to_string();
+    }
+
     GB_TEST(container, static_string_test)
     {
         static_string<1> s1;
@@ -1220,6 +1227,60 @@ namespace
         gbassert(restored_db.object_version(restored_ref).value() == 7);
     }
 
+    GB_TEST(container, gbdb_deferred_serialized_object_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_deferred_object_test";
+        reset_test_directory(export_dir);
+
+        json_db db;
+        db.set_external_blob_base_directory(export_dir);
+        gbdb_serializable_config config{ .id = 501, .scale = 7.25, .symbol = std::string(128, 'D') };
+
+        auto node = db.set_object({ "assets", "payload" }, config, "deferred_asset", 11);
+        auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
+        db.mark_object_deferred(ref, "payload.bin");
+        db.unload_object(ref);
+
+        gbassert(db.is_object_deferred(ref));
+        gbassert(!db.is_object_loaded(ref));
+        gbassert(std::filesystem::exists(export_dir / "payload.bin"));
+
+        omem_archive<> out;
+        out(db);
+
+        json_db restored;
+        imem_archive in(std::move(out));
+        in(restored);
+        restored.set_external_blob_base_directory(export_dir);
+
+        auto restored_ref = std::get<json_db::object_ref>(*restored.get({ "assets", "payload" }));
+        gbassert(restored_ref.id == ref.id);
+        gbassert(restored.is_object_deferred(restored_ref));
+        gbassert(!restored.is_object_loaded(restored_ref));
+        gbassert(restored.object_type(restored_ref).value() == "deferred_asset");
+        gbassert(restored.object_version(restored_ref).value() == 11);
+        gbassert(restored.object<gbdb_serializable_config>(restored_ref) == config);
+        gbassert(restored.is_object_loaded(restored_ref));
+
+        restored.mark_object_immediate(restored_ref);
+        gbassert(!restored.is_object_deferred(restored_ref));
+        std::filesystem::remove(export_dir / "payload.bin");
+
+        omem_archive<> inline_out;
+        inline_out(restored);
+
+        json_db inline_restored;
+        imem_archive inline_in(std::move(inline_out));
+        inline_in(inline_restored);
+
+        auto inline_ref = std::get<json_db::object_ref>(*inline_restored.get({ "assets", "payload" }));
+        gbassert(!inline_restored.is_object_deferred(inline_ref));
+        gbassert(inline_restored.object<gbdb_serializable_config>(inline_ref) == config);
+
+        static_cast<void>(node);
+        std::filesystem::remove_all(export_dir);
+    }
+
     GB_TEST(container, gbdb_json_writer_test)
     {
         json_db db;
@@ -1538,7 +1599,7 @@ namespace
         auto blob_file = export_dir / "blobs" / ("node_" + std::to_string(node) + "_payload.bin");
         auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
         auto bytes = db.serialized_object(ref);
-        auto md5 = gb::yadro::util::md5string(bytes);
+        auto md5 = md5_test_bytes(bytes);
 
         gbassert(text.find(R"("encoding":"external")") != std::string::npos);
         gbassert(text.find(R"("blob_uri":")" + blob_uri + R"(")") != std::string::npos);
@@ -1552,6 +1613,17 @@ namespace
         read_options.blob_mode = json_blob_mode::tagged_base64;
 
         if constexpr (gbdb_json_axe_enabled) {
+            read_options.external_blob_load_policy = json_db::blob_load_policy::deferred;
+            auto deferred_db = read_json_file(json_file, read_options);
+            auto deferred_ref = std::get<json_db::object_ref>(*deferred_db.get({ "assets", "payload" }));
+            gbassert(deferred_db.is_object_deferred(deferred_ref));
+            gbassert(!deferred_db.is_object_loaded(deferred_ref));
+            gbassert(deferred_db.object_type(deferred_ref).value() == "heavy_asset");
+            gbassert(deferred_db.object_version(deferred_ref).value() == 3);
+            gbassert(deferred_db.object<gbdb_serializable_config>(deferred_ref) == config);
+            gbassert(deferred_db.is_object_loaded(deferred_ref));
+
+            read_options.external_blob_load_policy = json_db::blob_load_policy::immediate;
             auto restored_db = read_json_file(json_file, read_options);
             auto restored_ref = std::get<json_db::object_ref>(*restored_db.get({ "assets", "payload" }));
             gbassert(restored_db.object<gbdb_serializable_config>(restored_ref) == config);

@@ -107,6 +107,7 @@ namespace gb::yadro::container
         json_table_mode table_mode = json_table_mode::reject;
         json_blob_mode blob_mode = json_blob_mode::reject;
         std::filesystem::path external_blob_base_directory;
+        json_db::blob_load_policy external_blob_load_policy = json_db::blob_load_policy::immediate;
         std::string root_array_key = "data";
     };
 
@@ -127,6 +128,16 @@ namespace gb::yadro::container
         reject_existing
     };
 
+    namespace detail
+    {
+        [[nodiscard]] inline std::string md5_bytes(std::span<const std::byte> bytes)
+        {
+            gb::yadro::util::md5 hash;
+            hash.update(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+            return hash.finalize().to_string();
+        }
+    }
+
     class json_db_builder
     {
     public:
@@ -137,7 +148,9 @@ namespace gb::yadro::container
         json_db_builder() = default;
         explicit json_db_builder(json_read_options options)
             : _read_options(options)
-        {}
+        {
+            _db.set_external_blob_base_directory(_read_options.external_blob_base_directory);
+        }
 
         void begin_object()
         {
@@ -746,7 +759,7 @@ namespace gb::yadro::container
                 throw std::runtime_error("External gbdb archive blob size mismatch");
 
             auto bytes = std::as_bytes(std::span{ data });
-            if (gb::yadro::util::md5string(bytes) != expected_md5)
+            if (detail::md5_bytes(bytes) != expected_md5)
                 throw std::runtime_error("External gbdb archive blob MD5 mismatch");
 
             std::vector<std::byte> result;
@@ -772,7 +785,6 @@ namespace gb::yadro::container
             if (required_string_member(path, "format") != "yadro.archive.custom")
                 throw std::logic_error("Tagged gbdb archive has unsupported format");
 
-            std::vector<std::byte> bytes;
             auto encoding = required_string_member(path, "encoding");
             if (encoding == "base64") {
                 auto data = required_string_member(path, "data");
@@ -781,24 +793,44 @@ namespace gb::yadro::container
                     encoded.push_back('=');
                 auto decoded = gb::yadro::util::base64_decode(encoded);
 
+                std::vector<std::byte> bytes;
                 bytes.reserve(decoded.size());
                 for (auto value : decoded)
                     bytes.push_back(static_cast<std::byte>(value));
+
+                auto type = optional_string_member(path, "type");
+                auto version = optional_version_member(path);
+                _db.set_serialized_object(
+                    std::span<const string_view>{ path.data(), path.size() },
+                    std::span<const std::byte>{ bytes.data(), bytes.size() },
+                    type.value_or(string_view{}),
+                    version);
             }
             else if (encoding == "external") {
-                bytes = load_external_blob(path);
+                auto type = optional_string_member(path, "type");
+                auto version = optional_version_member(path);
+                if (_read_options.external_blob_load_policy == json_db::blob_load_policy::deferred) {
+                    _db.set_deferred_serialized_object(
+                        std::span<const string_view>{ path.data(), path.size() },
+                        required_string_member(path, "blob_uri"),
+                        required_uint64_member(path, "blob_size_bytes"),
+                        required_string_member(path, "blob_md5"),
+                        type.value_or(string_view{}),
+                        version);
+                }
+                else {
+                    auto bytes = load_external_blob(path);
+                    _db.set_serialized_object(
+                        std::span<const string_view>{ path.data(), path.size() },
+                        std::span<const std::byte>{ bytes.data(), bytes.size() },
+                        type.value_or(string_view{}),
+                        version);
+                }
             }
             else {
                 throw std::logic_error("Tagged gbdb archive has unsupported encoding");
             }
 
-            auto type = optional_string_member(path, "type");
-            auto version = optional_version_member(path);
-            _db.set_serialized_object(
-                std::span<const string_view>{ path.data(), path.size() },
-                std::span<const std::byte>{ bytes.data(), bytes.size() },
-                type.value_or(string_view{}),
-                version);
             return true;
         }
 
@@ -986,6 +1018,11 @@ namespace gb::yadro::container
 
             void write_variant(json_db::object_ref ref)
             {
+                if (auto external = _db.object_external_blob(ref); external && external->load_policy == json_db::blob_load_policy::deferred) {
+                    write_external_object_manifest(ref, *external);
+                    return;
+                }
+
                 auto bytes = _db.serialized_object(ref);
                 auto mode = _options.blob_write_mode;
                 if (mode == json_blob_write_mode::auto_) {
@@ -1011,6 +1048,27 @@ namespace gb::yadro::container
                 _out << '}';
             }
 
+            void write_external_object_manifest(json_db::object_ref ref, const json_db::external_blob_info& blob)
+            {
+                auto node = _current_node == json_db::invalid_node ? json_db::root_node : _current_node;
+
+                _out << "{\"$gbdb\":\"archive\",\"encoding\":\"external\",\"format\":\"yadro.archive.custom\"";
+                if (auto type = _db.object_type(ref)) {
+                    _out << ",\"type\":";
+                    write_string(*type);
+                }
+                if (auto version = _db.object_version(ref))
+                    _out << ",\"version\":" << *version;
+                if (_options.external_blobs.include_node_id)
+                    _out << ",\"node_id\":" << node;
+                _out << ",\"blob_uri\":";
+                write_string(blob.uri);
+                _out << ",\"blob_size_bytes\":" << blob.size_bytes;
+                _out << ",\"blob_md5\":";
+                write_string(blob.md5);
+                _out << '}';
+            }
+
             void write_external_object_manifest(json_db::object_ref ref, std::span<const std::byte> bytes)
             {
                 if (_options.external_blobs.root_directory.empty())
@@ -1031,7 +1089,7 @@ namespace gb::yadro::container
                     throw std::runtime_error("Failed to write external gbdb archive blob");
 
                 auto uri = std::string{ "./" } + _options.external_blobs.blob_directory.generic_string() + "/" + file_name;
-                auto md5 = gb::yadro::util::md5string(bytes);
+                auto md5 = detail::md5_bytes(bytes);
 
                 _out << "{\"$gbdb\":\"archive\",\"encoding\":\"external\",\"format\":\"yadro.archive.custom\"";
                 if (auto type = _db.object_type(ref)) {

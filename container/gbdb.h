@@ -31,7 +31,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <concepts>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <span>
@@ -44,6 +47,7 @@
 #include <variant>
 #include <vector>
 #include "../archive/archive.h"
+#include "../util/string_util.h"
 #include "datapool.h"
 #include "tree.h"
 
@@ -145,6 +149,18 @@ namespace gb::yadro::container
             }
         };
 
+        enum class blob_load_policy : std::uint8_t
+        {
+            immediate,
+            deferred
+        };
+
+        enum class object_blob_storage : std::uint8_t
+        {
+            inline_memory,
+            external_file
+        };
+
         enum class table_column_type : std::uint8_t
         {
             int64,
@@ -204,20 +220,45 @@ namespace gb::yadro::container
 
         struct object_record
         {
-            duplicate_data_pool<std::byte>::array_id blob = duplicate_data_pool<std::byte>::invalid_array;
+            std::vector<std::byte> blob;
             string_id type = (std::numeric_limits<string_id>::max)();
             bool has_version = false;
             std::uint32_t version = 0;
+            object_blob_storage storage = object_blob_storage::inline_memory;
+            blob_load_policy load_policy = blob_load_policy::immediate;
+            string_id blob_uri = (std::numeric_limits<string_id>::max)();
+            std::uint64_t blob_size_bytes = 0;
+            string_id blob_md5 = (std::numeric_limits<string_id>::max)();
+            mutable bool external_loaded = false;
+            mutable std::vector<std::byte> external_cache;
 
             template<class Ar>
             void serialize(this auto&& self, Ar&& archive)
             {
                 archive(
-                    gb::yadro::archive::serialize_as<std::uint64_t>(self.blob),
+                    self.blob,
                     gb::yadro::archive::serialize_as<std::uint64_t>(self.type),
                     self.has_version,
-                    gb::yadro::archive::serialize_as<std::uint64_t>(self.version));
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.version),
+                    gb::yadro::archive::serialize_as<std::uint32_t>(self.storage),
+                    gb::yadro::archive::serialize_as<std::uint32_t>(self.load_policy),
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.blob_uri),
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.blob_size_bytes),
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.blob_md5));
+                if constexpr (gb::yadro::archive::iarchive_like<Ar>) {
+                    self.external_loaded = false;
+                    self.external_cache.clear();
+                }
             }
+        };
+
+        struct external_blob_info
+        {
+            string_view uri;
+            std::uint64_t size_bytes = 0;
+            string_view md5;
+            blob_load_policy load_policy = blob_load_policy::deferred;
+            bool loaded = false;
         };
 
         struct table_cell
@@ -761,7 +802,7 @@ namespace gb::yadro::container
                 throw std::length_error("gbdb object_id capacity exceeded");
 
             object_record record;
-            record.blob = _blobs.insert(values);
+            record.blob.assign(values.begin(), values.end());
             if (!type.empty())
                 record.type = intern(type);
             if (version) {
@@ -771,6 +812,44 @@ namespace gb::yadro::container
 
             auto object_id = static_cast<std::uint32_t>(_serialized_objects.size());
             _serialized_objects.push_back(record);
+
+            auto node = ensure_path(path);
+            clear_children(node);
+            _tree.get_value(node).value = value_type{ object_ref{ object_id } };
+            return node;
+        }
+
+        node_id set_deferred_serialized_object(path_view path, string_view blob_uri, std::uint64_t blob_size_bytes, string_view blob_md5,
+            string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            return set_deferred_serialized_object(path_span{ path.begin(), path.size() }, blob_uri, blob_size_bytes, blob_md5, type, version);
+        }
+
+        node_id set_deferred_serialized_object(path_span path, string_view blob_uri, std::uint64_t blob_size_bytes, string_view blob_md5,
+            string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            if (_serialized_objects.size() == (std::numeric_limits<std::uint32_t>::max)())
+                throw std::length_error("gbdb object_id capacity exceeded");
+            if (blob_uri.empty())
+                throw std::invalid_argument("gbdb deferred object requires blob_uri");
+            if (blob_md5.empty())
+                throw std::invalid_argument("gbdb deferred object requires blob_md5");
+
+            object_record record;
+            record.storage = object_blob_storage::external_file;
+            record.load_policy = blob_load_policy::deferred;
+            record.blob_uri = intern(blob_uri);
+            record.blob_size_bytes = blob_size_bytes;
+            record.blob_md5 = intern(blob_md5);
+            if (!type.empty())
+                record.type = intern(type);
+            if (version) {
+                record.has_version = true;
+                record.version = *version;
+            }
+
+            auto object_id = static_cast<std::uint32_t>(_serialized_objects.size());
+            _serialized_objects.push_back(std::move(record));
 
             auto node = ensure_path(path);
             clear_children(node);
@@ -912,7 +991,108 @@ namespace gb::yadro::container
 
         [[nodiscard]] std::span<const std::byte> serialized_object(object_ref ref) const
         {
-            return _blobs.span(object_metadata(ref).blob);
+            auto& metadata = object_metadata(ref);
+            if (metadata.storage == object_blob_storage::inline_memory)
+                return metadata.blob;
+
+            load_object(ref);
+            return metadata.external_cache;
+        }
+
+        void set_external_blob_base_directory(std::filesystem::path path)
+        {
+            _external_blob_base_directory = std::move(path);
+        }
+
+        [[nodiscard]] const std::filesystem::path& external_blob_base_directory() const noexcept
+        {
+            return _external_blob_base_directory;
+        }
+
+        [[nodiscard]] bool is_object_deferred(object_ref ref) const
+        {
+            auto& metadata = object_metadata(ref);
+            return metadata.storage == object_blob_storage::external_file && metadata.load_policy == blob_load_policy::deferred;
+        }
+
+        [[nodiscard]] bool is_object_loaded(object_ref ref) const
+        {
+            auto& metadata = object_metadata(ref);
+            return metadata.storage == object_blob_storage::inline_memory || metadata.external_loaded;
+        }
+
+        [[nodiscard]] std::optional<external_blob_info> object_external_blob(object_ref ref) const
+        {
+            auto& metadata = object_metadata(ref);
+            if (metadata.storage != object_blob_storage::external_file)
+                return std::nullopt;
+
+            return external_blob_info{
+                .uri = string(metadata.blob_uri),
+                .size_bytes = metadata.blob_size_bytes,
+                .md5 = string(metadata.blob_md5),
+                .load_policy = metadata.load_policy,
+                .loaded = metadata.external_loaded
+            };
+        }
+
+        void load_object(object_ref ref) const
+        {
+            auto& metadata = object_metadata(ref);
+            if (metadata.storage == object_blob_storage::inline_memory || metadata.external_loaded)
+                return;
+
+            metadata.external_cache = load_external_object_blob(metadata);
+            metadata.external_loaded = true;
+        }
+
+        void unload_object(object_ref ref) const
+        {
+            auto& metadata = object_metadata(ref);
+            if (metadata.storage != object_blob_storage::external_file)
+                return;
+
+            metadata.external_cache.clear();
+            metadata.external_cache.shrink_to_fit();
+            metadata.external_loaded = false;
+        }
+
+        void mark_object_immediate(object_ref ref)
+        {
+            auto& metadata = mutable_object_metadata(ref);
+            if (metadata.storage == object_blob_storage::inline_memory)
+                return;
+
+            load_object(ref);
+            metadata.blob = metadata.external_cache;
+            metadata.external_cache.clear();
+            metadata.external_cache.shrink_to_fit();
+            metadata.external_loaded = false;
+            metadata.storage = object_blob_storage::inline_memory;
+            metadata.load_policy = blob_load_policy::immediate;
+            metadata.blob_uri = invalid_string;
+            metadata.blob_size_bytes = 0;
+            metadata.blob_md5 = invalid_string;
+        }
+
+        void mark_object_deferred(object_ref ref, string_view blob_uri)
+        {
+            auto& metadata = mutable_object_metadata(ref);
+            auto bytes = serialized_object(ref);
+            std::vector<std::byte> cache(bytes.begin(), bytes.end());
+            auto size_bytes = static_cast<std::uint64_t>(bytes.size());
+            auto digest = md5_bytes(bytes);
+            write_external_object_blob(blob_uri, bytes);
+
+            metadata.external_cache = std::move(cache);
+            metadata.external_loaded = true;
+            metadata.blob.clear();
+            metadata.blob.shrink_to_fit();
+            metadata.storage = object_blob_storage::external_file;
+            metadata.load_policy = blob_load_policy::deferred;
+            metadata.blob_uri = intern(blob_uri);
+            metadata.blob_size_bytes = size_bytes;
+            metadata.blob_md5 = intern(digest);
         }
 
         [[nodiscard]] std::optional<string_view> object_type(object_ref ref) const
@@ -1040,6 +1220,68 @@ namespace gb::yadro::container
             return _serialized_objects[ref.id];
         }
 
+        [[nodiscard]] object_record& mutable_object_metadata(object_ref ref)
+        {
+            if (ref.id >= _serialized_objects.size())
+                throw std::out_of_range("gbdb object_ref is out of range");
+            return _serialized_objects[ref.id];
+        }
+
+        [[nodiscard]] std::filesystem::path resolve_external_blob_uri(string_view blob_uri) const
+        {
+            std::filesystem::path file{ string_type{ blob_uri } };
+            if (file.is_relative()) {
+                if (_external_blob_base_directory.empty())
+                    throw std::runtime_error("gbdb external object blob requires a base directory");
+                file = _external_blob_base_directory / file;
+            }
+            return file;
+        }
+
+        [[nodiscard]] std::vector<std::byte> load_external_object_blob(const object_record& metadata) const
+        {
+            auto file = resolve_external_blob_uri(string(metadata.blob_uri));
+
+            std::ifstream in(file, std::ios::binary);
+            if (!in)
+                throw std::runtime_error("Failed to open gbdb external object blob");
+
+            std::vector<char> data((std::istreambuf_iterator<char>(in)), {});
+            if (static_cast<std::uint64_t>(data.size()) != metadata.blob_size_bytes)
+                throw std::runtime_error("gbdb external object blob size mismatch");
+
+            auto bytes = std::as_bytes(std::span{ data });
+            if (md5_bytes(bytes) != string(metadata.blob_md5))
+                throw std::runtime_error("gbdb external object blob MD5 mismatch");
+
+            std::vector<std::byte> result;
+            result.reserve(data.size());
+            for (auto value : data)
+                result.push_back(static_cast<std::byte>(static_cast<unsigned char>(value)));
+            return result;
+        }
+
+        [[nodiscard]] static std::string md5_bytes(std::span<const std::byte> bytes)
+        {
+            gb::yadro::util::md5 hash;
+            hash.update(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+            return hash.finalize().to_string();
+        }
+
+        void write_external_object_blob(string_view blob_uri, std::span<const std::byte> bytes)
+        {
+            auto file = resolve_external_blob_uri(blob_uri);
+            if (auto parent = file.parent_path(); !parent.empty())
+                std::filesystem::create_directories(parent);
+
+            std::ofstream out(file, std::ios::binary);
+            if (!out)
+                throw std::runtime_error("Failed to open gbdb external object blob for writing");
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            if (!out)
+                throw std::runtime_error("Failed to write gbdb external object blob");
+        }
+
         void clear_children(node_id node)
         {
             if (_tree.get_child(node) == invalid_node)
@@ -1080,6 +1322,7 @@ namespace gb::yadro::container
             _string_arrays = unique_data_pool<string_id>{};
             _blobs = duplicate_data_pool<std::byte>{};
             _serialized_objects.clear();
+            _external_blob_base_directory.clear();
             _table_columns = duplicate_data_pool<table_column>{};
             _tables.clear();
             _tree = tree_type(node_payload{});
@@ -1173,6 +1416,7 @@ namespace gb::yadro::container
         unique_data_pool<string_id> _string_arrays;
         duplicate_data_pool<std::byte> _blobs;
         std::vector<object_record> _serialized_objects;
+        std::filesystem::path _external_blob_base_directory;
         duplicate_data_pool<table_column> _table_columns;
         std::vector<table_record> _tables;
         tree_type _tree;
