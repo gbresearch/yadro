@@ -1287,6 +1287,85 @@ namespace
         std::filesystem::remove_all(export_dir);
     }
 
+    GB_TEST(container, gbdb_logging_filters_regular_operations_test)
+    {
+        json_db db;
+        std::vector<json_db::log_event> events;
+        db.add_log_sink([&](const json_db::log_event& event) { events.push_back(event); });
+
+        db.set({ "market", "symbol" }, "AAPL");
+        gbassert(events.empty());
+
+        auto options = db.log_options();
+        options.log_regular_operations = true;
+        options.min_level = json_db::log_level::debug;
+        db.set_log_options(options);
+
+        db.set({ "market", "price" }, 193.25);
+        gbassert(events.size() == 1);
+        gbassert(events.back().level == json_db::log_level::debug);
+        gbassert(events.back().category == "db.operation");
+        gbassert(events.back().event == "set");
+        gbassert(events.back().path == "market/price");
+    }
+
+    GB_TEST(container, gbdb_logging_writes_jsonl_file_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_logging_file_test";
+        reset_test_directory(export_dir);
+        auto log_file = export_dir / "database.jsonl";
+
+        json_db db;
+        db.add_log_file(log_file);
+
+        auto options = db.log_options();
+        options.log_regular_operations = true;
+        options.min_level = json_db::log_level::debug;
+        db.set_log_options(options);
+
+        db.set({ "market", "symbol" }, "MSFT");
+
+        auto text = read_test_file(log_file);
+        gbassert(text.find(R"("level":"debug")") != std::string::npos);
+        gbassert(text.find(R"("category":"db.operation")") != std::string::npos);
+        gbassert(text.find(R"("event":"set")") != std::string::npos);
+        gbassert(text.find(R"("path":"market/symbol")") != std::string::npos);
+
+        db.clear_log_sinks();
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_logging_always_emits_serious_errors_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_logging_error_test";
+        reset_test_directory(export_dir);
+
+        json_db db;
+        std::vector<json_db::log_event> events;
+        db.add_log_sink([&](const json_db::log_event& event) { events.push_back(event); });
+
+        auto options = db.log_options();
+        options.min_level = json_db::log_level::critical;
+        options.log_warnings = false;
+        db.set_log_options(options);
+
+        db.set_external_blob_base_directory(export_dir);
+        db.set_deferred_serialized_object({ "assets", "payload" }, "missing_payload.bin", 10, "00000000000000000000000000000000", "missing_asset", 1);
+        auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
+
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto bytes = db.serialized_object(ref);
+        });
+
+        gbassert(events.size() == 1);
+        gbassert(events.back().level == json_db::log_level::critical);
+        gbassert(events.back().category == "blob.integrity");
+        gbassert(events.back().event == "load_failed");
+        gbassert(events.back().message.find("Failed to open") != std::string::npos);
+
+        std::filesystem::remove_all(export_dir);
+    }
+
     GB_TEST(container, gbdb_json_writer_test)
     {
         json_db db;

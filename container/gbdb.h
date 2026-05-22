@@ -33,9 +33,11 @@
 #include <concepts>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -260,6 +262,35 @@ namespace gb::yadro::container
             blob_load_policy load_policy = blob_load_policy::deferred;
             bool loaded = false;
         };
+
+        enum class log_level : std::uint8_t
+        {
+            trace,
+            debug,
+            info,
+            audit,
+            warning,
+            error,
+            critical
+        };
+
+        struct log_options_type
+        {
+            log_level min_level = log_level::warning;
+            bool log_regular_operations = false;
+            bool log_warnings = true;
+        };
+
+        struct log_event
+        {
+            log_level level = log_level::info;
+            std::string category;
+            std::string event;
+            std::string path;
+            std::string message;
+        };
+
+        using log_sink = std::function<void(const log_event&)>;
 
         struct table_cell
         {
@@ -643,6 +674,12 @@ namespace gb::yadro::container
         {
             auto node = ensure_path(path);
             _tree.get_value(node).value = std::move(value);
+            emit_log({
+                .level = log_level::debug,
+                .category = "db.operation",
+                .event = "set",
+                .path = path_to_string(path)
+            });
             return node;
         }
 
@@ -1036,14 +1073,70 @@ namespace gb::yadro::container
             };
         }
 
+        [[nodiscard]] log_options_type log_options() const noexcept
+        {
+            return _log_options;
+        }
+
+        void set_log_options(log_options_type options) noexcept
+        {
+            _log_options = options;
+        }
+
+        void add_log_sink(log_sink sink)
+        {
+            if (!sink)
+                throw std::invalid_argument("gbdb log sink must be callable");
+            _log_sinks.push_back(std::move(sink));
+        }
+
+        void add_log_file(const std::filesystem::path& file)
+        {
+            auto stream = std::make_shared<std::ofstream>(file, std::ios::binary | std::ios::app);
+            if (!*stream)
+                throw std::runtime_error("Failed to open gbdb log file");
+
+            _log_file_streams.push_back(stream);
+            add_log_sink([stream](const log_event& event) {
+                *stream << basic_gbdb::log_event_to_json(event) << '\n';
+                stream->flush();
+            });
+        }
+
+        void clear_log_sinks() noexcept
+        {
+            _log_sinks.clear();
+            _log_file_streams.clear();
+        }
+
         void load_object(object_ref ref) const
         {
             auto& metadata = object_metadata(ref);
             if (metadata.storage == object_blob_storage::inline_memory || metadata.external_loaded)
                 return;
 
-            metadata.external_cache = load_external_object_blob(metadata);
-            metadata.external_loaded = true;
+            try {
+                metadata.external_cache = load_external_object_blob(metadata);
+                metadata.external_loaded = true;
+            }
+            catch (const std::exception& e) {
+                emit_log({
+                    .level = log_level::critical,
+                    .category = "blob.integrity",
+                    .event = "load_failed",
+                    .message = e.what()
+                });
+                throw;
+            }
+            catch (...) {
+                emit_log({
+                    .level = log_level::critical,
+                    .category = "blob.integrity",
+                    .event = "load_failed",
+                    .message = "Unknown gbdb external object blob load failure"
+                });
+                throw;
+            }
         }
 
         void unload_object(object_ref ref) const
@@ -1261,6 +1354,133 @@ namespace gb::yadro::container
             return result;
         }
 
+        [[nodiscard]] static constexpr bool is_serious(log_level level) noexcept
+        {
+            return level == log_level::error || level == log_level::critical;
+        }
+
+        [[nodiscard]] static constexpr bool is_warning(log_level level) noexcept
+        {
+            return level == log_level::warning;
+        }
+
+        [[nodiscard]] static constexpr bool is_regular(log_level level) noexcept
+        {
+            return level == log_level::trace || level == log_level::debug || level == log_level::info || level == log_level::audit;
+        }
+
+        [[nodiscard]] bool should_log(log_level level) const noexcept
+        {
+            // Serious failures bypass filters so configured sinks receive them even when diagnostic logging is off.
+            if (is_serious(level))
+                return true;
+            if (is_warning(level))
+                return _log_options.log_warnings && level >= _log_options.min_level;
+            if (is_regular(level))
+                return _log_options.log_regular_operations && level >= _log_options.min_level;
+            return false;
+        }
+
+        void emit_log(const log_event& event) const noexcept
+        {
+            if (!should_log(event.level))
+                return;
+
+            for (const auto& sink : _log_sinks) {
+                try {
+                    sink(event);
+                }
+                catch (...) {
+                    // Logging must not change database operation semantics.
+                }
+            }
+        }
+
+        [[nodiscard]] std::string path_to_string(path_span path) const
+        {
+            std::string result;
+            for (auto part : path) {
+                if (!result.empty())
+                    result.push_back('/');
+                append_narrow(result, part);
+            }
+            return result;
+        }
+
+        static void append_narrow(std::string& result, string_view text)
+        {
+            if constexpr (std::same_as<CharT, char>) {
+                result.append(text.begin(), text.end());
+            }
+            else {
+                for (auto ch : text)
+                    result.push_back(static_cast<char>(ch));
+            }
+        }
+
+        [[nodiscard]] static std::string_view log_level_name(log_level level) noexcept
+        {
+            switch (level) {
+            case log_level::trace: return "trace";
+            case log_level::debug: return "debug";
+            case log_level::info: return "info";
+            case log_level::audit: return "audit";
+            case log_level::warning: return "warning";
+            case log_level::error: return "error";
+            case log_level::critical: return "critical";
+            }
+            return "unknown";
+        }
+
+        static void append_json_string(std::string& result, std::string_view text)
+        {
+            static constexpr char hex[] = "0123456789abcdef";
+
+            result.push_back('"');
+            for (auto ch : text) {
+                auto value = static_cast<unsigned char>(ch);
+                switch (value) {
+                case '"': result += "\\\""; break;
+                case '\\': result += "\\\\"; break;
+                case '\b': result += "\\b"; break;
+                case '\f': result += "\\f"; break;
+                case '\n': result += "\\n"; break;
+                case '\r': result += "\\r"; break;
+                case '\t': result += "\\t"; break;
+                default:
+                    if (value < 0x20) {
+                        result += "\\u00";
+                        result.push_back(hex[value >> 4]);
+                        result.push_back(hex[value & 0x0f]);
+                    }
+                    else {
+                        result.push_back(static_cast<char>(value));
+                    }
+                    break;
+                }
+            }
+            result.push_back('"');
+        }
+
+        [[nodiscard]] static std::string log_event_to_json(const log_event& event)
+        {
+            std::string result;
+            result.reserve(event.category.size() + event.event.size() + event.path.size() + event.message.size() + 96);
+            result.push_back('{');
+            result += R"("level":)";
+            append_json_string(result, log_level_name(event.level));
+            result += R"(,"category":)";
+            append_json_string(result, event.category);
+            result += R"(,"event":)";
+            append_json_string(result, event.event);
+            result += R"(,"path":)";
+            append_json_string(result, event.path);
+            result += R"(,"message":)";
+            append_json_string(result, event.message);
+            result.push_back('}');
+            return result;
+        }
+
         [[nodiscard]] static std::string md5_bytes(std::span<const std::byte> bytes)
         {
             gb::yadro::util::md5 hash;
@@ -1417,6 +1637,9 @@ namespace gb::yadro::container
         duplicate_data_pool<std::byte> _blobs;
         std::vector<object_record> _serialized_objects;
         std::filesystem::path _external_blob_base_directory;
+        log_options_type _log_options;
+        std::vector<log_sink> _log_sinks;
+        std::vector<std::shared_ptr<std::ofstream>> _log_file_streams;
         duplicate_data_pool<table_column> _table_columns;
         std::vector<table_record> _tables;
         tree_type _tree;
