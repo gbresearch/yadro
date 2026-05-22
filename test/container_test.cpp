@@ -101,6 +101,21 @@ namespace
         friend bool operator==(const data_pool_lifetime_tracker&, const data_pool_lifetime_tracker&) = default;
     };
 
+    struct gbdb_serializable_config
+    {
+        std::int32_t id = 0;
+        double scale = 0.0;
+        std::string symbol;
+
+        friend bool operator==(const gbdb_serializable_config&, const gbdb_serializable_config&) = default;
+
+        template<class Ar>
+        void serialize(this auto&& self, Ar&& archive)
+        {
+            archive(self.id, self.scale, self.symbol);
+        }
+    };
+
     GB_TEST(container, static_string_test)
     {
         static_string<1> s1;
@@ -1166,6 +1181,37 @@ namespace
         gbassert(restored_blob[2] == std::byte{ 3 });
     }
 
+    GB_TEST(container, gbdb_serialized_object_test)
+    {
+        json_db db;
+        gbdb_serializable_config config{ .id = 42, .scale = 0.125, .symbol = "AAPL" };
+
+        db.set_object({ "config", "quote" }, config, "gbdb_serializable_config", 7);
+
+        auto ref = std::get<json_db::object_ref>(*db.get({ "config", "quote" }));
+        auto type = db.object_type(ref);
+        auto version = db.object_version(ref);
+        auto restored = db.object<gbdb_serializable_config>(ref);
+
+        gbassert(type.has_value());
+        gbassert(*type == "gbdb_serializable_config");
+        gbassert(version.has_value());
+        gbassert(*version == 7);
+        gbassert(restored == config);
+
+        omem_archive<> out;
+        out(db);
+
+        json_db restored_db;
+        imem_archive in(std::move(out));
+        in(restored_db);
+
+        auto restored_ref = std::get<json_db::object_ref>(*restored_db.get({ "config", "quote" }));
+        gbassert(restored_db.object<gbdb_serializable_config>(restored_ref) == config);
+        gbassert(restored_db.object_type(restored_ref).value() == "gbdb_serializable_config");
+        gbassert(restored_db.object_version(restored_ref).value() == 7);
+    }
+
     GB_TEST(container, gbdb_json_writer_test)
     {
         json_db db;
@@ -1183,6 +1229,25 @@ namespace
 
         auto text = write_json(db, options);
         gbassert(text == R"({"market":{"active":true,"history":[190,191,193],"price":193.25,"symbol":"AAPL","venues":["nasdaq","arca"]}})");
+    }
+
+    GB_TEST(container, gbdb_json_write_serialized_object_test)
+    {
+        json_db db;
+        gbdb_serializable_config config{ .id = 42, .scale = 0.125, .symbol = "AAPL" };
+        db.set_object({ "config" }, config, "gbdb_serializable_config", 7);
+
+        json_write_options options;
+        options.pretty = false;
+        options.sort_keys = true;
+
+        auto text = write_json(db, options);
+        gbassert(text.find(R"("$gbdb":"archive")") != std::string::npos);
+        gbassert(text.find(R"("encoding":"base64")") != std::string::npos);
+        gbassert(text.find(R"("format":"yadro.archive.custom")") != std::string::npos);
+        gbassert(text.find(R"("type":"gbdb_serializable_config")") != std::string::npos);
+        gbassert(text.find(R"("version":7)") != std::string::npos);
+        gbassert(text.find(R"("data":")") != std::string::npos);
     }
 
     GB_TEST(container, gbdb_json_builder_test)
@@ -1406,6 +1471,36 @@ namespace
         }
         else {
             must_throw<std::logic_error>([&] { [[maybe_unused]] auto db = read_json(R"({"prices":[{"date":"2026-05-20"}]})", options); });
+        }
+    }
+
+    GB_TEST(container, gbdb_json_read_serialized_object_is_opt_in_test)
+    {
+        json_db db;
+        gbdb_serializable_config config{ .id = 42, .scale = 0.125, .symbol = "AAPL" };
+        db.set_object({ "config" }, config, "gbdb_serializable_config", 7);
+
+        json_write_options write_options;
+        write_options.pretty = false;
+        auto text = write_json(db, write_options);
+
+        json_read_options read_options;
+        if constexpr (gbdb_json_axe_enabled) {
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto rejected = read_json(text, read_options); });
+
+            read_options.blob_mode = json_blob_mode::tagged_base64;
+            auto restored_db = read_json(text, read_options);
+            auto ref = std::get<json_db::object_ref>(*restored_db.get({ "config" }));
+            auto restored = restored_db.object<gbdb_serializable_config>(ref);
+
+            gbassert(restored == config);
+            gbassert(restored_db.object_type(ref).value() == "gbdb_serializable_config");
+            gbassert(restored_db.object_version(ref).value() == 7);
+            gbassert(restored_db.get({ "config", "data" }) == nullptr);
+        }
+        else {
+            read_options.blob_mode = json_blob_mode::tagged_base64;
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json(text, read_options); });
         }
     }
 

@@ -29,6 +29,7 @@
 #pragma once
 
 #include "gbdb.h"
+#include "../util/string_util.h"
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -79,10 +80,17 @@ namespace gb::yadro::container
         object_rows
     };
 
+    enum class json_blob_mode
+    {
+        reject,
+        tagged_base64
+    };
+
     struct json_read_options
     {
         bool reject_duplicate_keys = true;
         json_table_mode table_mode = json_table_mode::reject;
+        json_blob_mode blob_mode = json_blob_mode::reject;
         std::string root_array_key = "data";
     };
 
@@ -159,8 +167,11 @@ namespace gb::yadro::container
             if (_pending_key)
                 throw std::logic_error("JSON object key is missing a value");
 
-            if (_objects.back().pushed_path)
+            if (_objects.back().pushed_path) {
+                auto path = current_path();
+                [[maybe_unused]] auto converted = try_set_tagged_base64_object(path);
                 _path.pop_back();
+            }
             _objects.pop_back();
         }
 
@@ -622,6 +633,102 @@ namespace gb::yadro::container
             _db.set_table(std::span<const string_view>{ path.data(), path.size() }, std::move(table));
         }
 
+        [[nodiscard]] const db_type::value_type* member_value(const std::vector<string_view>& path, string_view member) const
+        {
+            auto member_path = path;
+            member_path.push_back(member);
+            return _db.get(std::span<const string_view>{ member_path.data(), member_path.size() });
+        }
+
+        [[nodiscard]] std::optional<string_view> optional_string_member(const std::vector<string_view>& path, string_view member) const
+        {
+            auto* value = member_value(path, member);
+            if (value == nullptr)
+                return std::nullopt;
+            auto ref = std::get_if<db_type::string_ref>(value);
+            if (ref == nullptr)
+                throw std::logic_error("Tagged gbdb archive member must be a string");
+            return _db.string(*ref);
+        }
+
+        [[nodiscard]] string_view required_string_member(const std::vector<string_view>& path, string_view member) const
+        {
+            auto value = optional_string_member(path, member);
+            if (!value)
+                throw std::logic_error("Tagged gbdb archive is missing a required string member");
+            return *value;
+        }
+
+        [[nodiscard]] std::optional<std::uint32_t> optional_version_member(const std::vector<string_view>& path) const
+        {
+            auto* value = member_value(path, "version");
+            if (value == nullptr)
+                return std::nullopt;
+            if (auto signed_value = std::get_if<std::int64_t>(value)) {
+                if (*signed_value < 0 || *signed_value > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)()))
+                    throw std::logic_error("Tagged gbdb archive version is out of range");
+                return static_cast<std::uint32_t>(*signed_value);
+            }
+            if (auto unsigned_value = std::get_if<std::uint64_t>(value)) {
+                if (*unsigned_value > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)()))
+                    throw std::logic_error("Tagged gbdb archive version is out of range");
+                return static_cast<std::uint32_t>(*unsigned_value);
+            }
+            throw std::logic_error("Tagged gbdb archive version must be an integer");
+        }
+
+        void validate_tagged_archive_members(const std::vector<string_view>& path) const
+        {
+            auto node = _db.find(std::span<const string_view>{ path.data(), path.size() });
+            if (node == db_type::invalid_node)
+                throw std::logic_error("Tagged gbdb archive object was not found");
+
+            for (auto child = _db.tree().get_child(node); child != db_type::invalid_node; child = _db.tree().get_sibling(child)) {
+                auto key = _db.key(child);
+                if (key != "$gbdb" && key != "encoding" && key != "format" && key != "type" && key != "version" && key != "data")
+                    throw std::logic_error("Tagged gbdb archive has an unsupported member");
+            }
+        }
+
+        [[nodiscard]] bool try_set_tagged_base64_object(const std::vector<string_view>& path)
+        {
+            auto marker = optional_string_member(path, "$gbdb");
+            if (!marker)
+                return false;
+
+            if (*marker != "archive")
+                throw std::logic_error("Unsupported tagged gbdb object");
+            if (_read_options.blob_mode != json_blob_mode::tagged_base64)
+                throw std::logic_error("Tagged gbdb archive JSON reading is not enabled");
+
+            validate_tagged_archive_members(path);
+
+            if (required_string_member(path, "encoding") != "base64")
+                throw std::logic_error("Tagged gbdb archive has unsupported encoding");
+            if (required_string_member(path, "format") != "yadro.archive.custom")
+                throw std::logic_error("Tagged gbdb archive has unsupported format");
+
+            auto data = required_string_member(path, "data");
+            auto encoded = std::string{ data };
+            if (encoded.find('=') == std::string::npos)
+                encoded.push_back('=');
+            auto decoded = gb::yadro::util::base64_decode(encoded);
+
+            std::vector<std::byte> bytes;
+            bytes.reserve(decoded.size());
+            for (auto value : decoded)
+                bytes.push_back(static_cast<std::byte>(value));
+
+            auto type = optional_string_member(path, "type");
+            auto version = optional_version_member(path);
+            _db.set_serialized_object(
+                std::span<const string_view>{ path.data(), path.size() },
+                std::span<const std::byte>{ bytes.data(), bytes.size() },
+                type.value_or(string_view{}),
+                version);
+            return true;
+        }
+
         db_type _db;
         json_read_options _read_options;
         std::vector<string_type> _path;
@@ -801,6 +908,20 @@ namespace gb::yadro::container
             {
                 // JSON has no native byte-array type; keep blobs out of textual JSON until a project-specific encoding is chosen.
                 throw std::logic_error("JSON writer does not support gbdb blob_ref values");
+            }
+
+            void write_variant(json_db::object_ref ref)
+            {
+                _out << "{\"$gbdb\":\"archive\",\"encoding\":\"base64\",\"format\":\"yadro.archive.custom\"";
+                if (auto type = _db.object_type(ref)) {
+                    _out << ",\"type\":";
+                    write_string(*type);
+                }
+                if (auto version = _db.object_version(ref))
+                    _out << ",\"version\":" << *version;
+                _out << ",\"data\":";
+                write_string(gb::yadro::util::base64_encode(_db.serialized_object(ref)));
+                _out << '}';
             }
 
             void write_variant(json_db::table_ref ref)
@@ -1096,6 +1217,15 @@ namespace gb::yadro::container
             void assign_variant(json_db::blob_ref ref)
             {
                 _target.set_blob(path_span(), _source.blob(ref));
+            }
+
+            void assign_variant(json_db::object_ref ref)
+            {
+                _target.set_serialized_object(
+                    path_span(),
+                    _source.serialized_object(ref),
+                    _source.object_type(ref).value_or(json_db::string_view{}),
+                    _source.object_version(ref));
             }
 
             void assign_variant(json_db::table_ref ref)

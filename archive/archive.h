@@ -278,6 +278,8 @@ namespace gb::yadro::archive
 
         void reset() { _buf.resize(0); } // reset position to start writing from the beginning
 
+        const auto& buffer() const noexcept { return _buf; }
+
         void write(const char_type* c, std::streamsize size)
         {
             auto prev_size = _buf.size();
@@ -296,12 +298,14 @@ namespace gb::yadro::archive
         using char_type = typename container_t::value_type;
         using omem_t = omem_stream< container_t>;
         // construct from memory buffer of omem_stream or from archive with omem_stream
+        explicit imem_stream(container_t buffer) : _buf(std::move(buffer)) {}
         explicit imem_stream(omem_t&& om) : _buf(std::move(om._buf)) {}
         explicit imem_stream(const omem_t& om) : _buf(om._buf) {}
         explicit imem_stream(archive<omem_t, archive_format_t::custom>&& oma) : imem_stream(std::move(oma.get_stream())) {}
         explicit imem_stream(const archive<omem_t, archive_format_t::custom>& oma) : imem_stream(oma.get_stream()) {}
 
         void reset() { _read_pos = 0; } // reset position to start reading from the beginning
+        void reset(container_t buffer) { _buf = std::move(buffer); reset(); }
         void reset(omem_t&& om) { _buf = std::move(om._buf); reset(); }
         void reset(const omem_t& om) { _buf = om._buf; reset(); }
         void reset(archive<omem_t, archive_format_t::custom>&& oma) { reset(std::move(oma.get_stream())); }

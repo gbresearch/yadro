@@ -33,6 +33,7 @@
 #include <concepts>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include "../archive/archive.h"
 #include "datapool.h"
 #include "tree.h"
 
@@ -131,6 +133,18 @@ namespace gb::yadro::container
             }
         };
 
+        struct object_ref
+        {
+            std::uint32_t id{};
+            friend bool operator==(const object_ref&, const object_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
+        };
+
         enum class table_column_type : std::uint8_t
         {
             int64,
@@ -185,6 +199,24 @@ namespace gb::yadro::container
                 archive(
                     gb::yadro::archive::serialize_as<std::uint64_t>(self.row_count),
                     gb::yadro::archive::serialize_as<std::uint64_t>(self.columns));
+            }
+        };
+
+        struct object_record
+        {
+            duplicate_data_pool<std::byte>::array_id blob = duplicate_data_pool<std::byte>::invalid_array;
+            string_id type = (std::numeric_limits<string_id>::max)();
+            bool has_version = false;
+            std::uint32_t version = 0;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.blob),
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.type),
+                    self.has_version,
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.version));
             }
         };
 
@@ -460,6 +492,7 @@ namespace gb::yadro::container
             double_array_ref,
             string_array_ref,
             blob_ref,
+            object_ref,
             table_ref>;
 
         struct node_payload
@@ -717,6 +750,49 @@ namespace gb::yadro::container
             return set(path, value_type{ blob_ref{ _blobs.insert(values) } });
         }
 
+        node_id set_serialized_object(path_view path, std::span<const std::byte> values, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            return set_serialized_object(path_span{ path.begin(), path.size() }, values, type, version);
+        }
+
+        node_id set_serialized_object(path_span path, std::span<const std::byte> values, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            if (_serialized_objects.size() == (std::numeric_limits<std::uint32_t>::max)())
+                throw std::length_error("gbdb object_id capacity exceeded");
+
+            object_record record;
+            record.blob = _blobs.insert(values);
+            if (!type.empty())
+                record.type = intern(type);
+            if (version) {
+                record.has_version = true;
+                record.version = *version;
+            }
+
+            auto object_id = static_cast<std::uint32_t>(_serialized_objects.size());
+            _serialized_objects.push_back(record);
+
+            auto node = ensure_path(path);
+            clear_children(node);
+            _tree.get_value(node).value = value_type{ object_ref{ object_id } };
+            return node;
+        }
+
+        template<class T>
+        node_id set_object(path_view path, const T& value, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            return set_object(path_span{ path.begin(), path.size() }, value, type, version);
+        }
+
+        template<class T>
+        node_id set_object(path_span path, const T& value, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            gb::yadro::archive::omem_archive<> out;
+            out(value);
+            auto bytes = std::as_bytes(std::span{ out.get_stream().buffer() });
+            return set_serialized_object(path, bytes, type, version);
+        }
+
         [[nodiscard]] table_builder make_table(std::span<const table_schema_column> schema) const
         {
             return table_builder{ schema };
@@ -834,6 +910,48 @@ namespace gb::yadro::container
             return _blobs.span(ref.id);
         }
 
+        [[nodiscard]] std::span<const std::byte> serialized_object(object_ref ref) const
+        {
+            return _blobs.span(object_metadata(ref).blob);
+        }
+
+        [[nodiscard]] std::optional<string_view> object_type(object_ref ref) const
+        {
+            auto type = object_metadata(ref).type;
+            if (type == (std::numeric_limits<string_id>::max)())
+                return std::nullopt;
+            return string(type);
+        }
+
+        [[nodiscard]] std::optional<std::uint32_t> object_version(object_ref ref) const
+        {
+            auto& metadata = object_metadata(ref);
+            if (!metadata.has_version)
+                return std::nullopt;
+            return metadata.version;
+        }
+
+        template<std::default_initializable T>
+        [[nodiscard]] T object(object_ref ref) const
+        {
+            T value{};
+            object(ref, value);
+            return value;
+        }
+
+        template<class T>
+        void object(object_ref ref, T& value) const
+        {
+            auto bytes = serialized_object(ref);
+            std::vector<char> buffer(bytes.size());
+            std::ranges::transform(bytes, buffer.begin(), [](std::byte value) {
+                return static_cast<char>(std::to_integer<unsigned char>(value));
+            });
+
+            gb::yadro::archive::imem_archive<> in(std::move(buffer));
+            in(value);
+        }
+
         [[nodiscard]] const tree_type& tree() const noexcept
         {
             return _tree;
@@ -857,6 +975,7 @@ namespace gb::yadro::container
                 self.load_array_pool(archive, self._double_arrays);
                 self.load_array_pool(archive, self._string_arrays);
                 self.load_array_pool(archive, self._blobs);
+                archive(self._serialized_objects);
                 self.load_array_pool(archive, self._table_columns);
                 archive(self._tables);
                 archive(self._tree);
@@ -869,6 +988,7 @@ namespace gb::yadro::container
                 self.save_array_pool(archive, self._double_arrays);
                 self.save_array_pool(archive, self._string_arrays);
                 self.save_array_pool(archive, self._blobs);
+                archive(self._serialized_objects);
                 self.save_array_pool(archive, self._table_columns);
                 archive(self._tables);
                 archive(self._tree);
@@ -913,6 +1033,23 @@ namespace gb::yadro::container
             return id;
         }
 
+        [[nodiscard]] const object_record& object_metadata(object_ref ref) const
+        {
+            if (ref.id >= _serialized_objects.size())
+                throw std::out_of_range("gbdb object_ref is out of range");
+            return _serialized_objects[ref.id];
+        }
+
+        void clear_children(node_id node)
+        {
+            if (_tree.get_child(node) == invalid_node)
+                return;
+
+            for (auto child = _tree.get_child(node); child != invalid_node; child = _tree.get_child(node))
+                _tree.delete_subtree(child);
+            rebuild_indexes();
+        }
+
         node_id ensure_path(path_span path)
         {
             node_id parent = root_node;
@@ -942,6 +1079,7 @@ namespace gb::yadro::container
             _double_arrays = unique_data_pool<double>{};
             _string_arrays = unique_data_pool<string_id>{};
             _blobs = duplicate_data_pool<std::byte>{};
+            _serialized_objects.clear();
             _table_columns = duplicate_data_pool<table_column>{};
             _tables.clear();
             _tree = tree_type(node_payload{});
@@ -1034,6 +1172,7 @@ namespace gb::yadro::container
         unique_data_pool<double> _double_arrays;
         unique_data_pool<string_id> _string_arrays;
         duplicate_data_pool<std::byte> _blobs;
+        std::vector<object_record> _serialized_objects;
         duplicate_data_pool<table_column> _table_columns;
         std::vector<table_record> _tables;
         tree_type _tree;

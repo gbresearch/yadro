@@ -83,7 +83,7 @@ namespace gb::yadro::util
                 + std::to_string(GetLastError()));
         }
 
-        // 2. Prepare result using resize_and_overwrite
+        // 2. Prepare result using resize_  and_overwrite
         using ReturnType = utf16_return_type_t<T>;
         ReturnType result;
 
