@@ -131,6 +131,12 @@ namespace
         return hash.finalize().to_string();
     }
 
+    inline std::string read_test_file(const std::filesystem::path& file)
+    {
+        std::ifstream in(file, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    }
+
     GB_TEST(container, static_string_test)
     {
         static_string<1> s1;
@@ -1580,7 +1586,7 @@ namespace
 
         json_db db;
         gbdb_serializable_config config{ .id = 314, .scale = 2.5, .symbol = std::string(256, 'X') };
-        auto node = db.set_object({ "assets", "payload" }, config, "heavy_asset", 3);
+        db.set_object({ "assets", "payload" }, config, "heavy_asset", 3);
 
         json_write_options write_options;
         write_options.pretty = false;
@@ -1595,11 +1601,12 @@ namespace
         std::string text((std::istreambuf_iterator<char>(json_in)), {});
         json_in.close();
 
-        auto blob_uri = std::string{ "./blobs/node_" } + std::to_string(node) + "_payload.bin";
-        auto blob_file = export_dir / "blobs" / ("node_" + std::to_string(node) + "_payload.bin");
         auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
         auto bytes = db.serialized_object(ref);
         auto md5 = md5_test_bytes(bytes);
+        auto blob_name = std::string{ "object_" } + std::to_string(ref.id) + "_" + md5 + ".bin";
+        auto blob_uri = std::string{ "./blobs/" } + blob_name;
+        auto blob_file = export_dir / "blobs" / blob_name;
 
         gbassert(text.find(R"("encoding":"external")") != std::string::npos);
         gbassert(text.find(R"("blob_uri":")" + blob_uri + R"(")") != std::string::npos);
@@ -1641,6 +1648,126 @@ namespace
         else {
             must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json_file(json_file, read_options); });
         }
+
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_json_relocates_deferred_blob_on_export_test)
+    {
+        auto source_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_relocate_blob_source_test";
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_relocate_blob_export_test";
+        reset_test_directory(source_dir);
+        reset_test_directory(export_dir);
+
+        json_db db;
+        db.set_external_blob_base_directory(source_dir);
+        gbdb_serializable_config config{ .id = 913, .scale = 4.5, .symbol = std::string(96, 'R') };
+        db.set_object({ "assets", "payload" }, config, "relocated_asset", 12);
+        auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
+        auto original_bytes = db.serialized_object(ref);
+        auto expected_md5 = md5_test_bytes(original_bytes);
+        db.mark_object_deferred(ref, "source_payload.bin");
+        db.unload_object(ref);
+
+        json_write_options options;
+        options.pretty = false;
+        options.sort_keys = true;
+        options.external_blobs.relocation = json_external_blob_relocation::copy_to_export_directory;
+
+        auto json_file = export_dir / "database.json";
+        auto result = export_json_file(db, json_file, options);
+        auto file_name = std::string{ "object_" } + std::to_string(ref.id) + "_" + expected_md5 + ".bin";
+        auto relocated_file = export_dir / "blobs" / file_name;
+        auto expected_uri = std::string{ "./blobs/" } + file_name;
+        auto text = read_test_file(json_file);
+
+        gbassert(result.copied_blob_count == 1);
+        gbassert(result.deleted_blob_count == 0);
+        gbassert(std::filesystem::exists(source_dir / "source_payload.bin"));
+        gbassert(std::filesystem::exists(relocated_file));
+        gbassert(std::filesystem::file_size(relocated_file) == original_bytes.size());
+        gbassert(text.find(R"("blob_uri":")" + expected_uri + R"(")") != std::string::npos);
+        gbassert(text.find(R"("blob_md5":")" + expected_md5 + R"(")") != std::string::npos);
+        gbassert(db.object_external_blob(ref)->uri == "source_payload.bin");
+
+        std::filesystem::remove_all(source_dir);
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_json_external_blob_gc_after_success_test)
+    {
+        auto source_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_gc_blob_source_test";
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_gc_blob_export_test";
+        reset_test_directory(source_dir);
+        reset_test_directory(export_dir);
+        std::filesystem::create_directories(export_dir / "blobs");
+
+        {
+            std::ofstream stale(export_dir / "blobs" / "stale.bin", std::ios::binary);
+            stale << "stale";
+        }
+        {
+            std::ofstream outside(export_dir / "outside.bin", std::ios::binary);
+            outside << "outside";
+        }
+
+        json_db db;
+        db.set_external_blob_base_directory(source_dir);
+        gbdb_serializable_config config{ .id = 914, .scale = 5.5, .symbol = std::string(96, 'G') };
+        db.set_object({ "assets", "payload" }, config, "gc_asset", 13);
+        auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
+        auto expected_md5 = md5_test_bytes(db.serialized_object(ref));
+        db.mark_object_deferred(ref, "source_payload.bin");
+        db.unload_object(ref);
+
+        json_write_options options;
+        options.pretty = false;
+        options.external_blobs.relocation = json_external_blob_relocation::copy_to_export_directory;
+        options.external_blobs.gc_scope = json_external_blob_gc_scope::export_blob_directory_only;
+
+        auto result = export_json_file(db, export_dir / "database.json", options);
+        auto live_file = export_dir / "blobs" / (std::string{ "object_" } + std::to_string(ref.id) + "_" + expected_md5 + ".bin");
+
+        gbassert(result.copied_blob_count == 1);
+        gbassert(result.deleted_blob_count == 1);
+        gbassert(std::filesystem::exists(live_file));
+        gbassert(!std::filesystem::exists(export_dir / "blobs" / "stale.bin"));
+        gbassert(std::filesystem::exists(export_dir / "outside.bin"));
+
+        std::filesystem::remove_all(source_dir);
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_json_external_blob_gc_skips_failed_export_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_gc_failed_export_test";
+        reset_test_directory(export_dir);
+        std::filesystem::create_directories(export_dir / "blobs");
+
+        {
+            std::ofstream existing(export_dir / "database.json", std::ios::binary);
+            existing << R"({"old":true})";
+        }
+        {
+            std::ofstream stale(export_dir / "blobs" / "stale.bin", std::ios::binary);
+            stale << "stale";
+        }
+
+        json_db db;
+        db.set_external_blob_base_directory(export_dir);
+        db.set_deferred_serialized_object({ "assets", "payload" }, "missing_payload.bin", 10, "00000000000000000000000000000000", "missing_asset", 1);
+
+        json_write_options options;
+        options.pretty = false;
+        options.external_blobs.relocation = json_external_blob_relocation::copy_to_export_directory;
+        options.external_blobs.gc_scope = json_external_blob_gc_scope::export_blob_directory_only;
+
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto result = export_json_file(db, export_dir / "database.json", options);
+        });
+
+        gbassert(read_test_file(export_dir / "database.json") == R"({"old":true})");
+        gbassert(std::filesystem::exists(export_dir / "blobs" / "stale.bin"));
 
         std::filesystem::remove_all(export_dir);
     }

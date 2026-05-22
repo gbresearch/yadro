@@ -40,6 +40,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #if defined(GB_YADRO_ENABLE_AXE_JSON)
@@ -93,12 +94,35 @@ namespace gb::yadro::container
         auto_
     };
 
+    enum class json_external_blob_relocation
+    {
+        preserve_uri,
+        copy_to_export_directory
+    };
+
+    enum class json_external_blob_gc_scope
+    {
+        none,
+        export_blob_directory_only
+    };
+
+    struct json_external_blob_export_result
+    {
+        std::uint32_t copied_blob_count = 0;
+        std::uint32_t reused_blob_count = 0;
+        std::uint32_t deleted_blob_count = 0;
+        std::uint32_t orphan_blob_count = 0;
+    };
+
     struct json_external_blob_options
     {
         std::filesystem::path root_directory;
         std::filesystem::path blob_directory = "blobs";
         std::uint64_t inline_threshold_bytes = 4096;
         bool include_node_id = true;
+        json_external_blob_relocation relocation = json_external_blob_relocation::preserve_uri;
+        json_external_blob_gc_scope gc_scope = json_external_blob_gc_scope::none;
+        bool remove_temp_files_on_failure = true;
     };
 
     struct json_read_options
@@ -135,6 +159,50 @@ namespace gb::yadro::container
             gb::yadro::util::md5 hash;
             hash.update(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
             return hash.finalize().to_string();
+        }
+
+        [[nodiscard]] inline bool file_bytes_match(const std::filesystem::path& file, std::uint64_t size, std::string_view md5)
+        {
+            std::ifstream in(file, std::ios::binary);
+            if (!in)
+                return false;
+
+            std::vector<char> data((std::istreambuf_iterator<char>(in)), {});
+            if (static_cast<std::uint64_t>(data.size()) != size)
+                return false;
+
+            return md5_bytes(std::as_bytes(std::span{ data })) == md5;
+        }
+
+        inline void replace_file_with_temp(const std::filesystem::path& temp_file, const std::filesystem::path& file)
+        {
+            std::error_code ec;
+            std::filesystem::rename(temp_file, file, ec);
+            if (!ec)
+                return;
+
+            if (!std::filesystem::exists(file))
+                throw std::runtime_error("Failed to commit temporary file");
+
+            auto backup = file;
+            backup += ".bak";
+            ec.clear();
+            std::filesystem::remove(backup, ec);
+            ec.clear();
+            std::filesystem::rename(file, backup, ec);
+            if (ec)
+                throw std::runtime_error("Failed to preserve existing file before replacement");
+
+            ec.clear();
+            std::filesystem::rename(temp_file, file, ec);
+            if (ec) {
+                std::error_code restore_ec;
+                std::filesystem::rename(backup, file, restore_ec);
+                throw std::runtime_error("Failed to commit temporary file");
+            }
+
+            ec.clear();
+            std::filesystem::remove(backup, ec);
         }
     }
 
@@ -881,6 +949,16 @@ namespace gb::yadro::container
                 return std::move(_out).str();
             }
 
+            [[nodiscard]] const json_external_blob_export_result& result() const noexcept
+            {
+                return _result;
+            }
+
+            [[nodiscard]] const std::set<std::filesystem::path>& live_external_blob_files() const noexcept
+            {
+                return _live_external_blob_files;
+            }
+
         private:
             [[nodiscard]] bool has_children(json_db::node_id node) const
             {
@@ -1019,7 +1097,10 @@ namespace gb::yadro::container
             void write_variant(json_db::object_ref ref)
             {
                 if (auto external = _db.object_external_blob(ref); external && external->load_policy == json_db::blob_load_policy::deferred) {
-                    write_external_object_manifest(ref, *external);
+                    if (_options.external_blobs.relocation == json_external_blob_relocation::copy_to_export_directory)
+                        write_relocated_external_object_manifest(ref, *external);
+                    else
+                        write_external_object_manifest(ref, *external);
                     return;
                 }
 
@@ -1051,6 +1132,7 @@ namespace gb::yadro::container
             void write_external_object_manifest(json_db::object_ref ref, const json_db::external_blob_info& blob)
             {
                 auto node = _current_node == json_db::invalid_node ? json_db::root_node : _current_node;
+                remember_live_uri(blob.uri);
 
                 _out << "{\"$gbdb\":\"archive\",\"encoding\":\"external\",\"format\":\"yadro.archive.custom\"";
                 if (auto type = _db.object_type(ref)) {
@@ -1069,6 +1151,72 @@ namespace gb::yadro::container
                 _out << '}';
             }
 
+            void write_relocated_external_object_manifest(json_db::object_ref ref, const json_db::external_blob_info& blob)
+            {
+                if (_options.external_blobs.root_directory.empty())
+                    throw std::logic_error("Relocated gbdb archive blob writing requires root_directory");
+
+                auto source = resolve_source_blob_file(blob.uri);
+                if (!std::filesystem::exists(source))
+                    throw std::runtime_error("Failed to open external gbdb archive blob for relocation");
+
+                auto file_name = external_blob_file_name(ref, blob.md5);
+                auto blob_directory = _options.external_blobs.root_directory / _options.external_blobs.blob_directory;
+                auto final_file = blob_directory / file_name;
+                std::filesystem::create_directories(blob_directory);
+
+                if (std::filesystem::exists(final_file)) {
+                    if (!detail::file_bytes_match(final_file, blob.size_bytes, blob.md5))
+                        throw std::runtime_error("Existing relocated gbdb archive blob has different content");
+                    ++_result.reused_blob_count;
+                }
+                else {
+                    auto temp_directory = blob_directory / ".tmp";
+                    std::filesystem::create_directories(temp_directory);
+                    auto temp_file = temp_directory / (file_name + ".tmp");
+
+                    try {
+                        std::filesystem::copy_file(source, temp_file, std::filesystem::copy_options::overwrite_existing);
+                        if (!detail::file_bytes_match(temp_file, blob.size_bytes, blob.md5))
+                            throw std::runtime_error("Relocated gbdb archive blob MD5 mismatch");
+                        detail::replace_file_with_temp(temp_file, final_file);
+                        ++_result.copied_blob_count;
+                    }
+                    catch (...) {
+                        if (_options.external_blobs.remove_temp_files_on_failure) {
+                            std::error_code ec;
+                            std::filesystem::remove(temp_file, ec);
+                        }
+                        throw;
+                    }
+                }
+
+                auto uri = external_blob_uri(file_name);
+                remember_live_file(final_file);
+                write_external_object_manifest(ref, blob, uri);
+            }
+
+            void write_external_object_manifest(json_db::object_ref ref, const json_db::external_blob_info& blob, json_db::string_view uri)
+            {
+                auto node = _current_node == json_db::invalid_node ? json_db::root_node : _current_node;
+
+                _out << "{\"$gbdb\":\"archive\",\"encoding\":\"external\",\"format\":\"yadro.archive.custom\"";
+                if (auto type = _db.object_type(ref)) {
+                    _out << ",\"type\":";
+                    write_string(*type);
+                }
+                if (auto version = _db.object_version(ref))
+                    _out << ",\"version\":" << *version;
+                if (_options.external_blobs.include_node_id)
+                    _out << ",\"node_id\":" << node;
+                _out << ",\"blob_uri\":";
+                write_string(uri);
+                _out << ",\"blob_size_bytes\":" << blob.size_bytes;
+                _out << ",\"blob_md5\":";
+                write_string(blob.md5);
+                _out << '}';
+            }
+
             void write_external_object_manifest(json_db::object_ref ref, std::span<const std::byte> bytes)
             {
                 if (_options.external_blobs.root_directory.empty())
@@ -1078,18 +1226,12 @@ namespace gb::yadro::container
                 std::filesystem::create_directories(blob_directory);
 
                 auto node = _current_node == json_db::invalid_node ? json_db::root_node : _current_node;
-                auto file_name = std::string{ "node_" } + std::to_string(node) + "_payload.bin";
-                auto file = blob_directory / file_name;
-
-                std::ofstream out(file, std::ios::binary);
-                if (!out)
-                    throw std::runtime_error("Failed to open external gbdb archive blob for writing");
-                out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-                if (!out)
-                    throw std::runtime_error("Failed to write external gbdb archive blob");
-
-                auto uri = std::string{ "./" } + _options.external_blobs.blob_directory.generic_string() + "/" + file_name;
                 auto md5 = detail::md5_bytes(bytes);
+                auto file_name = external_blob_file_name(json_db::object_ref{ static_cast<std::uint32_t>(ref.id) }, md5);
+                auto file = blob_directory / file_name;
+                write_bytes_external_blob(file, bytes, md5);
+                auto uri = external_blob_uri(file_name);
+                remember_live_file(file);
 
                 _out << "{\"$gbdb\":\"archive\",\"encoding\":\"external\",\"format\":\"yadro.archive.custom\"";
                 if (auto type = _db.object_type(ref)) {
@@ -1106,6 +1248,79 @@ namespace gb::yadro::container
                 _out << ",\"blob_md5\":";
                 write_string(md5);
                 _out << '}';
+            }
+
+            [[nodiscard]] std::filesystem::path resolve_source_blob_file(json_db::string_view uri) const
+            {
+                std::filesystem::path file{ std::string{ uri } };
+                if (file.is_relative()) {
+                    if (_db.external_blob_base_directory().empty())
+                        throw std::runtime_error("External gbdb archive blob relocation requires a source base directory");
+                    file = _db.external_blob_base_directory() / file;
+                }
+                return file;
+            }
+
+            [[nodiscard]] std::string external_blob_file_name(json_db::object_ref ref, json_db::string_view md5) const
+            {
+                return std::string{ "object_" } + std::to_string(ref.id) + "_" + std::string{ md5 } + ".bin";
+            }
+
+            [[nodiscard]] std::string external_blob_uri(std::string_view file_name) const
+            {
+                return std::string{ "./" } + _options.external_blobs.blob_directory.generic_string() + "/" + std::string{ file_name };
+            }
+
+            void write_bytes_external_blob(const std::filesystem::path& file, std::span<const std::byte> bytes, std::string_view md5)
+            {
+                if (std::filesystem::exists(file)) {
+                    if (!detail::file_bytes_match(file, static_cast<std::uint64_t>(bytes.size()), md5))
+                        throw std::runtime_error("Existing external gbdb archive blob has different content");
+                    ++_result.reused_blob_count;
+                    return;
+                }
+
+                auto temp_directory = file.parent_path() / ".tmp";
+                std::filesystem::create_directories(temp_directory);
+                auto temp_file = temp_directory / (file.filename().generic_string() + ".tmp");
+
+                try {
+                    std::ofstream out(temp_file, std::ios::binary);
+                    if (!out)
+                        throw std::runtime_error("Failed to open external gbdb archive blob for writing");
+                    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                    if (!out)
+                        throw std::runtime_error("Failed to write external gbdb archive blob");
+                    out.close();
+
+                    if (!detail::file_bytes_match(temp_file, static_cast<std::uint64_t>(bytes.size()), md5))
+                        throw std::runtime_error("External gbdb archive blob MD5 mismatch after writing");
+
+                    detail::replace_file_with_temp(temp_file, file);
+                    ++_result.copied_blob_count;
+                }
+                catch (...) {
+                    if (_options.external_blobs.remove_temp_files_on_failure) {
+                        std::error_code ec;
+                        std::filesystem::remove(temp_file, ec);
+                    }
+                    throw;
+                }
+            }
+
+            void remember_live_uri(json_db::string_view uri)
+            {
+                std::filesystem::path file{ std::string{ uri } };
+                if (file.is_relative() && !_options.external_blobs.root_directory.empty())
+                    file = _options.external_blobs.root_directory / file;
+                remember_live_file(file);
+            }
+
+            void remember_live_file(std::filesystem::path file)
+            {
+                if (file.empty())
+                    return;
+                _live_external_blob_files.insert(std::filesystem::weakly_canonical(file));
             }
 
             void write_variant(json_db::table_ref ref)
@@ -1245,6 +1460,8 @@ namespace gb::yadro::container
             const json_write_options& _options;
             std::ostringstream _out;
             json_db::node_id _current_node = json_db::invalid_node;
+            json_external_blob_export_result _result;
+            std::set<std::filesystem::path> _live_external_blob_files;
         };
 
         class json_db_merger
@@ -1617,28 +1834,94 @@ namespace gb::yadro::container
         return detail::json_writer{ db, options }.write_subtree(key);
     }
 
-    inline void write_json_file(const json_db& db, const std::filesystem::path& file, const json_write_options& options = {})
+    inline void collect_unreferenced_external_blobs(const std::filesystem::path& blob_directory, const std::set<std::filesystem::path>& live_files,
+        json_external_blob_export_result& result)
     {
-        std::ofstream out(file, std::ios::binary);
+        if (!std::filesystem::exists(blob_directory))
+            return;
+
+        for (auto const& entry : std::filesystem::recursive_directory_iterator(blob_directory)) {
+            if (!entry.is_regular_file())
+                continue;
+            if (entry.path().parent_path().filename() == ".tmp")
+                continue;
+
+            auto file = std::filesystem::weakly_canonical(entry.path());
+            if (live_files.contains(file))
+                continue;
+
+            std::filesystem::remove(file);
+            ++result.deleted_blob_count;
+        }
+    }
+
+    inline void write_text_file_atomically(const std::filesystem::path& file, std::string_view text)
+    {
+        if (auto parent = file.parent_path(); !parent.empty())
+            std::filesystem::create_directories(parent);
+
+        auto temp_file = file;
+        temp_file += ".tmp";
+
+        std::ofstream out(temp_file, std::ios::binary);
         if (!out)
             throw std::runtime_error("Failed to open JSON file for writing");
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!out)
+            throw std::runtime_error("Failed to write JSON file");
+        out.close();
+
+        detail::replace_file_with_temp(temp_file, file);
+    }
+
+    [[nodiscard]] inline json_external_blob_export_result export_json_file(const json_db& db, const std::filesystem::path& file, const json_write_options& options = {})
+    {
         auto effective_options = options;
         if (effective_options.external_blobs.root_directory.empty())
             effective_options.external_blobs.root_directory = file.parent_path();
-        auto text = write_json(db, effective_options);
-        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+
+        detail::json_writer writer{ db, effective_options };
+        auto text = writer.write();
+        auto result = writer.result();
+        write_text_file_atomically(file, text);
+
+        if (effective_options.external_blobs.gc_scope == json_external_blob_gc_scope::export_blob_directory_only)
+            collect_unreferenced_external_blobs(
+                effective_options.external_blobs.root_directory / effective_options.external_blobs.blob_directory,
+                writer.live_external_blob_files(),
+                result);
+
+        return result;
+    }
+
+    [[nodiscard]] inline json_external_blob_export_result export_json_subtree_file(const json_db& db, json_db::string_view key, const std::filesystem::path& file, const json_write_options& options = {})
+    {
+        auto effective_options = options;
+        if (effective_options.external_blobs.root_directory.empty())
+            effective_options.external_blobs.root_directory = file.parent_path();
+
+        detail::json_writer writer{ db, effective_options };
+        auto text = writer.write_subtree(key);
+        auto result = writer.result();
+        write_text_file_atomically(file, text);
+
+        if (effective_options.external_blobs.gc_scope == json_external_blob_gc_scope::export_blob_directory_only)
+            collect_unreferenced_external_blobs(
+                effective_options.external_blobs.root_directory / effective_options.external_blobs.blob_directory,
+                writer.live_external_blob_files(),
+                result);
+
+        return result;
+    }
+
+    inline void write_json_file(const json_db& db, const std::filesystem::path& file, const json_write_options& options = {})
+    {
+        (void)export_json_file(db, file, options);
     }
 
     inline void write_json_subtree_file(const json_db& db, json_db::string_view key, const std::filesystem::path& file, const json_write_options& options = {})
     {
-        std::ofstream out(file, std::ios::binary);
-        if (!out)
-            throw std::runtime_error("Failed to open JSON file for writing");
-        auto effective_options = options;
-        if (effective_options.external_blobs.root_directory.empty())
-            effective_options.external_blobs.root_directory = file.parent_path();
-        auto text = write_json_subtree(db, key, effective_options);
-        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        (void)export_json_subtree_file(db, key, file, options);
     }
 
     inline void insert_json(json_db& target, const json_db& source, json_merge_policy policy = json_merge_policy::replace_existing)
