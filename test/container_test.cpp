@@ -1289,6 +1289,126 @@ namespace
         });
     }
 
+    GB_TEST(container, gbdb_table_set_view_test)
+    {
+        json_db db;
+        std::array schema{
+            json_db::table_schema_column{ "timestamp", json_db::table_column_type::uint64 },
+            json_db::table_schema_column{ "open", json_db::table_column_type::double_ },
+            json_db::table_schema_column{ "volume", json_db::table_column_type::uint64 }
+        };
+
+        auto table = db.make_table(schema);
+        table.append_row({ std::uint64_t{ 1716249600 }, 150.25, std::uint64_t{ 1542000 } });
+        table.append_row({ std::uint64_t{ 1716336000 }, 154.20, std::uint64_t{ 1285000 } });
+        db.set_table({ "market" }, std::move(table));
+
+        auto ref = std::get<json_db::table_ref>(*db.get({ "market" }));
+        auto view = db.table(ref);
+
+        gbassert(view.row_count() == 2);
+        gbassert(view.column_count() == 3);
+        gbassert(view.column_name(0) == "timestamp");
+        gbassert(view.column_type(1) == json_db::table_column_type::double_);
+        gbassert(view.uint64_column(0)[1] == 1716336000);
+        gbassert(view.double_column(1)[0] == 150.25);
+        gbassert(view.uint64_column(2)[1] == 1285000);
+    }
+
+    GB_TEST(container, gbdb_table_serialization_test)
+    {
+        json_db db;
+        std::array schema{
+            json_db::table_schema_column{ "date", json_db::table_column_type::string },
+            json_db::table_schema_column{ "close", json_db::table_column_type::double_ }
+        };
+
+        auto table = db.make_table(schema);
+        table.append_row({ "2026-05-20", 154.20 });
+        table.append_row({ "2026-05-21", 155.80 });
+        db.set_table({ "prices" }, std::move(table));
+
+        omem_archive<> out;
+        out(db);
+
+        json_db restored;
+        imem_archive in(std::move(out));
+        in(restored);
+
+        auto ref = std::get<json_db::table_ref>(*restored.get({ "prices" }));
+        auto view = restored.table(ref);
+
+        gbassert(view.row_count() == 2);
+        gbassert(view.column_name(0) == "date");
+        gbassert(restored.string(view.string_column(0)[1]) == "2026-05-21");
+        gbassert(view.double_column(1)[0] == 154.20);
+    }
+
+    GB_TEST(container, gbdb_json_write_table_test)
+    {
+        json_db db;
+        std::array schema{
+            json_db::table_schema_column{ "timestamp", json_db::table_column_type::uint64 },
+            json_db::table_schema_column{ "open", json_db::table_column_type::double_ },
+            json_db::table_schema_column{ "volume", json_db::table_column_type::uint64 }
+        };
+
+        auto table = db.make_table(schema);
+        table.append_row({ std::uint64_t{ 1716249600 }, 150.25, std::uint64_t{ 1542000 } });
+        table.append_row({ std::uint64_t{ 1716336000 }, 154.20, std::uint64_t{ 1285000 } });
+        db.set_table({ "market" }, std::move(table));
+
+        json_write_options options;
+        options.pretty = false;
+        options.sort_keys = true;
+
+        auto text = write_json(db, options);
+        gbassert(text == R"({"market":{"columns":["timestamp","open","volume"],"data":[[1716249600,150.25,1542000],[1716336000,154.19999999999999,1285000]]}})");
+
+        options.table_format = json_table_write_format::object_rows;
+        text = write_json(db, options);
+        gbassert(text == R"({"market":[{"timestamp":1716249600,"open":150.25,"volume":1542000},{"timestamp":1716336000,"open":154.19999999999999,"volume":1285000}]})");
+    }
+
+    GB_TEST(container, gbdb_json_read_table_is_opt_in_test)
+    {
+        json_read_options options;
+        options.table_mode = json_table_mode::infer_tables;
+
+        if constexpr (gbdb_json_axe_enabled) {
+            auto root_array = read_json(R"([{"date":"2026-05-20","open":150.25,"volume":1542000},{"date":"2026-05-21","open":154.20,"volume":1285000}])", options);
+            auto root_ref = std::get<json_db::table_ref>(*root_array.get({ "data" }));
+            auto root_data = root_array.table(root_ref);
+
+            gbassert(root_data.row_count() == 2);
+            gbassert(root_data.column_name(0) == "date");
+            gbassert(root_array.string(root_data.string_column(0)[0]) == "2026-05-20");
+
+            auto db = read_json(R"({"prices":[{"date":"2026-05-20","open":150.25,"volume":1542000},{"date":"2026-05-21","open":154.20,"volume":1285000}]})", options);
+            auto ref = std::get<json_db::table_ref>(*db.get({ "prices" }));
+            auto view = db.table(ref);
+
+            gbassert(view.row_count() == 2);
+            gbassert(view.column_count() == 3);
+            gbassert(view.column_name(0) == "date");
+            gbassert(db.string(view.string_column(0)[1]) == "2026-05-21");
+            gbassert(view.double_column(1)[0] == 150.25);
+            gbassert(view.uint64_column(2)[1] == 1285000);
+
+            auto db2 = read_json(R"({"ticker":"AAPL","columns":["timestamp","open","volume"],"data":[[1716249600,150.25,1542000],[1716336000,154.20,1285000]]})", options);
+            auto data_ref = std::get<json_db::table_ref>(*db2.get({ "data" }));
+            auto data = db2.table(data_ref);
+
+            gbassert(data.row_count() == 2);
+            gbassert(data.column_name(0) == "timestamp");
+            gbassert(data.uint64_column(0)[0] == 1716249600);
+            gbassert(data.double_column(1)[1] == 154.20);
+        }
+        else {
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto db = read_json(R"({"prices":[{"date":"2026-05-20"}]})", options); });
+        }
+    }
+
     GB_TEST(container, gbdb_json_reader_is_opt_in_test)
     {
         if constexpr (gbdb_json_axe_enabled) {

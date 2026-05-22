@@ -67,9 +67,23 @@ namespace gb::yadro::container
         {}
     };
 
+    enum class json_table_mode
+    {
+        reject,
+        infer_tables
+    };
+
+    enum class json_table_write_format
+    {
+        columns_data,
+        object_rows
+    };
+
     struct json_read_options
     {
         bool reject_duplicate_keys = true;
+        json_table_mode table_mode = json_table_mode::reject;
+        std::string root_array_key = "data";
     };
 
     struct json_write_options
@@ -78,6 +92,7 @@ namespace gb::yadro::container
         std::uint32_t indent = 2;
         bool sort_keys = false;
         bool ascii_only = false;
+        json_table_write_format table_format = json_table_write_format::columns_data;
     };
 
     enum class json_merge_policy
@@ -100,7 +115,18 @@ namespace gb::yadro::container
 
         void begin_object()
         {
-            ensure_not_array("JSON objects inside arrays are not supported by json_db_builder");
+            if (_array) {
+                if (_read_options.table_mode != json_table_mode::infer_tables)
+                    throw std::logic_error("JSON objects inside arrays are not supported by json_db_builder");
+                if (_array->current_row_array)
+                    throw std::logic_error("JSON objects inside table row arrays are not supported");
+                if (_array->kind == array_kind::none)
+                    _array->kind = array_kind::object_rows;
+                if (_array->kind != array_kind::object_rows || _array->current_object)
+                    throw std::logic_error("Mixed JSON table arrays are not supported");
+                _array->current_object = row_object{};
+                return;
+            }
 
             if (_pending_key) {
                 auto path = path_with_pending_key();
@@ -120,6 +146,14 @@ namespace gb::yadro::container
 
         void end_object()
         {
+            if (_array && _array->current_object) {
+                if (_array->current_object->pending_key)
+                    throw std::logic_error("JSON table object key is missing a value");
+                _array->object_rows.push_back(std::move(*_array->current_object));
+                _array->current_object.reset();
+                return;
+            }
+
             if (_objects.empty())
                 throw std::logic_error("JSON object end without matching begin");
             if (_pending_key)
@@ -132,6 +166,13 @@ namespace gb::yadro::container
 
         void key(string_view value)
         {
+            if (_array && _array->current_object) {
+                if (_array->current_object->pending_key)
+                    throw std::logic_error("JSON table object key is missing a value");
+                _array->current_object->pending_key = string_type{ value };
+                return;
+            }
+
             ensure_not_array("JSON object keys are not valid inside arrays");
             if (_objects.empty())
                 throw std::logic_error("JSON object key outside object");
@@ -191,20 +232,43 @@ namespace gb::yadro::container
 
         void begin_array()
         {
-            ensure_not_array("Nested arrays are not supported by the current json_db value model");
-            if (!_pending_key)
+            if (_array) {
+                if (_read_options.table_mode != json_table_mode::infer_tables)
+                    throw std::logic_error("Nested arrays are not supported by the current json_db value model");
+                if (_array->current_object || _array->current_row_array)
+                    throw std::logic_error("Nested table arrays are not supported");
+                if (_array->kind == array_kind::none)
+                    _array->kind = array_kind::row_arrays;
+                if (_array->kind != array_kind::row_arrays)
+                    throw std::logic_error("Mixed JSON table arrays are not supported");
+                _array->current_row_array = std::vector<db_type::table_cell>{};
+                return;
+            }
+
+            if (!_pending_key && (!_objects.empty() || _read_options.table_mode != json_table_mode::infer_tables))
                 throw std::logic_error("JSON array member is missing a key");
 
             _array = array_state{};
             _array->path_storage = _path;
-            _array->path_storage.push_back(std::move(*_pending_key));
-            _pending_key.reset();
+            if (_pending_key) {
+                _array->path_storage.push_back(std::move(*_pending_key));
+                _pending_key.reset();
+            }
+            else {
+                _array->path_storage.emplace_back(_read_options.root_array_key);
+            }
         }
 
         void end_array()
         {
             if (!_array)
                 throw std::logic_error("JSON array end without matching begin");
+
+            if (_array->current_row_array) {
+                _array->row_arrays.push_back(std::move(*_array->current_row_array));
+                _array->current_row_array.reset();
+                return;
+            }
 
             auto path = views(_array->path_storage);
             reject_duplicate(path);
@@ -226,6 +290,12 @@ namespace gb::yadro::container
                 break;
             case array_kind::floating:
                 _db.set_array(std::span<const string_view>{ path.data(), path.size() }, std::span<const double>{ _array->doubles.data(), _array->doubles.size() });
+                break;
+            case array_kind::object_rows:
+                set_object_rows_table(path);
+                break;
+            case array_kind::row_arrays:
+                set_row_arrays_table(path);
                 break;
             }
 
@@ -255,7 +325,15 @@ namespace gb::yadro::container
             signed_int,
             unsigned_int,
             floating,
-            strings
+            strings,
+            object_rows,
+            row_arrays
+        };
+
+        struct row_object
+        {
+            std::optional<string_type> pending_key;
+            std::vector<std::pair<string_type, db_type::table_cell>> cells;
         };
 
         struct array_state
@@ -266,6 +344,10 @@ namespace gb::yadro::container
             std::vector<std::uint64_t> uints;
             std::vector<double> doubles;
             std::vector<string_type> strings;
+            std::vector<row_object> object_rows;
+            std::optional<row_object> current_object;
+            std::vector<std::vector<db_type::table_cell>> row_arrays;
+            std::optional<std::vector<db_type::table_cell>> current_row_array;
         };
 
         [[nodiscard]] std::vector<string_view> current_path() const
@@ -333,6 +415,9 @@ namespace gb::yadro::container
 
         void append_int(std::int64_t value)
         {
+            if (append_table_cell(db_type::table_cell{ value }))
+                return;
+            ensure_scalar_array();
             if (_array->kind == array_kind::none)
                 _array->kind = array_kind::signed_int;
             if (_array->kind == array_kind::strings)
@@ -347,6 +432,9 @@ namespace gb::yadro::container
 
         void append_uint(std::uint64_t value)
         {
+            if (append_table_cell(db_type::table_cell{ value }))
+                return;
+            ensure_scalar_array();
             if (_array->kind == array_kind::none)
                 _array->kind = array_kind::unsigned_int;
             if (_array->kind == array_kind::strings)
@@ -361,6 +449,9 @@ namespace gb::yadro::container
 
         void append_double(double value)
         {
+            if (append_table_cell(db_type::table_cell{ value }))
+                return;
+            ensure_scalar_array();
             if (_array->kind == array_kind::strings)
                 throw std::logic_error("Mixed JSON arrays are not supported by the current json_db value model");
             convert_to_double();
@@ -369,11 +460,166 @@ namespace gb::yadro::container
 
         void append_string(string_view value)
         {
+            if (append_table_cell(db_type::table_cell{ value }))
+                return;
+            ensure_scalar_array();
             if (_array->kind == array_kind::none)
                 _array->kind = array_kind::strings;
             if (_array->kind != array_kind::strings)
                 throw std::logic_error("Mixed JSON arrays are not supported by the current json_db value model");
             _array->strings.emplace_back(value);
+        }
+
+        void ensure_scalar_array() const
+        {
+            if (_array->kind == array_kind::object_rows || _array->kind == array_kind::row_arrays)
+                throw std::logic_error("Mixed JSON table arrays are not supported");
+        }
+
+        [[nodiscard]] bool append_table_cell(db_type::table_cell cell)
+        {
+            if (_array->current_object) {
+                if (!_array->current_object->pending_key)
+                    throw std::logic_error("JSON table object value is missing a key");
+                _array->current_object->cells.emplace_back(std::move(*_array->current_object->pending_key), std::move(cell));
+                _array->current_object->pending_key.reset();
+                return true;
+            }
+            if (_array->current_row_array) {
+                _array->current_row_array->push_back(std::move(cell));
+                return true;
+            }
+            return false;
+        }
+
+        [[nodiscard]] static db_type::table_column_type infer_column_type(std::span<const db_type::table_cell> values)
+        {
+            bool has_string = false;
+            bool has_double = false;
+            bool has_signed = false;
+            bool has_unsigned = false;
+            std::uint64_t max_unsigned = 0;
+
+            for (auto& cell : values) {
+                std::visit([&](const auto& value) {
+                    using cell_type = std::remove_cvref_t<decltype(value)>;
+                    if constexpr (std::same_as<cell_type, string_type>) {
+                        has_string = true;
+                    }
+                    else if constexpr (std::same_as<cell_type, double>) {
+                        has_double = true;
+                    }
+                    else if constexpr (std::same_as<cell_type, std::int64_t>) {
+                        has_signed = true;
+                    }
+                    else if constexpr (std::same_as<cell_type, std::uint64_t>) {
+                        has_unsigned = true;
+                        max_unsigned = (std::max)(max_unsigned, value);
+                    }
+                }, cell.value);
+            }
+
+            if (has_string && (has_double || has_signed || has_unsigned))
+                throw std::logic_error("Mixed string and numeric JSON table columns are not supported");
+            if (has_string)
+                return db_type::table_column_type::string;
+            if (has_double)
+                return db_type::table_column_type::double_;
+            if (has_signed && has_unsigned) {
+                if (max_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+                    return db_type::table_column_type::int64;
+                return db_type::table_column_type::double_;
+            }
+            if (has_signed)
+                return db_type::table_column_type::int64;
+            return db_type::table_column_type::uint64;
+        }
+
+        void set_object_rows_table(const std::vector<string_view>& path)
+        {
+            if (_array->object_rows.empty())
+                throw std::logic_error("JSON object-row table is empty");
+
+            std::vector<string_type> names;
+            names.reserve(_array->object_rows.front().cells.size());
+            for (auto& [name, _] : _array->object_rows.front().cells) {
+                if (std::ranges::find(names, name) != names.end())
+                    throw std::logic_error("Duplicate JSON table column");
+                names.push_back(name);
+            }
+
+            std::vector<std::vector<db_type::table_cell>> columns(names.size());
+            for (auto& row : _array->object_rows) {
+                if (row.cells.size() != names.size())
+                    throw std::logic_error("JSON table rows must have the same columns");
+                for (std::size_t column = 0; column < names.size(); ++column) {
+                    auto found = std::ranges::find_if(row.cells, [&](auto& cell) { return cell.first == names[column]; });
+                    if (found == row.cells.end())
+                        throw std::logic_error("JSON table row is missing a column");
+                    columns[column].push_back(found->second);
+                }
+            }
+
+            set_table(path, names, columns);
+        }
+
+        void set_row_arrays_table(const std::vector<string_view>& path)
+        {
+            std::vector<string_type> names = columns_for_data_path();
+            if (names.empty())
+                throw std::logic_error("JSON data table requires a columns array");
+
+            std::vector<std::vector<db_type::table_cell>> columns(names.size());
+            for (auto& row : _array->row_arrays) {
+                if (row.size() != names.size())
+                    throw std::logic_error("JSON table row has wrong column count");
+                for (std::size_t column = 0; column < names.size(); ++column)
+                    columns[column].push_back(row[column]);
+            }
+
+            set_table(path, names, columns);
+        }
+
+        [[nodiscard]] std::vector<string_type> columns_for_data_path() const
+        {
+            auto column_path = views(_array->path_storage);
+            if (column_path.empty() || column_path.back() != "data")
+                return {};
+            column_path.back() = "columns";
+            auto* value = _db.get(std::span<const string_view>{ column_path.data(), column_path.size() });
+            if (value == nullptr)
+                return {};
+            auto ref = std::get_if<db_type::string_array_ref>(value);
+            if (ref == nullptr)
+                return {};
+
+            std::vector<string_type> names;
+            auto ids = _db.array(*ref);
+            names.reserve(ids.size());
+            for (auto id : ids)
+                names.emplace_back(_db.string(id));
+            return names;
+        }
+
+        void set_table(const std::vector<string_view>& path, const std::vector<string_type>& names, const std::vector<std::vector<db_type::table_cell>>& columns)
+        {
+            std::vector<db_type::table_schema_column> schema;
+            schema.reserve(names.size());
+            for (std::size_t column = 0; column < names.size(); ++column)
+                schema.push_back(db_type::table_schema_column{ names[column], infer_column_type(columns[column]) });
+
+            auto table = _db.make_table(schema);
+            std::vector<db_type::table_cell> row;
+            row.reserve(names.size());
+            auto row_count = columns.empty() ? std::size_t{} : columns.front().size();
+            for (std::size_t r = 0; r < row_count; ++r) {
+                row.clear();
+                for (auto& column : columns)
+                    row.push_back(column[r]);
+                table.append_row(row);
+            }
+
+            _db.set_table(std::span<const string_view>{ path.data(), path.size() }, std::move(table));
         }
 
         db_type _db;
@@ -555,6 +801,95 @@ namespace gb::yadro::container
             {
                 // JSON has no native byte-array type; keep blobs out of textual JSON until a project-specific encoding is chosen.
                 throw std::logic_error("JSON writer does not support gbdb blob_ref values");
+            }
+
+            void write_variant(json_db::table_ref ref)
+            {
+                auto table = _db.table(ref);
+                if (_options.table_format == json_table_write_format::object_rows) {
+                    write_table_object_rows(table);
+                    return;
+                }
+                write_table_columns_data(table);
+            }
+
+            void write_table_columns_data(json_db::table_view table)
+            {
+                _out << "{\"columns\":";
+                write_table_columns(table);
+                _out << ",\"data\":";
+                write_table_row_arrays(table);
+                _out << '}';
+            }
+
+            void write_table_object_rows(json_db::table_view table)
+            {
+                _out << '[';
+                for (std::uint32_t row = 0; row < table.row_count(); ++row) {
+                    if (row != 0)
+                        _out << ',';
+                    _out << '{';
+                    for (std::uint32_t column = 0; column < table.column_count(); ++column) {
+                        if (column != 0)
+                            _out << ',';
+                        write_string(table.column_name(column));
+                        _out << ':';
+                        write_table_cell(table, row, column);
+                    }
+                    _out << '}';
+                }
+                _out << ']';
+            }
+
+            void write_table_columns(json_db::table_view table)
+            {
+                _out << '[';
+                for (std::uint32_t column = 0; column < table.column_count(); ++column) {
+                    if (column != 0)
+                        _out << ',';
+                    write_string(table.column_name(column));
+                }
+                _out << ']';
+            }
+
+            void write_table_row_arrays(json_db::table_view table)
+            {
+                _out << '[';
+                for (std::uint32_t row = 0; row < table.row_count(); ++row) {
+                    if (row != 0)
+                        _out << ',';
+                    write_table_row_array(table, row);
+                }
+                _out << ']';
+            }
+
+            void write_table_row_array(json_db::table_view table, std::uint32_t row)
+            {
+                _out << '[';
+                for (std::uint32_t column = 0; column < table.column_count(); ++column) {
+                    if (column != 0)
+                        _out << ',';
+                    write_table_cell(table, row, column);
+                }
+                _out << ']';
+            }
+
+            void write_table_cell(json_db::table_view table, std::uint32_t row, std::uint32_t column)
+            {
+                switch (table.column_type(column)) {
+                case json_db::table_column_type::int64:
+                    write_variant(table.int64_column(column)[row]);
+                    break;
+                case json_db::table_column_type::uint64:
+                    write_variant(table.uint64_column(column)[row]);
+                    break;
+                case json_db::table_column_type::double_:
+                    write_variant(table.double_column(column)[row]);
+                    break;
+                case json_db::table_column_type::string:
+                    write_string(_db.string(table.string_column(column)[row]));
+                    break;
+                }
             }
 
             template<class T>
@@ -763,6 +1098,11 @@ namespace gb::yadro::container
                 _target.set_blob(path_span(), _source.blob(ref));
             }
 
+            void assign_variant(json_db::table_ref ref)
+            {
+                _target.set_table(path_span(), _source.table(ref));
+            }
+
             json_db& _target;
             const json_db& _source;
             json_merge_policy _policy;
@@ -815,12 +1155,12 @@ namespace gb::yadro::container
 
                 json_value = string_value | number_value | object | array | true_value | false_value | null_value;
 
-                auto document = ws & object & ws & _z
-                    | axe::r_fail([&](auto, auto failed, auto) { fail_at("Failed to parse JSON object", failed); });
+                auto document = ws & (object | array) & ws & _z
+                    | axe::r_fail([&](auto, auto failed, auto) { fail_at("Failed to parse JSON document", failed); });
 
                 auto result = axe::parse(document, _text.begin(), _text.end());
                 if (!result)
-                    fail_at("Failed to parse JSON object", result.position);
+                    fail_at("Failed to parse JSON document", result.position);
                 return std::move(_builder).finish();
             }
 

@@ -131,6 +131,323 @@ namespace gb::yadro::container
             }
         };
 
+        enum class table_column_type : std::uint8_t
+        {
+            int64,
+            uint64,
+            double_,
+            string
+        };
+
+        struct table_ref
+        {
+            std::uint32_t id{};
+            friend bool operator==(const table_ref&, const table_ref&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+            }
+        };
+
+        struct table_schema_column
+        {
+            string_view name;
+            table_column_type type{};
+        };
+
+        struct table_column
+        {
+            string_id name{};
+            table_column_type type{};
+            std::uint32_t array{};
+            friend bool operator==(const table_column&, const table_column&) = default;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.name),
+                    gb::yadro::archive::serialize_as<std::uint32_t>(self.type),
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.array));
+            }
+        };
+
+        struct table_record
+        {
+            std::uint32_t row_count = 0;
+            duplicate_data_pool<table_column>::array_id columns = duplicate_data_pool<table_column>::invalid_array;
+
+            template<class Ar>
+            void serialize(this auto&& self, Ar&& archive)
+            {
+                archive(
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.row_count),
+                    gb::yadro::archive::serialize_as<std::uint64_t>(self.columns));
+            }
+        };
+
+        struct table_cell
+        {
+            std::variant<std::int64_t, std::uint64_t, double, string_type> value;
+
+            table_cell(std::int64_t value) : value(value) {}
+            table_cell(std::uint64_t value) : value(value) {}
+            table_cell(double value) : value(value) {}
+            table_cell(float value) : value(static_cast<double>(value)) {}
+            table_cell(const CharT* value) : value(string_type{ value }) {}
+            table_cell(string_view value) : value(string_type{ value }) {}
+            table_cell(const string_type& value) : value(value) {}
+            table_cell(string_type&& value) : value(std::move(value)) {}
+
+            template<std::integral IntT>
+                requires(!std::same_as<std::remove_cv_t<IntT>, bool>
+                    && !std::same_as<std::remove_cv_t<IntT>, std::int64_t>
+                    && !std::same_as<std::remove_cv_t<IntT>, std::uint64_t>)
+            table_cell(IntT value)
+                : value([&] {
+                    if constexpr (std::is_signed_v<IntT>)
+                        return std::variant<std::int64_t, std::uint64_t, double, string_type>{ static_cast<std::int64_t>(value) };
+                    else
+                        return std::variant<std::int64_t, std::uint64_t, double, string_type>{ static_cast<std::uint64_t>(value) };
+                    }())
+            {}
+        };
+
+        class table_builder
+        {
+            friend class basic_gbdb;
+
+        public:
+            table_builder() = default;
+
+            explicit table_builder(std::span<const table_schema_column> schema)
+            {
+                _columns.reserve(schema.size());
+                for (auto column : schema) {
+                    column_data data;
+                    data.name = string_type{ column.name };
+                    data.type = column.type;
+                    switch (column.type) {
+                    case table_column_type::int64: data.values = std::vector<std::int64_t>{}; break;
+                    case table_column_type::uint64: data.values = std::vector<std::uint64_t>{}; break;
+                    case table_column_type::double_: data.values = std::vector<double>{}; break;
+                    case table_column_type::string: data.values = std::vector<string_type>{}; break;
+                    }
+                    _columns.push_back(std::move(data));
+                }
+            }
+
+            void append_row(std::initializer_list<table_cell> values)
+            {
+                if (values.size() != _columns.size())
+                    throw std::logic_error("gbdb table row has wrong column count");
+
+                std::size_t index = 0;
+                for (const auto& value : values)
+                    append_cell(_columns[index++], value);
+                ++_row_count;
+            }
+
+            void append_row(std::span<const table_cell> values)
+            {
+                if (values.size() != _columns.size())
+                    throw std::logic_error("gbdb table row has wrong column count");
+
+                for (std::size_t i = 0; i < values.size(); ++i)
+                    append_cell(_columns[i], values[i]);
+                ++_row_count;
+            }
+
+            [[nodiscard]] std::uint32_t row_count() const noexcept
+            {
+                return _row_count;
+            }
+
+            [[nodiscard]] std::uint32_t column_count() const noexcept
+            {
+                return static_cast<std::uint32_t>(_columns.size());
+            }
+
+        private:
+            struct column_data
+            {
+                string_type name;
+                table_column_type type{};
+                std::variant<
+                    std::vector<std::int64_t>,
+                    std::vector<std::uint64_t>,
+                    std::vector<double>,
+                    std::vector<string_type>> values;
+            };
+
+            static void append_cell(column_data& column, const table_cell& cell)
+            {
+                switch (column.type) {
+                case table_column_type::int64:
+                    std::get<std::vector<std::int64_t>>(column.values).push_back(as_int64(cell));
+                    break;
+                case table_column_type::uint64:
+                    std::get<std::vector<std::uint64_t>>(column.values).push_back(as_uint64(cell));
+                    break;
+                case table_column_type::double_:
+                    std::get<std::vector<double>>(column.values).push_back(as_double(cell));
+                    break;
+                case table_column_type::string:
+                    std::get<std::vector<string_type>>(column.values).push_back(as_string(cell));
+                    break;
+                }
+            }
+
+            static std::int64_t as_int64(const table_cell& cell)
+            {
+                return std::visit([](const auto& value) -> std::int64_t {
+                    using cell_type = std::remove_cvref_t<decltype(value)>;
+                    if constexpr (std::same_as<cell_type, std::int64_t>)
+                        return value;
+                    else if constexpr (std::same_as<cell_type, std::uint64_t>) {
+                        if (value > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+                            throw std::out_of_range("gbdb table uint64 cell does not fit int64 column");
+                        return static_cast<std::int64_t>(value);
+                    }
+                    else
+                        throw std::logic_error("gbdb table cell type does not match int64 column");
+                }, cell.value);
+            }
+
+            static std::uint64_t as_uint64(const table_cell& cell)
+            {
+                return std::visit([](const auto& value) -> std::uint64_t {
+                    using cell_type = std::remove_cvref_t<decltype(value)>;
+                    if constexpr (std::same_as<cell_type, std::uint64_t>)
+                        return value;
+                    else if constexpr (std::same_as<cell_type, std::int64_t>) {
+                        if (value < 0)
+                            throw std::out_of_range("gbdb table negative int64 cell does not fit uint64 column");
+                        return static_cast<std::uint64_t>(value);
+                    }
+                    else
+                        throw std::logic_error("gbdb table cell type does not match uint64 column");
+                }, cell.value);
+            }
+
+            static double as_double(const table_cell& cell)
+            {
+                return std::visit([](const auto& value) -> double {
+                    using cell_type = std::remove_cvref_t<decltype(value)>;
+                    if constexpr (std::same_as<cell_type, double>
+                        || std::same_as<cell_type, std::int64_t>
+                        || std::same_as<cell_type, std::uint64_t>)
+                        return static_cast<double>(value);
+                    else
+                        throw std::logic_error("gbdb table cell type does not match double column");
+                }, cell.value);
+            }
+
+            static string_type as_string(const table_cell& cell)
+            {
+                return std::visit([](const auto& value) -> string_type {
+                    using cell_type = std::remove_cvref_t<decltype(value)>;
+                    if constexpr (std::same_as<cell_type, string_type>)
+                        return value;
+                    else
+                        throw std::logic_error("gbdb table cell type does not match string column");
+                }, cell.value);
+            }
+
+            std::vector<column_data> _columns;
+            std::uint32_t _row_count = 0;
+        };
+
+        class table_view
+        {
+            friend class basic_gbdb;
+
+        public:
+            [[nodiscard]] std::uint32_t row_count() const noexcept
+            {
+                return _record->row_count;
+            }
+
+            [[nodiscard]] std::uint32_t column_count() const noexcept
+            {
+                return static_cast<std::uint32_t>(_db->_table_columns.size(_record->columns));
+            }
+
+            [[nodiscard]] string_view column_name(std::uint32_t column) const
+            {
+                return _db->string(metadata(column).name);
+            }
+
+            [[nodiscard]] table_column_type column_type(std::uint32_t column) const
+            {
+                return metadata(column).type;
+            }
+
+            [[nodiscard]] std::span<const std::int64_t> int64_column(std::uint32_t column) const
+            {
+                auto& meta = require_column(column, table_column_type::int64);
+                return _db->_int_arrays.span(meta.array);
+            }
+
+            [[nodiscard]] std::span<const std::uint64_t> uint64_column(std::uint32_t column) const
+            {
+                auto& meta = require_column(column, table_column_type::uint64);
+                return _db->_uint_arrays.span(meta.array);
+            }
+
+            [[nodiscard]] std::span<const double> double_column(std::uint32_t column) const
+            {
+                auto& meta = require_column(column, table_column_type::double_);
+                return _db->_double_arrays.span(meta.array);
+            }
+
+            [[nodiscard]] std::span<const string_id> string_column(std::uint32_t column) const
+            {
+                auto& meta = require_column(column, table_column_type::string);
+                return _db->_string_arrays.span(meta.array);
+            }
+
+            [[nodiscard]] table_cell cell(std::uint32_t row, std::uint32_t column) const
+            {
+                if (row >= row_count())
+                    throw std::out_of_range("gbdb table row is out of range");
+
+                switch (column_type(column)) {
+                case table_column_type::int64: return table_cell{ int64_column(column)[row] };
+                case table_column_type::uint64: return table_cell{ uint64_column(column)[row] };
+                case table_column_type::double_: return table_cell{ double_column(column)[row] };
+                case table_column_type::string: return table_cell{ _db->string(string_column(column)[row]) };
+                }
+                throw std::logic_error("gbdb table column has invalid type");
+            }
+
+        private:
+            table_view(const basic_gbdb& db, const table_record& record)
+                : _db(std::addressof(db)), _record(std::addressof(record))
+            {}
+
+            [[nodiscard]] const table_column& metadata(std::uint32_t column) const
+            {
+                auto columns = _db->_table_columns.span(_record->columns);
+                if (column >= columns.size())
+                    throw std::out_of_range("gbdb table column is out of range");
+                return columns[column];
+            }
+
+            [[nodiscard]] const table_column& require_column(std::uint32_t column, table_column_type type) const
+            {
+                auto& meta = metadata(column);
+                if (meta.type != type)
+                    throw std::logic_error("gbdb table column type mismatch");
+                return meta;
+            }
+
+            const basic_gbdb* _db = nullptr;
+            const table_record* _record = nullptr;
+        };
+
         using value_type = std::variant<
             std::monostate,
             bool,
@@ -142,7 +459,8 @@ namespace gb::yadro::container
             uint_array_ref,
             double_array_ref,
             string_array_ref,
-            blob_ref>;
+            blob_ref,
+            table_ref>;
 
         struct node_payload
         {
@@ -399,6 +717,88 @@ namespace gb::yadro::container
             return set(path, value_type{ blob_ref{ _blobs.insert(values) } });
         }
 
+        [[nodiscard]] table_builder make_table(std::span<const table_schema_column> schema) const
+        {
+            return table_builder{ schema };
+        }
+
+        node_id set_table(path_view path, table_builder&& table)
+        {
+            return set_table(path_span{ path.begin(), path.size() }, std::move(table));
+        }
+
+        node_id set_table(path_span path, table_builder&& table)
+        {
+            std::vector<table_column> columns;
+            columns.reserve(table._columns.size());
+
+            for (auto& column : table._columns) {
+                table_column meta;
+                meta.name = intern(column.name);
+                meta.type = column.type;
+
+                switch (column.type) {
+                case table_column_type::int64:
+                    meta.array = _int_arrays.insert(std::get<std::vector<std::int64_t>>(column.values));
+                    break;
+                case table_column_type::uint64:
+                    meta.array = _uint_arrays.insert(std::get<std::vector<std::uint64_t>>(column.values));
+                    break;
+                case table_column_type::double_:
+                    meta.array = _double_arrays.insert(std::get<std::vector<double>>(column.values));
+                    break;
+                case table_column_type::string: {
+                    std::vector<string_id> ids;
+                    auto& values = std::get<std::vector<string_type>>(column.values);
+                    ids.reserve(values.size());
+                    for (auto& value : values)
+                        ids.push_back(intern(value));
+                    meta.array = _string_arrays.insert(ids);
+                    break;
+                }
+                }
+                columns.push_back(meta);
+            }
+
+            auto columns_id = _table_columns.insert(columns);
+            if (_tables.size() == (std::numeric_limits<std::uint32_t>::max)())
+                throw std::length_error("gbdb table_id capacity exceeded");
+            auto table_id = static_cast<std::uint32_t>(_tables.size());
+            _tables.push_back(table_record{ .row_count = table._row_count, .columns = columns_id });
+            return set(path, value_type{ table_ref{ table_id } });
+        }
+
+        node_id set_table(path_view path, table_view table)
+        {
+            return set_table(path_span{ path.begin(), path.size() }, table);
+        }
+
+        node_id set_table(path_span path, table_view table)
+        {
+            std::vector<table_schema_column> schema;
+            schema.reserve(table.column_count());
+            for (std::uint32_t column = 0; column < table.column_count(); ++column)
+                schema.push_back(table_schema_column{ table.column_name(column), table.column_type(column) });
+
+            auto builder = make_table(schema);
+            std::vector<table_cell> row;
+            row.reserve(table.column_count());
+            for (std::uint32_t r = 0; r < table.row_count(); ++r) {
+                row.clear();
+                for (std::uint32_t c = 0; c < table.column_count(); ++c)
+                    row.push_back(table.cell(r, c));
+                builder.append_row(row);
+            }
+            return set_table(path, std::move(builder));
+        }
+
+        [[nodiscard]] table_view table(table_ref ref) const
+        {
+            if (ref.id >= _tables.size())
+                throw std::out_of_range("gbdb table_ref is out of range");
+            return table_view{ *this, _tables[ref.id] };
+        }
+
         [[nodiscard]] string_view string(string_id id) const
         {
             return _strings.view(id);
@@ -457,6 +857,8 @@ namespace gb::yadro::container
                 self.load_array_pool(archive, self._double_arrays);
                 self.load_array_pool(archive, self._string_arrays);
                 self.load_array_pool(archive, self._blobs);
+                self.load_array_pool(archive, self._table_columns);
+                archive(self._tables);
                 archive(self._tree);
                 self.rebuild_indexes();
             }
@@ -467,6 +869,8 @@ namespace gb::yadro::container
                 self.save_array_pool(archive, self._double_arrays);
                 self.save_array_pool(archive, self._string_arrays);
                 self.save_array_pool(archive, self._blobs);
+                self.save_array_pool(archive, self._table_columns);
+                archive(self._tables);
                 archive(self._tree);
             }
         }
@@ -538,6 +942,8 @@ namespace gb::yadro::container
             _double_arrays = unique_data_pool<double>{};
             _string_arrays = unique_data_pool<string_id>{};
             _blobs = duplicate_data_pool<std::byte>{};
+            _table_columns = duplicate_data_pool<table_column>{};
+            _tables.clear();
             _tree = tree_type(node_payload{});
             _child_index.clear();
             _node_count = 1;
@@ -628,6 +1034,8 @@ namespace gb::yadro::container
         unique_data_pool<double> _double_arrays;
         unique_data_pool<string_id> _string_arrays;
         duplicate_data_pool<std::byte> _blobs;
+        duplicate_data_pool<table_column> _table_columns;
+        std::vector<table_record> _tables;
         tree_type _tree;
         std::unordered_map<child_key, node_id, child_key_hash> _child_index;
         node_id _node_count = 1;
