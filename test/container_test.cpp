@@ -38,6 +38,8 @@
 #include <vector>
 #include <iostream>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <random>
 #include <thread>
 #include <barrier>
@@ -115,6 +117,12 @@ namespace
             archive(self.id, self.scale, self.symbol);
         }
     };
+
+    inline void reset_test_directory(const std::filesystem::path& path)
+    {
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
 
     GB_TEST(container, static_string_test)
     {
@@ -1502,6 +1510,67 @@ namespace
             read_options.blob_mode = json_blob_mode::tagged_base64;
             must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json(text, read_options); });
         }
+    }
+
+    GB_TEST(container, gbdb_json_external_object_blob_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_external_blob_test";
+        reset_test_directory(export_dir);
+
+        json_db db;
+        gbdb_serializable_config config{ .id = 314, .scale = 2.5, .symbol = std::string(256, 'X') };
+        auto node = db.set_object({ "assets", "payload" }, config, "heavy_asset", 3);
+
+        json_write_options write_options;
+        write_options.pretty = false;
+        write_options.sort_keys = true;
+        write_options.blob_write_mode = json_blob_write_mode::auto_;
+        write_options.external_blobs.inline_threshold_bytes = 8;
+
+        auto json_file = export_dir / "database.json";
+        write_json_file(db, json_file, write_options);
+
+        std::ifstream json_in(json_file, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(json_in)), {});
+        json_in.close();
+
+        auto blob_uri = std::string{ "./blobs/node_" } + std::to_string(node) + "_payload.bin";
+        auto blob_file = export_dir / "blobs" / ("node_" + std::to_string(node) + "_payload.bin");
+        auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
+        auto bytes = db.serialized_object(ref);
+        auto md5 = gb::yadro::util::md5string(bytes);
+
+        gbassert(text.find(R"("encoding":"external")") != std::string::npos);
+        gbassert(text.find(R"("blob_uri":")" + blob_uri + R"(")") != std::string::npos);
+        gbassert(text.find(R"("blob_size_bytes":)" + std::to_string(bytes.size())) != std::string::npos);
+        gbassert(text.find(R"("blob_md5":")" + md5 + R"(")") != std::string::npos);
+        gbassert(text.find(R"("data":)") == std::string::npos);
+        gbassert(std::filesystem::exists(blob_file));
+        gbassert(std::filesystem::file_size(blob_file) == bytes.size());
+
+        json_read_options read_options;
+        read_options.blob_mode = json_blob_mode::tagged_base64;
+
+        if constexpr (gbdb_json_axe_enabled) {
+            auto restored_db = read_json_file(json_file, read_options);
+            auto restored_ref = std::get<json_db::object_ref>(*restored_db.get({ "assets", "payload" }));
+            gbassert(restored_db.object<gbdb_serializable_config>(restored_ref) == config);
+            gbassert(restored_db.object_type(restored_ref).value() == "heavy_asset");
+            gbassert(restored_db.object_version(restored_ref).value() == 3);
+
+            {
+                std::ofstream corrupt(blob_file, std::ios::binary | std::ios::app);
+                char value = '\0';
+                corrupt.write(&value, 1);
+            }
+
+            must_throw<std::runtime_error>([&] { [[maybe_unused]] auto corrupted = read_json_file(json_file, read_options); });
+        }
+        else {
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json_file(json_file, read_options); });
+        }
+
+        std::filesystem::remove_all(export_dir);
     }
 
     GB_TEST(container, gbdb_json_reader_is_opt_in_test)
