@@ -704,6 +704,12 @@ namespace gb::yadro::container
             return find(path_span{ path.begin(), path.size() });
         }
 
+        [[nodiscard]] node_id find(string_view path) const
+        {
+            auto parts = split_slash_path(path);
+            return find(path_span{ parts });
+        }
+
         [[nodiscard]] node_id find(path_span path) const
         {
             node_id parent = root_node;
@@ -726,6 +732,12 @@ namespace gb::yadro::container
             return contains(path_span{ path.begin(), path.size() });
         }
 
+        [[nodiscard]] bool contains(string_view path) const
+        {
+            auto parts = split_slash_path(path);
+            return contains(path_span{ parts });
+        }
+
         [[nodiscard]] bool contains(path_span path) const
         {
             return find(path) != invalid_node;
@@ -734,6 +746,12 @@ namespace gb::yadro::container
         [[nodiscard]] const value_type* get(path_view path) const
         {
             return get(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] const value_type* get(string_view path) const
+        {
+            auto parts = split_slash_path(path);
+            return get(path_span{ parts });
         }
 
         [[nodiscard]] const value_type* get(path_span path) const
@@ -747,6 +765,12 @@ namespace gb::yadro::container
             return get(path_span{ path.begin(), path.size() });
         }
 
+        [[nodiscard]] value_type* get(string_view path)
+        {
+            auto parts = split_slash_path(path);
+            return get(path_span{ parts });
+        }
+
         [[nodiscard]] value_type* get(path_span path)
         {
             auto node = find(path);
@@ -756,6 +780,12 @@ namespace gb::yadro::container
         node_id set(path_view path, value_type value)
         {
             return set(path_span{ path.begin(), path.size() }, std::move(value));
+        }
+
+        node_id set(string_view path, value_type value)
+        {
+            auto parts = split_slash_path(path);
+            return set(path_span{ parts }, std::move(value));
         }
 
         node_id set(path_span path, value_type value)
@@ -776,12 +806,22 @@ namespace gb::yadro::container
             return set(path, value_type{ std::monostate{} });
         }
 
+        node_id set(string_view path, std::nullptr_t)
+        {
+            return set(path, value_type{ std::monostate{} });
+        }
+
         node_id set(path_span path, std::nullptr_t)
         {
             return set(path, value_type{ std::monostate{} });
         }
 
         node_id set(path_view path, bool value)
+        {
+            return set(path, value_type{ value });
+        }
+
+        node_id set(string_view path, bool value)
         {
             return set(path, value_type{ value });
         }
@@ -794,6 +834,16 @@ namespace gb::yadro::container
         template<std::integral IntT>
             requires(!std::same_as<std::remove_cv_t<IntT>, bool>)
         node_id set(path_view path, IntT value)
+        {
+            if constexpr (std::is_signed_v<IntT>)
+                return set(path, value_type{ static_cast<std::int64_t>(value) });
+            else
+                return set(path, value_type{ static_cast<std::uint64_t>(value) });
+        }
+
+        template<std::integral IntT>
+            requires(!std::same_as<std::remove_cv_t<IntT>, bool>)
+        node_id set(string_view path, IntT value)
         {
             if constexpr (std::is_signed_v<IntT>)
                 return set(path, value_type{ static_cast<std::int64_t>(value) });
@@ -816,12 +866,22 @@ namespace gb::yadro::container
             return set(path, static_cast<double>(value));
         }
 
+        node_id set(string_view path, float value)
+        {
+            return set(path, static_cast<double>(value));
+        }
+
         node_id set(path_span path, float value)
         {
             return set(path, static_cast<double>(value));
         }
 
         node_id set(path_view path, double value)
+        {
+            return set(path, value_type{ value });
+        }
+
+        node_id set(string_view path, double value)
         {
             return set(path, value_type{ value });
         }
@@ -836,12 +896,22 @@ namespace gb::yadro::container
             return set(path, string_view{ value });
         }
 
+        node_id set(string_view path, const CharT* value)
+        {
+            return set(path, string_view{ value });
+        }
+
         node_id set(path_span path, const CharT* value)
         {
             return set(path, string_view{ value });
         }
 
         node_id set(path_view path, string_view value)
+        {
+            return set(path, value_type{ string_ref{ intern(value) } });
+        }
+
+        node_id set(string_view path, string_view value)
         {
             return set(path, value_type{ string_ref{ intern(value) } });
         }
@@ -856,6 +926,11 @@ namespace gb::yadro::container
             return set(path, string_view{ value });
         }
 
+        node_id set(string_view path, const string_type& value)
+        {
+            return set(path, string_view{ value });
+        }
+
         node_id set(path_span path, const string_type& value)
         {
             return set(path, string_view{ value });
@@ -864,6 +939,12 @@ namespace gb::yadro::container
         node_id set_array(path_view path, std::span<const std::int64_t> values)
         {
             return set_array(path_span{ path.begin(), path.size() }, values);
+        }
+
+        node_id set_array(string_view path, std::span<const std::int64_t> values)
+        {
+            auto parts = split_slash_path(path);
+            return set_array(path_span{ parts }, values);
         }
 
         node_id set_array(path_span path, std::span<const std::int64_t> values)
@@ -876,6 +957,12 @@ namespace gb::yadro::container
             return set_array(path_span{ path.begin(), path.size() }, values);
         }
 
+        node_id set_array(string_view path, std::span<const std::uint64_t> values)
+        {
+            auto parts = split_slash_path(path);
+            return set_array(path_span{ parts }, values);
+        }
+
         node_id set_array(path_span path, std::span<const std::uint64_t> values)
         {
             return set(path, value_type{ uint_array_ref{ _uint_arrays.insert(values) } });
@@ -886,6 +973,12 @@ namespace gb::yadro::container
             return set_array(path_span{ path.begin(), path.size() }, values);
         }
 
+        node_id set_array(string_view path, std::span<const double> values)
+        {
+            auto parts = split_slash_path(path);
+            return set_array(path_span{ parts }, values);
+        }
+
         node_id set_array(path_span path, std::span<const double> values)
         {
             return set(path, value_type{ double_array_ref{ _double_arrays.insert(values) } });
@@ -894,6 +987,18 @@ namespace gb::yadro::container
         node_id set_string_array(path_view path, std::initializer_list<string_view> values)
         {
             return set_string_array(path_span{ path.begin(), path.size() }, std::span<const string_view>{ values.begin(), values.size() });
+        }
+
+        node_id set_string_array(string_view path, std::initializer_list<string_view> values)
+        {
+            auto parts = split_slash_path(path);
+            return set_string_array(path_span{ parts }, std::span<const string_view>{ values.begin(), values.size() });
+        }
+
+        node_id set_string_array(string_view path, std::span<const string_view> values)
+        {
+            auto parts = split_slash_path(path);
+            return set_string_array(path_span{ parts }, values);
         }
 
         node_id set_string_array(path_span path, std::span<const string_view> values)
@@ -911,6 +1016,12 @@ namespace gb::yadro::container
             return set_blob(path_span{ path.begin(), path.size() }, values);
         }
 
+        node_id set_blob(string_view path, std::span<const std::byte> values)
+        {
+            auto parts = split_slash_path(path);
+            return set_blob(path_span{ parts }, values);
+        }
+
         node_id set_blob(path_span path, std::span<const std::byte> values)
         {
             return set(path, value_type{ blob_ref{ _blobs.insert(values) } });
@@ -919,6 +1030,12 @@ namespace gb::yadro::container
         node_id set_serialized_object(path_view path, std::span<const std::byte> values, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
         {
             return set_serialized_object(path_span{ path.begin(), path.size() }, values, type, version);
+        }
+
+        node_id set_serialized_object(string_view path, std::span<const std::byte> values, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            auto parts = split_slash_path(path);
+            return set_serialized_object(path_span{ parts }, values, type, version);
         }
 
         node_id set_serialized_object(path_span path, std::span<const std::byte> values, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
@@ -948,6 +1065,13 @@ namespace gb::yadro::container
             string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
         {
             return set_deferred_serialized_object(path_span{ path.begin(), path.size() }, blob_uri, blob_size_bytes, blob_md5, type, version);
+        }
+
+        node_id set_deferred_serialized_object(string_view path, string_view blob_uri, std::uint64_t blob_size_bytes, string_view blob_md5,
+            string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            auto parts = split_slash_path(path);
+            return set_deferred_serialized_object(path_span{ parts }, blob_uri, blob_size_bytes, blob_md5, type, version);
         }
 
         node_id set_deferred_serialized_object(path_span path, string_view blob_uri, std::uint64_t blob_size_bytes, string_view blob_md5,
@@ -989,6 +1113,13 @@ namespace gb::yadro::container
         }
 
         template<class T>
+        node_id set_object(string_view path, const T& value, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
+        {
+            auto parts = split_slash_path(path);
+            return set_object(path_span{ parts }, value, type, version);
+        }
+
+        template<class T>
         node_id set_object(path_span path, const T& value, string_view type = {}, std::optional<std::uint32_t> version = std::nullopt)
         {
             gb::yadro::archive::omem_archive<> out;
@@ -1005,6 +1136,12 @@ namespace gb::yadro::container
         node_id set_table(path_view path, table_builder&& table)
         {
             return set_table(path_span{ path.begin(), path.size() }, std::move(table));
+        }
+
+        node_id set_table(string_view path, table_builder&& table)
+        {
+            auto parts = split_slash_path(path);
+            return set_table(path_span{ parts }, std::move(table));
         }
 
         node_id set_table(path_span path, table_builder&& table)
@@ -1051,6 +1188,12 @@ namespace gb::yadro::container
         node_id set_table(path_view path, table_view table)
         {
             return set_table(path_span{ path.begin(), path.size() }, table);
+        }
+
+        node_id set_table(string_view path, table_view table)
+        {
+            auto parts = split_slash_path(path);
+            return set_table(path_span{ parts }, table);
         }
 
         node_id set_table(path_span path, table_view table)
@@ -1672,6 +1815,32 @@ namespace gb::yadro::container
         {
             auto found = _string_lookup.find(string_type{ value });
             return found == _string_lookup.end() ? invalid_string : found->second;
+        }
+
+        [[nodiscard]] static std::vector<string_view> split_slash_path(string_view path)
+        {
+            std::vector<string_view> parts;
+            if (path.empty())
+                return parts;
+
+            std::size_t begin = 0;
+            while (begin < path.size()) {
+                auto end = path.find(CharT{ '/' }, begin);
+                if (end == begin)
+                    throw std::invalid_argument("gbdb slash path contains an empty component");
+
+                if (end == string_view::npos) {
+                    parts.push_back(path.substr(begin));
+                    return parts;
+                }
+
+                parts.push_back(path.substr(begin, end - begin));
+                begin = end + 1;
+                if (begin == path.size())
+                    throw std::invalid_argument("gbdb slash path contains an empty component");
+            }
+
+            return parts;
         }
 
         string_id intern(string_view value)

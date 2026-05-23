@@ -1160,6 +1160,80 @@ namespace
         gbassert(db.get({ "config", "missing" }) == nullptr);
     }
 
+    GB_TEST(container, gbdb_slash_path_scalar_lookup_test)
+    {
+        json_db db;
+
+        auto symbol = db.set("market/symbol", "AAPL");
+        db.set("market/price", 193.25);
+        db.set("market/active", true);
+        db.set("market/empty", nullptr);
+
+        gbassert(symbol != json_db::invalid_node);
+        gbassert(db.contains("market/symbol"));
+        gbassert(db.find("market/symbol") == symbol);
+        gbassert(db.get("market/missing") == nullptr);
+        gbassert(db.find("") == json_db::root_node);
+
+        auto symbol_ref = std::get<json_db::string_ref>(*db.get("market/symbol"));
+        gbassert(db.string(symbol_ref) == "AAPL");
+        gbassert(std::get<double>(*db.get("market/price")) == 193.25);
+        gbassert(std::get<bool>(*db.get("market/active")));
+        gbassert(std::holds_alternative<std::monostate>(*db.get("market/empty")));
+
+        db.set({ "market/a", "symbol" }, "literal-slash-key");
+        gbassert(db.contains({ "market/a", "symbol" }));
+        gbassert(!db.contains("market/a/symbol"));
+    }
+
+    GB_TEST(container, gbdb_slash_path_payload_apis_test)
+    {
+        json_db db;
+        std::array<std::int64_t, 3> prices{ 190, 191, 193 };
+        std::array<std::uint64_t, 2> volumes{ 1000, 2000 };
+        std::array<double, 2> rates{ 1.5, 2.5 };
+        std::array blob{ std::byte{ 1 }, std::byte{ 2 } };
+        gbdb_serializable_config config{ .id = 7, .scale = 3.5, .symbol = "AAPL" };
+
+        db.set_array("market/history", std::span{ prices });
+        db.set_array("market/volumes", std::span{ volumes });
+        db.set_array("market/rates", std::span{ rates });
+        db.set_string_array("market/venues", { "nasdaq", "arca" });
+        db.set_blob("market/raw", std::span{ blob });
+        db.set_object("market/config", config, "gbdb_serializable_config", 2);
+
+        auto builder = db.make_table(std::array{
+            json_db::table_schema_column{ "date", json_db::table_column_type::string },
+            json_db::table_schema_column{ "close", json_db::table_column_type::double_ }
+        });
+        builder.append_row({ "2026-05-20", 154.20 });
+        db.set_table("market/table", std::move(builder));
+
+        auto prices_ref = std::get<json_db::int_array_ref>(*db.get("market/history"));
+        gbassert(db.array(prices_ref)[2] == 193);
+        auto volumes_ref = std::get<json_db::uint_array_ref>(*db.get("market/volumes"));
+        gbassert(db.array(volumes_ref)[1] == 2000);
+        auto rates_ref = std::get<json_db::double_array_ref>(*db.get("market/rates"));
+        gbassert(db.array(rates_ref)[0] == 1.5);
+        auto venues_ref = std::get<json_db::string_array_ref>(*db.get("market/venues"));
+        gbassert(db.string(db.array(venues_ref)[1]) == "arca");
+        auto blob_ref = std::get<json_db::blob_ref>(*db.get("market/raw"));
+        gbassert(db.blob(blob_ref)[0] == std::byte{ 1 });
+        auto object_ref = std::get<json_db::object_ref>(*db.get("market/config"));
+        gbassert(db.object<gbdb_serializable_config>(object_ref) == config);
+        auto table_ref = std::get<json_db::table_ref>(*db.get("market/table"));
+        gbassert(db.table(table_ref).cell(0, 1).value == json_db::table_cell{ 154.20 }.value);
+    }
+
+    GB_TEST(container, gbdb_slash_path_rejects_empty_components_test)
+    {
+        json_db db;
+
+        must_throw<std::invalid_argument>([&] { db.set("/market", true); });
+        must_throw<std::invalid_argument>([&] { db.set("market/", true); });
+        must_throw<std::invalid_argument>([&] { db.set("market//symbol", true); });
+    }
+
     GB_TEST(container, gbdb_serialization_test)
     {
         json_db db;
