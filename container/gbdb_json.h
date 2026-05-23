@@ -106,6 +106,13 @@ namespace gb::yadro::container
         export_blob_directory_only
     };
 
+    enum class json_defaults_conflict_policy
+    {
+        file_manifest_wins,
+        user_defaults_win,
+        fail_on_conflict
+    };
+
     struct json_external_blob_export_result
     {
         std::uint32_t copied_blob_count = 0;
@@ -133,6 +140,8 @@ namespace gb::yadro::container
         std::filesystem::path external_blob_base_directory;
         json_db::blob_load_policy external_blob_load_policy = json_db::blob_load_policy::immediate;
         std::string root_array_key = "data";
+        bool ignore_manifest = true;
+        std::string manifest_key = "$gbdb_manifest";
     };
 
     struct json_write_options
@@ -144,6 +153,19 @@ namespace gb::yadro::container
         json_table_write_format table_format = json_table_write_format::columns_data;
         json_blob_write_mode blob_write_mode = json_blob_write_mode::auto_;
         json_external_blob_options external_blobs;
+        bool include_manifest = false;
+        std::string manifest_key = "$gbdb_manifest";
+    };
+
+    struct json_db_defaults
+    {
+        json_db_defaults() = default;
+        explicit json_db_defaults(std::istream& in);
+
+        std::uint32_t schema_version = 1;
+        json_read_options read;
+        json_write_options write;
+        json_defaults_conflict_policy conflict_policy = json_defaults_conflict_policy::file_manifest_wins;
     };
 
     enum class json_merge_policy
@@ -154,6 +176,172 @@ namespace gb::yadro::container
 
     namespace detail
     {
+        [[nodiscard]] inline std::string read_stream(std::istream& in)
+        {
+            std::ostringstream buffer;
+            buffer << in.rdbuf();
+            if (!in && !in.eof())
+                throw std::runtime_error("Failed to read JSON stream");
+            return std::move(buffer).str();
+        }
+
+        inline void write_stream(std::ostream& out, std::string_view text)
+        {
+            out.write(text.data(), static_cast<std::streamsize>(text.size()));
+            if (!out)
+                throw std::runtime_error("Failed to write JSON stream");
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_table_mode value) noexcept
+        {
+            switch (value) {
+            case json_table_mode::reject: return "reject";
+            case json_table_mode::infer_tables: return "infer_tables";
+            }
+            return "reject";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_table_write_format value) noexcept
+        {
+            switch (value) {
+            case json_table_write_format::columns_data: return "columns_data";
+            case json_table_write_format::object_rows: return "object_rows";
+            }
+            return "columns_data";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_blob_mode value) noexcept
+        {
+            switch (value) {
+            case json_blob_mode::reject: return "reject";
+            case json_blob_mode::tagged_base64: return "tagged_base64";
+            }
+            return "reject";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_blob_write_mode value) noexcept
+        {
+            switch (value) {
+            case json_blob_write_mode::inline_base64: return "inline_base64";
+            case json_blob_write_mode::external_files: return "external_files";
+            case json_blob_write_mode::auto_: return "auto";
+            }
+            return "auto";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_db::blob_load_policy value) noexcept
+        {
+            switch (value) {
+            case json_db::blob_load_policy::immediate: return "immediate";
+            case json_db::blob_load_policy::deferred: return "deferred";
+            }
+            return "immediate";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_external_blob_relocation value) noexcept
+        {
+            switch (value) {
+            case json_external_blob_relocation::preserve_uri: return "preserve_uri";
+            case json_external_blob_relocation::copy_to_export_directory: return "copy_to_export_directory";
+            }
+            return "preserve_uri";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_external_blob_gc_scope value) noexcept
+        {
+            switch (value) {
+            case json_external_blob_gc_scope::none: return "none";
+            case json_external_blob_gc_scope::export_blob_directory_only: return "export_blob_directory_only";
+            }
+            return "none";
+        }
+
+        [[nodiscard]] constexpr std::string_view to_string(json_defaults_conflict_policy value) noexcept
+        {
+            switch (value) {
+            case json_defaults_conflict_policy::file_manifest_wins: return "file_manifest_wins";
+            case json_defaults_conflict_policy::user_defaults_win: return "user_defaults_win";
+            case json_defaults_conflict_policy::fail_on_conflict: return "fail_on_conflict";
+            }
+            return "file_manifest_wins";
+        }
+
+        [[nodiscard]] inline json_table_mode parse_json_table_mode(std::string_view value)
+        {
+            if (value == "reject")
+                return json_table_mode::reject;
+            if (value == "infer_tables")
+                return json_table_mode::infer_tables;
+            throw std::logic_error("Unknown json_table_mode value");
+        }
+
+        [[nodiscard]] inline json_table_write_format parse_json_table_write_format(std::string_view value)
+        {
+            if (value == "columns_data")
+                return json_table_write_format::columns_data;
+            if (value == "object_rows")
+                return json_table_write_format::object_rows;
+            throw std::logic_error("Unknown json_table_write_format value");
+        }
+
+        [[nodiscard]] inline json_blob_mode parse_json_blob_mode(std::string_view value)
+        {
+            if (value == "reject")
+                return json_blob_mode::reject;
+            if (value == "tagged_base64")
+                return json_blob_mode::tagged_base64;
+            throw std::logic_error("Unknown json_blob_mode value");
+        }
+
+        [[nodiscard]] inline json_blob_write_mode parse_json_blob_write_mode(std::string_view value)
+        {
+            if (value == "inline_base64")
+                return json_blob_write_mode::inline_base64;
+            if (value == "external_files")
+                return json_blob_write_mode::external_files;
+            if (value == "auto")
+                return json_blob_write_mode::auto_;
+            throw std::logic_error("Unknown json_blob_write_mode value");
+        }
+
+        [[nodiscard]] inline json_db::blob_load_policy parse_blob_load_policy(std::string_view value)
+        {
+            if (value == "immediate")
+                return json_db::blob_load_policy::immediate;
+            if (value == "deferred")
+                return json_db::blob_load_policy::deferred;
+            throw std::logic_error("Unknown json blob load policy value");
+        }
+
+        [[nodiscard]] inline json_external_blob_relocation parse_json_external_blob_relocation(std::string_view value)
+        {
+            if (value == "preserve_uri")
+                return json_external_blob_relocation::preserve_uri;
+            if (value == "copy_to_export_directory")
+                return json_external_blob_relocation::copy_to_export_directory;
+            throw std::logic_error("Unknown json_external_blob_relocation value");
+        }
+
+        [[nodiscard]] inline json_external_blob_gc_scope parse_json_external_blob_gc_scope(std::string_view value)
+        {
+            if (value == "none")
+                return json_external_blob_gc_scope::none;
+            if (value == "export_blob_directory_only")
+                return json_external_blob_gc_scope::export_blob_directory_only;
+            throw std::logic_error("Unknown json_external_blob_gc_scope value");
+        }
+
+        [[nodiscard]] inline json_defaults_conflict_policy parse_json_defaults_conflict_policy(std::string_view value)
+        {
+            if (value == "file_manifest_wins")
+                return json_defaults_conflict_policy::file_manifest_wins;
+            if (value == "user_defaults_win")
+                return json_defaults_conflict_policy::user_defaults_win;
+            if (value == "fail_on_conflict")
+                return json_defaults_conflict_policy::fail_on_conflict;
+            throw std::logic_error("Unknown json_defaults_conflict_policy value");
+        }
+
         [[nodiscard]] inline std::string md5_bytes(std::span<const std::byte> bytes)
         {
             gb::yadro::util::md5 hash;
@@ -222,6 +410,13 @@ namespace gb::yadro::container
 
         void begin_object()
         {
+            if (begin_skipped_value())
+                return;
+            if (is_skipping()) {
+                ++_skip_depth;
+                return;
+            }
+
             if (_array) {
                 if (_read_options.table_mode != json_table_mode::infer_tables)
                     throw std::logic_error("JSON objects inside arrays are not supported by json_db_builder");
@@ -253,6 +448,11 @@ namespace gb::yadro::container
 
         void end_object()
         {
+            if (is_skipping()) {
+                --_skip_depth;
+                return;
+            }
+
             if (_array && _array->current_object) {
                 if (_array->current_object->pending_key)
                     throw std::logic_error("JSON table object key is missing a value");
@@ -276,6 +476,9 @@ namespace gb::yadro::container
 
         void key(string_view value)
         {
+            if (is_skipping())
+                return;
+
             if (_array && _array->current_object) {
                 if (_array->current_object->pending_key)
                     throw std::logic_error("JSON table object key is missing a value");
@@ -289,16 +492,25 @@ namespace gb::yadro::container
             if (_pending_key)
                 throw std::logic_error("JSON object key is missing a value");
 
+            if (_read_options.ignore_manifest && _objects.size() == 1 && _path.empty() && value == _read_options.manifest_key) {
+                _skip_next_value = true;
+                return;
+            }
+
             _pending_key = string_type{ value };
         }
 
         void null_value()
         {
+            if (skip_scalar_value())
+                return;
             set_value(nullptr);
         }
 
         void bool_value(bool value)
         {
+            if (skip_scalar_value())
+                return;
             if (_array)
                 throw std::logic_error("Boolean arrays are not supported by the current json_db value model");
             set_value(value);
@@ -306,6 +518,8 @@ namespace gb::yadro::container
 
         void int_value(std::int64_t value)
         {
+            if (skip_scalar_value())
+                return;
             if (_array) {
                 append_int(value);
                 return;
@@ -315,6 +529,8 @@ namespace gb::yadro::container
 
         void uint_value(std::uint64_t value)
         {
+            if (skip_scalar_value())
+                return;
             if (_array) {
                 append_uint(value);
                 return;
@@ -324,6 +540,8 @@ namespace gb::yadro::container
 
         void double_value(double value)
         {
+            if (skip_scalar_value())
+                return;
             if (_array) {
                 append_double(value);
                 return;
@@ -333,6 +551,8 @@ namespace gb::yadro::container
 
         void string_value(string_view value)
         {
+            if (skip_scalar_value())
+                return;
             if (_array) {
                 append_string(value);
                 return;
@@ -342,6 +562,13 @@ namespace gb::yadro::container
 
         void begin_array()
         {
+            if (begin_skipped_value())
+                return;
+            if (is_skipping()) {
+                ++_skip_depth;
+                return;
+            }
+
             if (_array) {
                 if (_read_options.table_mode != json_table_mode::infer_tables)
                     throw std::logic_error("Nested arrays are not supported by the current json_db value model");
@@ -371,6 +598,11 @@ namespace gb::yadro::container
 
         void end_array()
         {
+            if (is_skipping()) {
+                --_skip_depth;
+                return;
+            }
+
             if (!_array)
                 throw std::logic_error("JSON array end without matching begin");
 
@@ -414,6 +646,8 @@ namespace gb::yadro::container
 
         [[nodiscard]] db_type finish() &&
         {
+            if (_skip_next_value || _skip_depth != 0)
+                throw std::logic_error("JSON manifest value is not closed");
             if (!_objects.empty())
                 throw std::logic_error("JSON object is not closed");
             if (_array)
@@ -493,6 +727,29 @@ namespace gb::yadro::container
         {
             if (_array)
                 throw std::logic_error(message);
+        }
+
+        [[nodiscard]] bool is_skipping() const noexcept
+        {
+            return _skip_depth != 0;
+        }
+
+        [[nodiscard]] bool begin_skipped_value()
+        {
+            if (!_skip_next_value)
+                return false;
+            _skip_next_value = false;
+            _skip_depth = 1;
+            return true;
+        }
+
+        [[nodiscard]] bool skip_scalar_value()
+        {
+            if (_skip_next_value) {
+                _skip_next_value = false;
+                return true;
+            }
+            return is_skipping();
         }
 
         template<class T>
@@ -908,6 +1165,8 @@ namespace gb::yadro::container
         std::optional<string_type> _pending_key;
         std::vector<object_state> _objects;
         std::optional<array_state> _array;
+        bool _skip_next_value = false;
+        std::uint32_t _skip_depth = 0;
     };
 
     namespace detail
@@ -921,6 +1180,8 @@ namespace gb::yadro::container
 
             [[nodiscard]] std::string write()
             {
+                if (_options.include_manifest && _db.find({ _options.manifest_key }) != json_db::invalid_node)
+                    throw std::logic_error("JSON manifest key collides with a database key");
                 write_object(json_db::root_node, 0);
                 return std::move(_out).str();
             }
@@ -981,9 +1242,26 @@ namespace gb::yadro::container
             void write_object(json_db::node_id node, std::uint32_t level)
             {
                 auto child_nodes = children(node);
+                auto include_manifest = _options.include_manifest && node == json_db::root_node;
                 _out << '{';
-                if (!child_nodes.empty() && _options.pretty)
+                if ((include_manifest || !child_nodes.empty()) && _options.pretty)
                     _out << '\n';
+
+                bool wrote_member = false;
+                if (include_manifest) {
+                    if (_options.pretty)
+                        write_indent(level + 1);
+                    write_string(_options.manifest_key);
+                    _out << ':';
+                    if (_options.pretty)
+                        _out << ' ';
+                    write_manifest_object();
+                    wrote_member = true;
+                    if (!child_nodes.empty())
+                        _out << ',';
+                    if (_options.pretty)
+                        _out << '\n';
+                }
 
                 for (std::size_t i = 0; i < child_nodes.size(); ++i) {
                     if (_options.pretty)
@@ -997,10 +1275,20 @@ namespace gb::yadro::container
                         _out << ',';
                     if (_options.pretty)
                         _out << '\n';
+                    wrote_member = true;
                 }
 
-                if (!child_nodes.empty() && _options.pretty)
+                if (wrote_member && _options.pretty)
                     write_indent(level);
+                _out << '}';
+            }
+
+            void write_manifest_object()
+            {
+                _out << "{\"schema_version\":1,\"table_format\":";
+                write_string(detail::to_string(_options.table_format));
+                _out << ",\"blob_write_mode\":";
+                write_string(detail::to_string(_options.blob_write_mode));
                 _out << '}';
             }
 
@@ -1822,6 +2110,135 @@ namespace gb::yadro::container
             json_db_builder _builder;
         };
 #endif
+
+        [[nodiscard]] inline const json_db::value_type* get_value(const json_db& db, std::initializer_list<json_db::string_view> path)
+        {
+            return db.get(path);
+        }
+
+        [[nodiscard]] inline std::optional<bool> get_bool(const json_db& db, std::initializer_list<json_db::string_view> path)
+        {
+            if (auto* value = get_value(db, path)) {
+                if (auto* typed = std::get_if<bool>(value))
+                    return *typed;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] inline std::optional<std::uint64_t> get_uint(const json_db& db, std::initializer_list<json_db::string_view> path)
+        {
+            if (auto* value = get_value(db, path)) {
+                if (auto* typed = std::get_if<std::uint64_t>(value))
+                    return *typed;
+                if (auto* signed_value = std::get_if<std::int64_t>(value); signed_value && *signed_value >= 0)
+                    return static_cast<std::uint64_t>(*signed_value);
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] inline std::optional<std::string> get_string(const json_db& db, std::initializer_list<json_db::string_view> path)
+        {
+            if (auto* value = get_value(db, path)) {
+                if (auto* ref = std::get_if<json_db::string_ref>(value))
+                    return std::string{ db.string(*ref) };
+            }
+            return std::nullopt;
+        }
+
+        template<class Enum, class Parser>
+        inline void read_enum_option(const json_db& db, std::initializer_list<json_db::string_view> path, Enum& target, Parser parser)
+        {
+            if (auto value = get_string(db, path))
+                target = parser(*value);
+        }
+
+        inline void read_bool_option(const json_db& db, std::initializer_list<json_db::string_view> path, bool& target)
+        {
+            if (auto value = get_bool(db, path))
+                target = *value;
+        }
+
+        template<class UInt>
+        inline void read_uint_option(const json_db& db, std::initializer_list<json_db::string_view> path, UInt& target)
+        {
+            if (auto value = get_uint(db, path)) {
+                if (*value > static_cast<std::uint64_t>(std::numeric_limits<UInt>::max()))
+                    throw std::logic_error("JSON defaults integer value is outside the target range");
+                target = static_cast<UInt>(*value);
+            }
+        }
+
+        inline void read_string_option(const json_db& db, std::initializer_list<json_db::string_view> path, std::string& target)
+        {
+            if (auto value = get_string(db, path))
+                target = std::move(*value);
+        }
+
+        inline void read_path_option(const json_db& db, std::initializer_list<json_db::string_view> path, std::filesystem::path& target)
+        {
+            if (auto value = get_string(db, path))
+                target = std::filesystem::path{ *value };
+        }
+
+        inline void apply_defaults_from_db(const json_db& db, json_db_defaults& defaults)
+        {
+            read_uint_option(db, { "schema_version" }, defaults.schema_version);
+            read_enum_option(db, { "conflict_policy" }, defaults.conflict_policy, parse_json_defaults_conflict_policy);
+
+            read_bool_option(db, { "read", "reject_duplicate_keys" }, defaults.read.reject_duplicate_keys);
+            read_enum_option(db, { "read", "table_mode" }, defaults.read.table_mode, parse_json_table_mode);
+            read_enum_option(db, { "read", "blob_mode" }, defaults.read.blob_mode, parse_json_blob_mode);
+            read_path_option(db, { "read", "external_blob_base_directory" }, defaults.read.external_blob_base_directory);
+            read_enum_option(db, { "read", "external_blob_load_policy" }, defaults.read.external_blob_load_policy, parse_blob_load_policy);
+            read_string_option(db, { "read", "root_array_key" }, defaults.read.root_array_key);
+            read_bool_option(db, { "read", "ignore_manifest" }, defaults.read.ignore_manifest);
+            read_string_option(db, { "read", "manifest_key" }, defaults.read.manifest_key);
+
+            read_bool_option(db, { "write", "pretty" }, defaults.write.pretty);
+            read_uint_option(db, { "write", "indent" }, defaults.write.indent);
+            read_bool_option(db, { "write", "sort_keys" }, defaults.write.sort_keys);
+            read_bool_option(db, { "write", "ascii_only" }, defaults.write.ascii_only);
+            read_enum_option(db, { "write", "table_format" }, defaults.write.table_format, parse_json_table_write_format);
+            read_enum_option(db, { "write", "blob_write_mode" }, defaults.write.blob_write_mode, parse_json_blob_write_mode);
+            read_bool_option(db, { "write", "include_manifest" }, defaults.write.include_manifest);
+            read_string_option(db, { "write", "manifest_key" }, defaults.write.manifest_key);
+
+            read_path_option(db, { "write", "external_blobs", "root_directory" }, defaults.write.external_blobs.root_directory);
+            read_path_option(db, { "write", "external_blobs", "blob_directory" }, defaults.write.external_blobs.blob_directory);
+            read_uint_option(db, { "write", "external_blobs", "inline_threshold_bytes" }, defaults.write.external_blobs.inline_threshold_bytes);
+            read_bool_option(db, { "write", "external_blobs", "include_node_id" }, defaults.write.external_blobs.include_node_id);
+            read_enum_option(db, { "write", "external_blobs", "relocation" }, defaults.write.external_blobs.relocation, parse_json_external_blob_relocation);
+            read_enum_option(db, { "write", "external_blobs", "gc_scope" }, defaults.write.external_blobs.gc_scope, parse_json_external_blob_gc_scope);
+            read_bool_option(db, { "write", "external_blobs", "remove_temp_files_on_failure" }, defaults.write.external_blobs.remove_temp_files_on_failure);
+        }
+
+        [[nodiscard]] inline json_db_defaults extract_manifest_defaults(const json_db& db, const json_db_defaults& base)
+        {
+            auto result = base;
+            if (auto table_format = get_string(db, { base.read.manifest_key, "table_format" }))
+                result.write.table_format = parse_json_table_write_format(*table_format);
+            if (auto blob_write_mode = get_string(db, { base.read.manifest_key, "blob_write_mode" }))
+                result.write.blob_write_mode = parse_json_blob_write_mode(*blob_write_mode);
+            if (auto schema_version = get_uint(db, { base.read.manifest_key, "schema_version" })) {
+                if (*schema_version > std::numeric_limits<std::uint32_t>::max())
+                    throw std::logic_error("JSON manifest schema version is outside the target range");
+                result.schema_version = static_cast<std::uint32_t>(*schema_version);
+            }
+            return result;
+        }
+
+        [[nodiscard]] inline bool has_manifest(const json_db& db, const json_db_defaults& defaults)
+        {
+            return db.contains({ defaults.read.manifest_key });
+        }
+
+        inline void validate_defaults_conflict(const json_db_defaults& file_defaults, const json_db_defaults& user_defaults)
+        {
+            if (file_defaults.write.table_format != user_defaults.write.table_format)
+                throw std::logic_error("JSON file manifest table_format conflicts with user defaults");
+            if (file_defaults.write.blob_write_mode != user_defaults.write.blob_write_mode)
+                throw std::logic_error("JSON file manifest blob_write_mode conflicts with user defaults");
+        }
     }
 
     [[nodiscard]] inline std::string write_json(const json_db& db, const json_write_options& options = {})
@@ -1829,9 +2246,19 @@ namespace gb::yadro::container
         return detail::json_writer{ db, options }.write();
     }
 
+    inline void write_json(std::ostream& out, const json_db& db, const json_write_options& options = {})
+    {
+        detail::write_stream(out, write_json(db, options));
+    }
+
     [[nodiscard]] inline std::string write_json_subtree(const json_db& db, json_db::string_view key, const json_write_options& options = {})
     {
         return detail::json_writer{ db, options }.write_subtree(key);
+    }
+
+    inline void write_json_subtree(std::ostream& out, const json_db& db, json_db::string_view key, const json_write_options& options = {})
+    {
+        detail::write_stream(out, write_json_subtree(db, key, options));
     }
 
     inline void collect_unreferenced_external_blobs(const std::filesystem::path& blob_directory, const std::set<std::filesystem::path>& live_files,
@@ -1933,6 +2360,114 @@ namespace gb::yadro::container
     {
 #if GB_YADRO_GBDB_JSON_HAS_AXE
         return detail::axe_json_reader{ text, options }.parse();
+#else
+        (void)text;
+        throw std::logic_error("JSON reading requires opt-in AXE support: define GB_YADRO_ENABLE_AXE_JSON and add AXE include directory");
+#endif
+    }
+
+    [[nodiscard]] inline json_db read_json(std::istream& in, const json_read_options& options = {})
+    {
+        return read_json(detail::read_stream(in), options);
+    }
+
+    inline void write_json_defaults(std::ostream& out, const json_db_defaults& defaults)
+    {
+        json_db db;
+        db.set({ "schema_version" }, static_cast<std::uint64_t>(defaults.schema_version));
+        db.set({ "conflict_policy" }, detail::to_string(defaults.conflict_policy));
+
+        db.set({ "read", "reject_duplicate_keys" }, defaults.read.reject_duplicate_keys);
+        db.set({ "read", "table_mode" }, detail::to_string(defaults.read.table_mode));
+        db.set({ "read", "blob_mode" }, detail::to_string(defaults.read.blob_mode));
+        db.set({ "read", "external_blob_base_directory" }, defaults.read.external_blob_base_directory.generic_string());
+        db.set({ "read", "external_blob_load_policy" }, detail::to_string(defaults.read.external_blob_load_policy));
+        db.set({ "read", "root_array_key" }, defaults.read.root_array_key);
+        db.set({ "read", "ignore_manifest" }, defaults.read.ignore_manifest);
+        db.set({ "read", "manifest_key" }, defaults.read.manifest_key);
+
+        db.set({ "write", "pretty" }, defaults.write.pretty);
+        db.set({ "write", "indent" }, static_cast<std::uint64_t>(defaults.write.indent));
+        db.set({ "write", "sort_keys" }, defaults.write.sort_keys);
+        db.set({ "write", "ascii_only" }, defaults.write.ascii_only);
+        db.set({ "write", "table_format" }, detail::to_string(defaults.write.table_format));
+        db.set({ "write", "blob_write_mode" }, detail::to_string(defaults.write.blob_write_mode));
+        db.set({ "write", "include_manifest" }, defaults.write.include_manifest);
+        db.set({ "write", "manifest_key" }, defaults.write.manifest_key);
+
+        db.set({ "write", "external_blobs", "root_directory" }, defaults.write.external_blobs.root_directory.generic_string());
+        db.set({ "write", "external_blobs", "blob_directory" }, defaults.write.external_blobs.blob_directory.generic_string());
+        db.set({ "write", "external_blobs", "inline_threshold_bytes" }, defaults.write.external_blobs.inline_threshold_bytes);
+        db.set({ "write", "external_blobs", "include_node_id" }, defaults.write.external_blobs.include_node_id);
+        db.set({ "write", "external_blobs", "relocation" }, detail::to_string(defaults.write.external_blobs.relocation));
+        db.set({ "write", "external_blobs", "gc_scope" }, detail::to_string(defaults.write.external_blobs.gc_scope));
+        db.set({ "write", "external_blobs", "remove_temp_files_on_failure" }, defaults.write.external_blobs.remove_temp_files_on_failure);
+
+        json_write_options options;
+        options.pretty = true;
+        options.sort_keys = true;
+        options.include_manifest = false;
+        write_json(out, db, options);
+    }
+
+    [[nodiscard]] inline std::string write_json_defaults(const json_db_defaults& defaults)
+    {
+        std::ostringstream out;
+        write_json_defaults(out, defaults);
+        return std::move(out).str();
+    }
+
+    [[nodiscard]] inline json_db_defaults read_json_defaults(std::istream& in)
+    {
+        auto db = read_json(in);
+        json_db_defaults defaults;
+        detail::apply_defaults_from_db(db, defaults);
+        return defaults;
+    }
+
+    [[nodiscard]] inline json_db_defaults read_json_defaults(std::string_view text)
+    {
+        std::istringstream in(std::string{ text });
+        return read_json_defaults(in);
+    }
+
+    inline json_db_defaults::json_db_defaults(std::istream& in)
+        : json_db_defaults(read_json_defaults(in))
+    {}
+
+    [[nodiscard]] inline json_db read_json(std::istream& in, const json_db_defaults& defaults)
+    {
+        auto text = detail::read_stream(in);
+
+#if GB_YADRO_GBDB_JSON_HAS_AXE
+        auto manifest_read_options = defaults.read;
+        manifest_read_options.ignore_manifest = false;
+        manifest_read_options.table_mode = json_table_mode::infer_tables;
+        manifest_read_options.blob_mode = json_blob_mode::tagged_base64;
+
+        auto manifest_db = read_json(text, manifest_read_options);
+        auto manifest_exists = detail::has_manifest(manifest_db, defaults);
+        auto file_defaults = detail::extract_manifest_defaults(manifest_db, defaults);
+        auto effective_defaults = defaults;
+
+        switch (defaults.conflict_policy) {
+        case json_defaults_conflict_policy::file_manifest_wins:
+            if (manifest_exists) {
+                effective_defaults = file_defaults;
+                effective_defaults.read.table_mode = json_table_mode::infer_tables;
+            }
+            break;
+        case json_defaults_conflict_policy::user_defaults_win:
+            break;
+        case json_defaults_conflict_policy::fail_on_conflict:
+            if (manifest_exists)
+                detail::validate_defaults_conflict(file_defaults, defaults);
+            break;
+        }
+
+        auto read_options = effective_defaults.read;
+        read_options.ignore_manifest = true;
+        return read_json(text, read_options);
 #else
         (void)text;
         throw std::logic_error("JSON reading requires opt-in AXE support: define GB_YADRO_ENABLE_AXE_JSON and add AXE include directory");

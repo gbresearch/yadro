@@ -1856,6 +1856,107 @@ namespace
         gbassert(text == R"({"market":{"active":true,"history":[190,191,193],"price":193.25,"symbol":"AAPL","venues":["nasdaq","arca"]}})");
     }
 
+    GB_TEST(container, gbdb_json_stream_io_ignores_manifest_test)
+    {
+        json_db db;
+        db.set({ "market", "symbol" }, std::string_view{ "AAPL" });
+
+        json_write_options write_options;
+        write_options.pretty = false;
+        write_options.sort_keys = true;
+        write_options.include_manifest = true;
+
+        std::ostringstream out;
+        write_json(out, db, write_options);
+        auto text = out.str();
+        gbassert(text.find(R"("$gbdb_manifest")") != std::string::npos);
+
+        json_read_options read_options;
+        if constexpr (gbdb_json_axe_enabled) {
+            std::istringstream in(text);
+            auto restored = read_json(in, read_options);
+
+            gbassert(!restored.contains({ "$gbdb_manifest" }));
+            auto symbol_ref = std::get<json_db::string_ref>(*restored.get({ "market", "symbol" }));
+            gbassert(restored.string(symbol_ref) == "AAPL");
+        }
+        else {
+            std::istringstream in(text);
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json(in, read_options); });
+        }
+    }
+
+    GB_TEST(container, gbdb_json_defaults_roundtrip_test)
+    {
+        json_db_defaults defaults;
+        defaults.schema_version = 2;
+        defaults.read.table_mode = json_table_mode::infer_tables;
+        defaults.read.blob_mode = json_blob_mode::tagged_base64;
+        defaults.read.root_array_key = "rows";
+        defaults.write.pretty = false;
+        defaults.write.sort_keys = true;
+        defaults.write.table_format = json_table_write_format::object_rows;
+        defaults.write.blob_write_mode = json_blob_write_mode::external_files;
+        defaults.write.include_manifest = true;
+        defaults.conflict_policy = json_defaults_conflict_policy::fail_on_conflict;
+
+        std::ostringstream out;
+        write_json_defaults(out, defaults);
+
+        if constexpr (gbdb_json_axe_enabled) {
+            std::istringstream in(out.str());
+            auto restored = read_json_defaults(in);
+
+            gbassert(restored.schema_version == 2);
+            gbassert(restored.read.table_mode == json_table_mode::infer_tables);
+            gbassert(restored.read.blob_mode == json_blob_mode::tagged_base64);
+            gbassert(restored.read.root_array_key == "rows");
+            gbassert(!restored.write.pretty);
+            gbassert(restored.write.sort_keys);
+            gbassert(restored.write.table_format == json_table_write_format::object_rows);
+            gbassert(restored.write.blob_write_mode == json_blob_write_mode::external_files);
+            gbassert(restored.write.include_manifest);
+            gbassert(restored.conflict_policy == json_defaults_conflict_policy::fail_on_conflict);
+        }
+        else {
+            std::istringstream in(out.str());
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json_defaults(in); });
+        }
+    }
+
+    GB_TEST(container, gbdb_json_defaults_conflict_policy_test)
+    {
+        json_db db;
+        db.set({ "market", "symbol" }, std::string_view{ "AAPL" });
+
+        json_write_options write_options;
+        write_options.pretty = false;
+        write_options.sort_keys = true;
+        write_options.include_manifest = true;
+        write_options.table_format = json_table_write_format::columns_data;
+
+        auto text = write_json(db, write_options);
+
+        json_db_defaults defaults;
+        defaults.write.table_format = json_table_write_format::object_rows;
+        defaults.conflict_policy = json_defaults_conflict_policy::fail_on_conflict;
+
+        if constexpr (gbdb_json_axe_enabled) {
+            std::istringstream rejected(text);
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json(rejected, defaults); });
+
+            defaults.conflict_policy = json_defaults_conflict_policy::user_defaults_win;
+            std::istringstream accepted(text);
+            auto restored = read_json(accepted, defaults);
+            auto symbol_ref = std::get<json_db::string_ref>(*restored.get({ "market", "symbol" }));
+            gbassert(restored.string(symbol_ref) == "AAPL");
+        }
+        else {
+            std::istringstream rejected(text);
+            must_throw<std::logic_error>([&] { [[maybe_unused]] auto restored = read_json(rejected, defaults); });
+        }
+    }
+
     GB_TEST(container, gbdb_json_write_serialized_object_test)
     {
         json_db db;
