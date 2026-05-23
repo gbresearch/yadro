@@ -219,5 +219,8 @@
     <ClCompile Include="..\algorithm\adf_test.cpp">
       <Filter>algorithm</Filter>
     </ClCompile>
+    <ClCompile Include="..\container\gbdb.cpp">
+      <Filter>container</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

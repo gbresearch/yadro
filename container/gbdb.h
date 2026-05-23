@@ -2115,4 +2115,7 @@ namespace gb::yadro::container
     };
 
     using json_db = basic_gbdb<char>;
+
+    void print_color_report(const json_db::scan_report& rep, std::ostream& os);
+    void print_json_report(const json_db::scan_report& rep, std::ostream& os);  
 }
