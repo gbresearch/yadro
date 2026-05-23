@@ -1234,6 +1234,59 @@ namespace
         must_throw<std::invalid_argument>([&] { db.set("market//symbol", true); });
     }
 
+    GB_TEST(container, gbdb_concurrent_snapshot_publish_test)
+    {
+        concurrent_json_db db;
+
+        db.update([](json_db& writer) {
+            writer.set("market/symbol", "AAPL");
+        });
+
+        auto first = db.snapshot();
+
+        db.update([](json_db& writer) {
+            writer.set("market/symbol", "MSFT");
+        });
+
+        auto second = db.snapshot();
+        auto first_ref = std::get<json_db::string_ref>(*first->get("market/symbol"));
+        auto second_ref = std::get<json_db::string_ref>(*second->get("market/symbol"));
+
+        gbassert(first != second);
+        gbassert(first->string(first_ref) == "AAPL");
+        gbassert(second->string(second_ref) == "MSFT");
+    }
+
+    GB_TEST(container, gbdb_concurrent_updates_are_serialized_test)
+    {
+        concurrent_json_db db;
+        db.update([](json_db& writer) {
+            writer.set("counter", 0);
+        });
+
+        constexpr auto thread_count = 8;
+        constexpr auto iteration_count = 50;
+        std::vector<std::jthread> threads;
+        threads.reserve(thread_count);
+
+        for (auto thread = 0; thread < thread_count; ++thread) {
+            threads.emplace_back([&db] {
+                for (auto i = 0; i < iteration_count; ++i) {
+                    db.update([](json_db& writer) {
+                        auto* value = writer.get("counter");
+                        auto count = value == nullptr ? std::int64_t{} : std::get<std::int64_t>(*value);
+                        writer.set("counter", count + 1);
+                    });
+                }
+            });
+        }
+
+        threads.clear();
+
+        auto snapshot = db.snapshot();
+        gbassert(std::get<std::int64_t>(*snapshot->get("counter")) == thread_count * iteration_count);
+    }
+
     GB_TEST(container, gbdb_serialization_test)
     {
         json_db db;

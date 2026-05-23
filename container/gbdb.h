@@ -29,6 +29,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <concepts>
@@ -39,6 +40,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -2284,6 +2286,58 @@ namespace gb::yadro::container
     };
 
     using json_db = basic_gbdb<char>;
+
+    template<class CharT = char>
+    class basic_concurrent_gbdb
+    {
+    public:
+        using db_type = basic_gbdb<CharT>;
+        using snapshot_type = std::shared_ptr<const db_type>;
+
+        basic_concurrent_gbdb()
+            : _snapshot(std::make_shared<const db_type>())
+        {}
+
+        explicit basic_concurrent_gbdb(db_type db)
+            : _snapshot(std::make_shared<const db_type>(std::move(db)))
+        {}
+
+        [[nodiscard]] snapshot_type snapshot() const noexcept
+        {
+            return _snapshot.load(std::memory_order_acquire);
+        }
+
+        void replace(db_type db)
+        {
+            std::scoped_lock lock(_writer_mutex);
+            _snapshot.store(std::make_shared<const db_type>(std::move(db)), std::memory_order_release);
+        }
+
+        template<class Function>
+        decltype(auto) update(Function&& function)
+        {
+            using result_type = std::invoke_result_t<Function&&, db_type&>;
+
+            std::scoped_lock lock(_writer_mutex);
+            auto next = std::make_shared<db_type>(*snapshot());
+
+            if constexpr (std::is_void_v<result_type>) {
+                std::invoke(std::forward<Function>(function), *next);
+                _snapshot.store(std::shared_ptr<const db_type>{ std::move(next) }, std::memory_order_release);
+            }
+            else {
+                result_type result = std::invoke(std::forward<Function>(function), *next);
+                _snapshot.store(std::shared_ptr<const db_type>{ std::move(next) }, std::memory_order_release);
+                return result;
+            }
+        }
+
+    private:
+        std::atomic<snapshot_type> _snapshot;
+        std::mutex _writer_mutex;
+    };
+
+    using concurrent_json_db = basic_concurrent_gbdb<char>;
 
     void print_color_report(const json_db::scan_report& rep, std::ostream& os);
     void print_json_report(const json_db::scan_report& rep, std::ostream& os);  

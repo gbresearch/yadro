@@ -112,8 +112,19 @@ namespace gb::yadro::container
 
         data_pool() = default;
 
-        data_pool(const data_pool&) = delete;
-        data_pool& operator=(const data_pool&) = delete;
+        data_pool(const data_pool& other)
+        {
+            copy_from(other);
+        }
+
+        data_pool& operator=(const data_pool& other)
+        {
+            if (this != std::addressof(other)) {
+                data_pool copy(other);
+                *this = std::move(copy);
+            }
+            return *this;
+        }
 
         data_pool(data_pool&& other) noexcept
             : _arena(std::move(other._arena))
@@ -455,6 +466,51 @@ namespace gb::yadro::container
 
             _arena = std::move(next_arena);
             _arena_capacity = next_capacity;
+        }
+
+        void copy_from(const data_pool& other)
+        {
+            _arena_size = other._arena_size;
+            _arena_capacity = other._arena_capacity;
+            _records = other._records;
+            _tombstones = other._tombstones;
+            _unique_index = other._unique_index;
+
+            if (_arena_capacity == 0)
+                return;
+
+            _arena = std::make_unique_for_overwrite<std::byte[]>(_arena_capacity);
+            std::vector<std::pair<array_id, size_type>> constructed;
+
+            try {
+                for (array_id id = 0; id < _records.size(); ++id) {
+                    auto& dst_record = _records[id];
+                    const auto& src_record = other._records[id];
+                    auto* dst = data(dst_record);
+                    auto* src = other.data(src_record);
+
+                    for (size_type element = 0; element < dst_record.size; ++element) {
+                        if (!is_erased(id, element)) {
+                            std::construct_at(std::addressof(dst[element]), src[element]);
+                            constructed.emplace_back(id, element);
+                        }
+                    }
+                }
+            }
+            catch (...) {
+                for (auto [id, element] : constructed) {
+                    auto* dst = data(_records[id]);
+                    std::destroy_at(std::addressof(dst[element]));
+                }
+
+                _records.clear();
+                _arena.reset();
+                _arena_size = 0;
+                _arena_capacity = 0;
+                _tombstones.clear();
+                _unique_index.clear();
+                throw;
+            }
         }
 
         std::unique_ptr<std::byte[]> _arena;
