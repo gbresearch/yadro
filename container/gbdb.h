@@ -46,6 +46,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -58,8 +59,377 @@
 
 namespace gb::yadro::container
 {
-    template<class CharT = char>
+    template<class Payload, class Id = std::uint32_t>
+    struct payload_reference_type
+    {
+        Id id{};
+        friend bool operator==(const payload_reference_type&, const payload_reference_type&) = default;
+
+        template<class Ar>
+        void serialize(this auto&& self, Ar&& archive)
+        {
+            archive(gb::yadro::archive::serialize_as<std::uint64_t>(self.id));
+        }
+    };
+
+    template<class Payload>
+    struct payload_traits
+    {
+        using payload_type = Payload;
+        using stored_type = Payload;
+        using view_type = Payload;
+
+        template<class CharT>
+        using pool_type = void;
+
+        template<class Pool, class Value>
+        [[nodiscard]] static stored_type store(Pool&, Value&& value)
+        {
+            return stored_type{ std::forward<Value>(value) };
+        }
+
+        template<class Pool>
+        [[nodiscard]] static view_type get(const Pool&, const stored_type& value)
+        {
+            return value;
+        }
+    };
+
+    template<class CharT>
+    struct payload_traits<std::basic_string<CharT>>
+    {
+        using payload_type = std::basic_string<CharT>;
+        using stored_type = payload_reference_type<payload_type>;
+        using view_type = std::basic_string_view<CharT>;
+
+        template<class DbCharT>
+        using pool_type = basic_string_pool<CharT>;
+
+        template<class Pool, class Value>
+        [[nodiscard]] static stored_type store(Pool& pool, Value&& value)
+        {
+            return stored_type{ pool.insert(std::basic_string_view<CharT>{ value }) };
+        }
+
+        template<class Pool>
+        [[nodiscard]] static view_type get(const Pool& pool, stored_type ref)
+        {
+            return pool.view(ref.id);
+        }
+    };
+
+    namespace gbdb_detail
+    {
+        template<class T, class... Ts>
+        struct type_index;
+
+        template<class T, class... Rest>
+        struct type_index<T, T, Rest...>
+            : std::integral_constant<std::size_t, 0>
+        {};
+
+        template<class T, class First, class... Rest>
+        struct type_index<T, First, Rest...>
+            : std::integral_constant<std::size_t, 1 + type_index<T, Rest...>::value>
+        {};
+
+        template<class T>
+        struct type_index<T>
+        {
+            static_assert(!std::same_as<T, T>, "Payload type is not part of this basic_gbdb");
+        };
+
+        template<class... Ts>
+        struct compact_value_type
+        {
+            using type = std::variant<Ts...>;
+        };
+
+        template<class T>
+        struct compact_value_type<T>
+        {
+            using type = T;
+        };
+
+        template<class CharT, class Payload>
+        struct payload_pool
+        {
+            using traits = payload_traits<Payload>;
+            using candidate = typename traits::template pool_type<CharT>;
+            using type = std::conditional_t<std::is_void_v<candidate>, std::monostate, candidate>;
+        };
+    }
+
+    template<class CharT = char, class... Payloads>
+    class basic_gbdb;
+
+    template<class CharT, class... Payloads>
     class basic_gbdb
+    {
+        static_assert(sizeof...(Payloads) > 0, "Use basic_gbdb<CharT> for the JSON DB specialization");
+
+    public:
+        using char_type = CharT;
+        using string_pool_type = basic_string_pool<CharT>;
+        using string_id = typename string_pool_type::string_id;
+        using string_view = std::basic_string_view<CharT>;
+        using string_type = std::basic_string<CharT>;
+        using path_view = std::initializer_list<string_view>;
+        using path_span = std::span<const string_view>;
+        using value_type = typename gbdb_detail::compact_value_type<typename payload_traits<Payloads>::stored_type...>::type;
+        using pools_type = std::tuple<typename gbdb_detail::payload_pool<CharT, Payloads>::type...>;
+
+        struct node_payload
+        {
+            string_id key{};
+            std::optional<value_type> value;
+        };
+
+        using tree_type = indexed_tree<node_payload>;
+        using node_id = typename tree_type::index_t;
+        static constexpr node_id invalid_node = tree_type::invalid_index;
+        static constexpr node_id root_node = 0;
+
+        basic_gbdb()
+            : _tree(node_payload{})
+        {
+            _tree.get_value(root_node).key = intern({});
+        }
+
+        [[nodiscard]] node_id node_count() const noexcept
+        {
+            return _node_count;
+        }
+
+        [[nodiscard]] string_view key(node_id node) const
+        {
+            return _keys.view(_tree.get_value(node).key);
+        }
+
+        [[nodiscard]] node_id find(path_view path) const
+        {
+            return find(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] node_id find(string_view path) const
+        {
+            auto parts = split_slash_path(path);
+            return find(path_span{ parts });
+        }
+
+        [[nodiscard]] node_id find(path_span path) const
+        {
+            node_id parent = root_node;
+            for (auto part : path) {
+                auto key_id = find_key(part);
+                if (key_id == invalid_string)
+                    return invalid_node;
+
+                auto found = _child_index.find(child_key{ parent, key_id });
+                if (found == _child_index.end())
+                    return invalid_node;
+
+                parent = found->second;
+            }
+            return parent;
+        }
+
+        [[nodiscard]] bool contains(path_view path) const
+        {
+            return contains(path_span{ path.begin(), path.size() });
+        }
+
+        [[nodiscard]] bool contains(string_view path) const
+        {
+            auto parts = split_slash_path(path);
+            return contains(path_span{ parts });
+        }
+
+        [[nodiscard]] bool contains(path_span path) const
+        {
+            return find(path) != invalid_node;
+        }
+
+        template<class Value>
+        node_id set(path_view path, Value&& value)
+        {
+            return set(path_span{ path.begin(), path.size() }, std::forward<Value>(value));
+        }
+
+        template<class Value>
+        node_id set(string_view path, Value&& value)
+        {
+            auto parts = split_slash_path(path);
+            return set(path_span{ parts }, std::forward<Value>(value));
+        }
+
+        template<class Value>
+        node_id set(path_span path, Value&& value)
+        {
+            using payload_type = std::remove_cvref_t<Value>;
+            static_assert((std::same_as<payload_type, Payloads> || ...), "Payload type is not part of this basic_gbdb");
+            auto node = ensure_path(path);
+            _tree.get_value(node).value = store_payload<payload_type>(std::forward<Value>(value));
+            return node;
+        }
+
+        template<class Payload>
+        [[nodiscard]] std::optional<typename payload_traits<Payload>::view_type> get(path_view path) const
+        {
+            return get<Payload>(path_span{ path.begin(), path.size() });
+        }
+
+        template<class Payload>
+        [[nodiscard]] std::optional<typename payload_traits<Payload>::view_type> get(string_view path) const
+        {
+            auto parts = split_slash_path(path);
+            return get<Payload>(path_span{ parts });
+        }
+
+        template<class Payload>
+        [[nodiscard]] std::optional<typename payload_traits<Payload>::view_type> get(path_span path) const
+        {
+            auto node = find(path);
+            if (node == invalid_node)
+                return std::nullopt;
+
+            const auto& value = _tree.get_value(node).value;
+            if (!value)
+                return std::nullopt;
+
+            using stored_type = typename payload_traits<Payload>::stored_type;
+            if constexpr (sizeof...(Payloads) == 1) {
+                if constexpr (std::same_as<stored_type, value_type>)
+                    return payload_traits<Payload>::get(pool<Payload>(), *value);
+                else
+                    return std::nullopt;
+            }
+            else {
+                if (const auto* stored = std::get_if<stored_type>(std::addressof(*value)))
+                    return payload_traits<Payload>::get(pool<Payload>(), *stored);
+                return std::nullopt;
+            }
+        }
+
+    private:
+        static constexpr string_id invalid_string = (std::numeric_limits<string_id>::max)();
+
+        struct child_key
+        {
+            node_id parent{};
+            string_id key{};
+            friend bool operator==(const child_key&, const child_key&) = default;
+        };
+
+        struct child_key_hash
+        {
+            [[nodiscard]] std::size_t operator()(const child_key& value) const noexcept
+            {
+                auto parent = static_cast<std::uint64_t>(value.parent);
+                auto key = static_cast<std::uint64_t>(value.key);
+                return static_cast<std::size_t>(parent ^ (key + 0x9e3779b97f4a7c15ULL + (parent << 6) + (parent >> 2)));
+            }
+        };
+
+        template<class Payload>
+        static constexpr std::size_t payload_index = gbdb_detail::type_index<Payload, Payloads...>::value;
+
+        template<class Payload>
+        [[nodiscard]] auto& pool()
+        {
+            return std::get<payload_index<Payload>>(_pools);
+        }
+
+        template<class Payload>
+        [[nodiscard]] const auto& pool() const
+        {
+            return std::get<payload_index<Payload>>(_pools);
+        }
+
+        template<class Payload, class Value>
+        [[nodiscard]] value_type store_payload(Value&& value)
+        {
+            auto stored = payload_traits<Payload>::store(pool<Payload>(), std::forward<Value>(value));
+            if constexpr (sizeof...(Payloads) == 1)
+                return stored;
+            else
+                return value_type{ std::move(stored) };
+        }
+
+        [[nodiscard]] string_id find_key(string_view value) const
+        {
+            auto found = _key_lookup.find(string_type{ value });
+            return found == _key_lookup.end() ? invalid_string : found->second;
+        }
+
+        string_id intern(string_view value)
+        {
+            string_type key{ value };
+            auto found = _key_lookup.find(key);
+            if (found != _key_lookup.end())
+                return found->second;
+
+            auto id = _keys.insert(value);
+            _key_lookup.emplace(std::move(key), id);
+            return id;
+        }
+
+        [[nodiscard]] static std::vector<string_view> split_slash_path(string_view path)
+        {
+            std::vector<string_view> parts;
+            if (path.empty())
+                return parts;
+
+            std::size_t begin = 0;
+            while (begin < path.size()) {
+                auto end = path.find(CharT{ '/' }, begin);
+                if (end == begin)
+                    throw std::invalid_argument("gbdb slash path contains an empty component");
+
+                if (end == string_view::npos) {
+                    parts.push_back(path.substr(begin));
+                    return parts;
+                }
+
+                parts.push_back(path.substr(begin, end - begin));
+                begin = end + 1;
+                if (begin == path.size())
+                    throw std::invalid_argument("gbdb slash path contains an empty component");
+            }
+
+            return parts;
+        }
+
+        node_id ensure_path(path_span path)
+        {
+            node_id parent = root_node;
+            for (auto part : path) {
+                auto key_id = intern(part);
+                auto lookup_key = child_key{ parent, key_id };
+                auto found = _child_index.find(lookup_key);
+                if (found != _child_index.end()) {
+                    parent = found->second;
+                    continue;
+                }
+
+                auto child = _tree.insert_child(parent, node_payload{ .key = key_id });
+                ++_node_count;
+                _child_index.emplace(lookup_key, child);
+                parent = child;
+            }
+            return parent;
+        }
+
+        string_pool_type _keys;
+        std::unordered_map<string_type, string_id> _key_lookup;
+        pools_type _pools;
+        tree_type _tree;
+        std::unordered_map<child_key, node_id, child_key_hash> _child_index;
+        node_id _node_count = 1;
+    };
+
+    template<class CharT>
+    class basic_gbdb<CharT>
     {
     public:
         using char_type = CharT;

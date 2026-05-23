@@ -1234,6 +1234,42 @@ namespace
         must_throw<std::invalid_argument>([&] { db.set("market//symbol", true); });
     }
 
+    GB_TEST(container, gbdb_generic_payload_traits_test)
+    {
+        using generic_db = basic_gbdb<char, std::int64_t, std::string>;
+        static_assert(std::same_as<payload_traits<std::string>::stored_type, payload_reference_type<std::string>>);
+
+        generic_db db;
+        db.set("market/volume", std::int64_t{ 123456789 });
+        db.set("market/symbol", std::string{ "AAPL" });
+
+        gbassert(db.node_count() == 4);
+        gbassert(db.contains("market/symbol"));
+        gbassert(db.find("market/missing") == generic_db::invalid_node);
+
+        auto volume = db.get<std::int64_t>("market/volume");
+        auto symbol = db.get<std::string>("market/symbol");
+
+        gbassert(volume.has_value());
+        gbassert(*volume == 123456789);
+        gbassert(symbol.has_value());
+        gbassert(*symbol == "AAPL");
+        gbassert(!db.get<std::string>("market/volume").has_value());
+    }
+
+    GB_TEST(container, gbdb_generic_single_payload_skips_variant_test)
+    {
+        using metric_db = basic_gbdb<char, std::int64_t>;
+        static_assert(std::same_as<metric_db::value_type, std::int64_t>);
+
+        metric_db db;
+        db.set("market/volume", std::int64_t{ 42 });
+
+        auto volume = db.get<std::int64_t>("market/volume");
+        gbassert(volume.has_value());
+        gbassert(*volume == 42);
+    }
+
     GB_TEST(container, gbdb_concurrent_snapshot_publish_test)
     {
         concurrent_json_db db;
