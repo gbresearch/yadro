@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <concepts>
@@ -292,6 +293,92 @@ namespace gb::yadro::container
         };
 
         using log_sink = std::function<void(const log_event&)>;
+
+        enum class scan_mode : std::uint8_t
+        {
+            quick,
+            full,
+            deep
+        };
+
+        enum class scan_severity : std::uint8_t
+        {
+            info,
+            warning,
+            error,
+            critical
+        };
+
+        struct scan_progress
+        {
+            std::uint64_t scanned_nodes = 0;
+            std::uint64_t total_nodes = 0;
+            std::string path;
+        };
+
+        struct scan_issue
+        {
+            scan_severity severity = scan_severity::info;
+            std::string category;
+            std::string path;
+            std::string message;
+        };
+
+        struct scan_statistics
+        {
+            std::uint64_t node_count = 0;
+            std::uint64_t reachable_node_count = 0;
+            std::uint64_t orphaned_node_count = 0;
+            std::uint64_t max_depth = 0;
+            std::uint64_t value_count = 0;
+            std::uint64_t null_value_count = 0;
+            std::uint64_t bool_value_count = 0;
+            std::uint64_t int_value_count = 0;
+            std::uint64_t uint_value_count = 0;
+            std::uint64_t double_value_count = 0;
+            std::uint64_t string_value_count = 0;
+            std::uint64_t int_array_value_count = 0;
+            std::uint64_t uint_array_value_count = 0;
+            std::uint64_t double_array_value_count = 0;
+            std::uint64_t string_array_value_count = 0;
+            std::uint64_t blob_value_count = 0;
+            std::uint64_t object_value_count = 0;
+            std::uint64_t table_value_count = 0;
+            std::uint64_t string_count = 0;
+            std::uint64_t int_array_count = 0;
+            std::uint64_t uint_array_count = 0;
+            std::uint64_t double_array_count = 0;
+            std::uint64_t string_array_count = 0;
+            std::uint64_t blob_count = 0;
+            std::uint64_t object_count = 0;
+            std::uint64_t external_blob_count = 0;
+            std::uint64_t table_count = 0;
+            std::uint64_t warning_count = 0;
+            std::uint64_t error_count = 0;
+            std::uint64_t critical_count = 0;
+        };
+
+        struct scan_report
+        {
+            scan_statistics stats;
+            std::vector<scan_issue> issues;
+            bool cancelled = false;
+
+            [[nodiscard]] bool ok() const noexcept
+            {
+                return !cancelled && stats.error_count == 0 && stats.critical_count == 0;
+            }
+        };
+
+        struct scan_options
+        {
+            scan_mode mode = scan_mode::quick;
+            bool log_findings = true;
+            bool collect_paths = true;
+            bool check_external_blob_md5 = false;
+            bool stop_on_first_error = false;
+            std::function<bool(const scan_progress&)> progress;
+        };
 
         struct table_cell
         {
@@ -1115,6 +1202,293 @@ namespace gb::yadro::container
             emit_log(event);
         }
 
+        [[nodiscard]] scan_report scan_database(scan_options options = {}) const
+        {
+            scan_report report;
+            report.stats.node_count = _node_count;
+            report.stats.string_count = _strings.string_count();
+            report.stats.int_array_count = _int_arrays.array_count();
+            report.stats.uint_array_count = _uint_arrays.array_count();
+            report.stats.double_array_count = _double_arrays.array_count();
+            report.stats.string_array_count = _string_arrays.array_count();
+            report.stats.blob_count = _blobs.array_count();
+            report.stats.object_count = _serialized_objects.size();
+            report.stats.table_count = _tables.size();
+
+            std::vector<bool> visited(_node_count, false);
+            std::vector<string_type> path;
+
+            auto add_issue = [&](scan_severity severity, std::string category, const std::string& issue_path, std::string message) {
+                add_scan_issue(report, options, severity, std::move(category), issue_path, std::move(message));
+            };
+
+            auto valid_string = [&](string_id id) noexcept {
+                return id < _strings.string_count();
+            };
+
+            auto validate_string = [&](string_id id, const std::string& issue_path, std::string_view role) {
+                if (valid_string(id))
+                    return true;
+
+                add_issue(scan_severity::error, "reference", issue_path, std::string{ role } + " string_id is out of range");
+                return false;
+            };
+
+            auto validate_table = [&](table_ref ref, const std::string& issue_path) {
+                if (ref.id >= _tables.size()) {
+                    add_issue(scan_severity::error, "reference", issue_path, "table_ref is out of range");
+                    return;
+                }
+
+                if (options.mode == scan_mode::quick)
+                    return;
+
+                const auto& table = _tables[ref.id];
+                if (table.columns >= _table_columns.array_count()) {
+                    add_issue(scan_severity::error, "table", issue_path, "table column metadata is out of range");
+                    return;
+                }
+
+                for (const auto& column : _table_columns.span(table.columns)) {
+                    validate_string(column.name, issue_path, "table column name");
+                    switch (column.type) {
+                    case table_column_type::int64:
+                        if (column.array >= _int_arrays.array_count())
+                            add_issue(scan_severity::error, "table", issue_path, "table int64 column array is out of range");
+                        else if (_int_arrays.size(column.array) != table.row_count)
+                            add_issue(scan_severity::error, "table", issue_path, "table int64 column row count mismatch");
+                        break;
+                    case table_column_type::uint64:
+                        if (column.array >= _uint_arrays.array_count())
+                            add_issue(scan_severity::error, "table", issue_path, "table uint64 column array is out of range");
+                        else if (_uint_arrays.size(column.array) != table.row_count)
+                            add_issue(scan_severity::error, "table", issue_path, "table uint64 column row count mismatch");
+                        break;
+                    case table_column_type::double_:
+                        if (column.array >= _double_arrays.array_count())
+                            add_issue(scan_severity::error, "table", issue_path, "table double column array is out of range");
+                        else if (_double_arrays.size(column.array) != table.row_count)
+                            add_issue(scan_severity::error, "table", issue_path, "table double column row count mismatch");
+                        break;
+                    case table_column_type::string:
+                        if (column.array >= _string_arrays.array_count()) {
+                            add_issue(scan_severity::error, "table", issue_path, "table string column array is out of range");
+                        }
+                        else {
+                            auto values = _string_arrays.span(column.array);
+                            if (values.size() != table.row_count)
+                                add_issue(scan_severity::error, "table", issue_path, "table string column row count mismatch");
+                            for (auto value_id : values)
+                                validate_string(value_id, issue_path, "table cell");
+                        }
+                        break;
+                    }
+                }
+            };
+
+            auto validate_external_blob = [&](const object_record& metadata, const std::string& issue_path) {
+                if (metadata.storage != object_blob_storage::external_file)
+                    return;
+
+                ++report.stats.external_blob_count;
+                if (options.mode == scan_mode::quick)
+                    return;
+
+                auto has_uri = validate_string(metadata.blob_uri, issue_path, "external blob uri");
+                auto has_md5 = validate_string(metadata.blob_md5, issue_path, "external blob md5");
+                if (!has_uri || !has_md5)
+                    return;
+
+                std::filesystem::path file;
+                try {
+                    file = resolve_external_blob_uri(string(metadata.blob_uri));
+                }
+                catch (const std::exception& e) {
+                    add_issue(scan_severity::error, "external_blob", issue_path, e.what());
+                    return;
+                }
+
+                std::error_code ec;
+                if (!std::filesystem::exists(file, ec) || ec) {
+                    add_issue(scan_severity::error, "external_blob", issue_path, "external blob file does not exist");
+                    return;
+                }
+
+                auto file_size = std::filesystem::file_size(file, ec);
+                if (ec) {
+                    add_issue(scan_severity::error, "external_blob", issue_path, "external blob file size cannot be read");
+                    return;
+                }
+
+                if (file_size != metadata.blob_size_bytes) {
+                    add_issue(scan_severity::error, "external_blob", issue_path, "external blob file size mismatch");
+                    return;
+                }
+
+                if (options.mode != scan_mode::deep && !options.check_external_blob_md5)
+                    return;
+
+                std::ifstream in(file, std::ios::binary);
+                if (!in) {
+                    add_issue(scan_severity::error, "external_blob", issue_path, "external blob file cannot be opened");
+                    return;
+                }
+
+                std::vector<char> data((std::istreambuf_iterator<char>(in)), {});
+                auto bytes = std::as_bytes(std::span{ data });
+                if (md5_bytes(bytes) != string(metadata.blob_md5))
+                    add_issue(scan_severity::error, "blob.integrity", issue_path, "external blob MD5 mismatch");
+            };
+
+            auto scan_value = [&](const value_type& value, const std::string& issue_path) {
+                std::visit([&](const auto& item) {
+                    using item_type = std::remove_cvref_t<decltype(item)>;
+                    if constexpr (std::same_as<item_type, std::monostate>) {
+                        ++report.stats.null_value_count;
+                    }
+                    else if constexpr (std::same_as<item_type, bool>) {
+                        ++report.stats.value_count;
+                        ++report.stats.bool_value_count;
+                    }
+                    else if constexpr (std::same_as<item_type, std::int64_t>) {
+                        ++report.stats.value_count;
+                        ++report.stats.int_value_count;
+                    }
+                    else if constexpr (std::same_as<item_type, std::uint64_t>) {
+                        ++report.stats.value_count;
+                        ++report.stats.uint_value_count;
+                    }
+                    else if constexpr (std::same_as<item_type, double>) {
+                        ++report.stats.value_count;
+                        ++report.stats.double_value_count;
+                    }
+                    else if constexpr (std::same_as<item_type, string_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.string_value_count;
+                        validate_string(item.id, issue_path, "value");
+                    }
+                    else if constexpr (std::same_as<item_type, int_array_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.int_array_value_count;
+                        if (item.id >= _int_arrays.array_count())
+                            add_issue(scan_severity::error, "reference", issue_path, "int_array_ref is out of range");
+                    }
+                    else if constexpr (std::same_as<item_type, uint_array_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.uint_array_value_count;
+                        if (item.id >= _uint_arrays.array_count())
+                            add_issue(scan_severity::error, "reference", issue_path, "uint_array_ref is out of range");
+                    }
+                    else if constexpr (std::same_as<item_type, double_array_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.double_array_value_count;
+                        if (item.id >= _double_arrays.array_count())
+                            add_issue(scan_severity::error, "reference", issue_path, "double_array_ref is out of range");
+                    }
+                    else if constexpr (std::same_as<item_type, string_array_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.string_array_value_count;
+                        if (item.id >= _string_arrays.array_count()) {
+                            add_issue(scan_severity::error, "reference", issue_path, "string_array_ref is out of range");
+                        }
+                        else {
+                            for (auto string_id : _string_arrays.span(item.id))
+                                validate_string(string_id, issue_path, "string array value");
+                        }
+                    }
+                    else if constexpr (std::same_as<item_type, blob_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.blob_value_count;
+                        if (item.id >= _blobs.array_count())
+                            add_issue(scan_severity::error, "reference", issue_path, "blob_ref is out of range");
+                    }
+                    else if constexpr (std::same_as<item_type, object_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.object_value_count;
+                        if (item.id >= _serialized_objects.size()) {
+                            add_issue(scan_severity::error, "reference", issue_path, "object_ref is out of range");
+                        }
+                        else {
+                            const auto& metadata = _serialized_objects[item.id];
+                            if (metadata.type != invalid_string)
+                                validate_string(metadata.type, issue_path, "object type");
+                            validate_external_blob(metadata, issue_path);
+                        }
+                    }
+                    else if constexpr (std::same_as<item_type, table_ref>) {
+                        ++report.stats.value_count;
+                        ++report.stats.table_value_count;
+                        validate_table(item, issue_path);
+                    }
+                }, value);
+            };
+
+            std::function<bool(node_id, std::uint64_t)> scan_node = [&](node_id node, std::uint64_t depth) -> bool {
+                if (node >= _node_count) {
+                    add_issue(scan_severity::critical, "tree", scan_path_to_string(path), "node index is out of range");
+                    return false;
+                }
+
+                if (visited[node]) {
+                    add_issue(scan_severity::critical, "tree", scan_path_to_string(path), "tree cycle or duplicate child reference detected");
+                    return false;
+                }
+
+                visited[node] = true;
+                ++report.stats.reachable_node_count;
+                report.stats.max_depth = (std::max)(report.stats.max_depth, depth);
+
+                const auto& payload = _tree.get_value(node);
+                auto issue_path = scan_path_to_string(path);
+                if (!validate_string(payload.key, issue_path, "node key"))
+                    return !options.stop_on_first_error;
+
+                scan_value(payload.value, issue_path);
+                if (options.stop_on_first_error && !report.ok())
+                    return false;
+
+                if (options.progress) {
+                    if (!options.progress(scan_progress{
+                        .scanned_nodes = report.stats.reachable_node_count,
+                        .total_nodes = report.stats.node_count,
+                        .path = issue_path })) {
+                        report.cancelled = true;
+                        return false;
+                    }
+                }
+
+                for (auto child = _tree.get_child(node); child != invalid_node; child = _tree.get_sibling(child)) {
+                    if (child >= _node_count) {
+                        add_issue(scan_severity::critical, "tree", issue_path, "child node index is out of range");
+                        return false;
+                    }
+
+                    const auto& child_payload = _tree.get_value(child);
+                    if (valid_string(child_payload.key))
+                        path.push_back(string_type{ string(child_payload.key) });
+                    else
+                        path.push_back({});
+
+                    auto keep_going = scan_node(child, depth + 1);
+                    path.pop_back();
+                    if (!keep_going)
+                        return false;
+                }
+
+                return true;
+            };
+
+            scan_node(root_node, 0);
+
+            if (!report.cancelled) {
+                for (node_id node = 0; node < _node_count; ++node)
+                    if (!visited[node])
+                        ++report.stats.orphaned_node_count;
+            }
+
+            return report;
+        }
+
         void load_object(object_ref ref) const
         {
             auto& metadata = object_metadata(ref);
@@ -1411,6 +1785,82 @@ namespace gb::yadro::container
                     // Logging must not change database operation semantics.
                 }
             }
+        }
+
+        [[nodiscard]] static constexpr log_level scan_issue_log_level(scan_severity severity) noexcept
+        {
+            switch (severity) {
+            case scan_severity::info: return log_level::info;
+            case scan_severity::warning: return log_level::warning;
+            case scan_severity::error: return log_level::error;
+            case scan_severity::critical: return log_level::critical;
+            }
+            return log_level::error;
+        }
+
+        static void append_scan_issue(scan_report& report, const scan_options& options, scan_severity severity,
+            std::string category, const std::string& path, std::string message)
+        {
+            switch (severity) {
+            case scan_severity::warning:
+                ++report.stats.warning_count;
+                break;
+            case scan_severity::error:
+                ++report.stats.error_count;
+                break;
+            case scan_severity::critical:
+                ++report.stats.critical_count;
+                break;
+            case scan_severity::info:
+                break;
+            }
+
+            if (options.collect_paths) {
+                report.issues.push_back(scan_issue{
+                    .severity = severity,
+                    .category = std::move(category),
+                    .path = path,
+                    .message = std::move(message)
+                });
+            }
+            else {
+                report.issues.push_back(scan_issue{
+                    .severity = severity,
+                    .category = std::move(category),
+                    .message = std::move(message)
+                });
+            }
+        }
+
+        void add_scan_issue(scan_report& report, const scan_options& options, scan_severity severity,
+            std::string category, const std::string& path, std::string message) const
+        {
+            auto logged_category = category;
+            auto logged_message = message;
+            basic_gbdb::append_scan_issue(report, options, severity, std::move(category), path, std::move(message));
+
+            if (!options.log_findings)
+                return;
+
+            emit_log({
+                .level = scan_issue_log_level(severity),
+                .category = "db.scan",
+                .event = "issue",
+                .path = path,
+                .message = logged_category + ": " + logged_message,
+                .force = true
+            });
+        }
+
+        [[nodiscard]] static std::string scan_path_to_string(std::span<const string_type> path)
+        {
+            std::string result;
+            for (auto& part : path) {
+                if (!result.empty())
+                    result.push_back('/');
+                append_narrow(result, string_view{ part });
+            }
+            return result;
         }
 
         [[nodiscard]] std::string path_to_string(path_span path) const

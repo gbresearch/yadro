@@ -138,6 +138,18 @@ namespace
         return std::string((std::istreambuf_iterator<char>(in)), {});
     }
 
+    inline std::vector<std::byte> bytes_from_text(std::string_view text)
+    {
+        auto bytes = std::as_bytes(std::span{ text.data(), text.size() });
+        return std::vector<std::byte>{ bytes.begin(), bytes.end() };
+    }
+
+    inline void write_test_file(const std::filesystem::path& file, std::span<const std::byte> bytes)
+    {
+        std::ofstream out(file, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+
     GB_TEST(container, static_string_test)
     {
         static_string<1> s1;
@@ -1365,6 +1377,125 @@ namespace
         gbassert(events.back().message.find("Failed to open") != std::string::npos);
 
         std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_scan_quick_statistics_test)
+    {
+        json_db db;
+        db.set({ "market", "symbol" }, "AAPL");
+        db.set({ "market", "price" }, 193.25);
+        std::array<std::int64_t, 3> history{ 190, 191, 193 };
+        db.set_array({ "market", "history" }, std::span{ history });
+        db.set_string_array({ "market", "venues" }, { "nasdaq", "arca" });
+
+        auto report = db.scan_database();
+
+        gbassert(report.ok());
+        gbassert(!report.cancelled);
+        gbassert(report.issues.empty());
+        gbassert(report.stats.node_count == db.node_count());
+        gbassert(report.stats.reachable_node_count == db.node_count());
+        gbassert(report.stats.max_depth == 2);
+        gbassert(report.stats.value_count == 4);
+        gbassert(report.stats.string_value_count == 1);
+        gbassert(report.stats.double_value_count == 1);
+        gbassert(report.stats.int_array_value_count == 1);
+        gbassert(report.stats.string_array_value_count == 1);
+        gbassert(report.stats.string_count >= 8);
+    }
+
+    GB_TEST(container, gbdb_scan_reports_invalid_reference_and_logs_test)
+    {
+        json_db db;
+        std::vector<json_db::log_event> events;
+        db.add_log_sink([&](const json_db::log_event& event) { events.push_back(event); });
+        auto node = db.set({ "broken" }, "value");
+        db.value(node) = json_db::value_type{ json_db::string_ref{ 999 } };
+
+        auto report = db.scan_database();
+
+        gbassert(!report.ok());
+        gbassert(report.stats.error_count == 1);
+        gbassert(report.issues.size() == 1);
+        gbassert(report.issues.front().severity == json_db::scan_severity::error);
+        gbassert(report.issues.front().category == "reference");
+        gbassert(report.issues.front().path == "broken");
+        gbassert(!events.empty());
+        gbassert(events.back().category == "db.scan");
+        gbassert(events.back().event == "issue");
+    }
+
+    GB_TEST(container, gbdb_scan_full_checks_external_blob_files_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_scan_missing_blob_test";
+        reset_test_directory(export_dir);
+
+        json_db db;
+        db.set_external_blob_base_directory(export_dir);
+        db.set_deferred_serialized_object({ "assets", "payload" }, "missing.bin", 12, "00000000000000000000000000000000");
+
+        auto quick = db.scan_database();
+        gbassert(quick.ok());
+
+        json_db::scan_options options;
+        options.mode = json_db::scan_mode::full;
+        auto full = db.scan_database(options);
+
+        gbassert(!full.ok());
+        gbassert(full.stats.external_blob_count == 1);
+        gbassert(full.issues.size() == 1);
+        gbassert(full.issues.front().category == "external_blob");
+        gbassert(full.issues.front().path == "assets/payload");
+
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_scan_deep_checks_external_blob_md5_test)
+    {
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_scan_md5_blob_test";
+        reset_test_directory(export_dir);
+
+        auto bytes = bytes_from_text("payload");
+        write_test_file(export_dir / "payload.bin", bytes);
+
+        json_db db;
+        db.set_external_blob_base_directory(export_dir);
+        db.set_deferred_serialized_object({ "assets", "payload" }, "payload.bin", bytes.size(), "00000000000000000000000000000000");
+
+        json_db::scan_options full_options;
+        full_options.mode = json_db::scan_mode::full;
+        auto full = db.scan_database(full_options);
+        gbassert(full.ok());
+
+        json_db::scan_options deep_options;
+        deep_options.mode = json_db::scan_mode::deep;
+        auto deep = db.scan_database(deep_options);
+
+        gbassert(!deep.ok());
+        gbassert(deep.issues.size() == 1);
+        gbassert(deep.issues.front().category == "blob.integrity");
+        gbassert(deep.issues.front().path == "assets/payload");
+
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_scan_can_be_cancelled_test)
+    {
+        json_db db;
+        db.set({ "a" }, 1);
+        db.set({ "b" }, 2);
+        db.set({ "c" }, 3);
+
+        json_db::scan_options options;
+        options.progress = [](const json_db::scan_progress& progress) {
+            return progress.scanned_nodes < 2;
+        };
+
+        auto report = db.scan_database(options);
+
+        gbassert(report.cancelled);
+        gbassert(!report.ok());
+        gbassert(report.stats.reachable_node_count < db.node_count());
     }
 
 #if defined(_WIN32)
