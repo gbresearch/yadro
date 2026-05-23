@@ -138,6 +138,7 @@
     <ClInclude Include="..\container\gbdb.h" />
     <ClInclude Include="..\container\gbdb_json.h" />
     <ClInclude Include="..\container\gbcontainer.h" />
+    <ClInclude Include="..\container\gbdb_registry.h" />
     <ClInclude Include="..\container\graph.h" />
     <ClInclude Include="..\container\lockfree_memo_table.h" />
     <ClInclude Include="..\container\matrix.h" />

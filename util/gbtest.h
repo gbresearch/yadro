@@ -119,7 +119,7 @@ namespace gb::yadro::util
         {
             std::vector<std::future<void>> futures;
             auto start_time = std::chrono::system_clock::now();
-            const std::size_t tab_size = 50;
+            const std::size_t tab_size = 75;
 
             for (auto& rec : _tests)
             {

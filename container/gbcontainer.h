@@ -41,3 +41,4 @@
 #include "datapool.h"
 #include "gbdb.h"
 #include "gbdb_json.h"
+#include "gbdb_registry.h"

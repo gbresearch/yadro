@@ -288,6 +288,7 @@ namespace gb::yadro::container
             std::string event;
             std::string path;
             std::string message;
+            bool force = false;
         };
 
         using log_sink = std::function<void(const log_event&)>;
@@ -1109,6 +1110,11 @@ namespace gb::yadro::container
             _log_file_streams.clear();
         }
 
+        void log(log_event event) const noexcept
+        {
+            emit_log(event);
+        }
+
         void load_object(object_ref ref) const
         {
             auto& metadata = object_metadata(ref);
@@ -1383,6 +1389,17 @@ namespace gb::yadro::container
 
         void emit_log(const log_event& event) const noexcept
         {
+            if (event.force) {
+                for (const auto& sink : _log_sinks) {
+                    try {
+                        sink(event);
+                    }
+                    catch (...) {
+                    }
+                }
+                return;
+            }
+
             if (!should_log(event.level))
                 return;
 

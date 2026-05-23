@@ -33,6 +33,7 @@
 #include "../container/datapool.h"
 #include "../container/gbdb.h"
 #include "../container/gbdb_json.h"
+#include "../container/gbdb_registry.h"
 #include "../archive/archive.h"
 #include "../async/async.h"
 #include <vector>
@@ -1365,6 +1366,182 @@ namespace
 
         std::filesystem::remove_all(export_dir);
     }
+
+#if defined(_WIN32)
+    GB_TEST(container, gbdb_registry_utf16_helpers_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        auto utf8 = std::string{ "AAPL \xd0\xa6\xd0\xb5\xd0\xbd\xd0\xb0 \xe2\x82\xac" };
+        auto utf16 = reg::utf8_to_utf16(utf8);
+        gbassert(reg::utf16_to_utf8(std::u16string_view{ utf16 }) == utf8);
+    }
+
+    GB_TEST(container, gbdb_registry_imports_expand_string_with_metadata_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        json_db db;
+        reg::mock_registry_backend backend;
+        backend.set_value(u"Software\\Hive", u"Path", reg::registry_value::expand_string(u"%TEMP%\\market"));
+        backend.set_value(u"Software\\Hive", u"Count", reg::registry_value::dword(42));
+
+        auto result = reg::read_registry_tree(db, backend, u"Software\\Hive");
+
+        gbassert(result.values_read == 2);
+        gbassert(db.string(std::get<json_db::string_ref>(*db.get({ "Path" }))) == "%TEMP%\\market");
+        gbassert(std::get<std::uint64_t>(*db.get({ "Count" })) == 42);
+        gbassert(db.string(std::get<json_db::string_ref>(*db.get({ "Path", "$registry", "type" }))) == "expand_sz");
+        gbassert(db.string(std::get<json_db::string_ref>(*db.get({ "$registry", "schema_version" }))) == "1");
+        gbassert(db.string(std::get<json_db::string_ref>(*db.get({ "$registry", "registry_type_policy" }))) == "fail_unsupported");
+        gbassert(db.get({ "$registry", "imported_at_utc" }) != nullptr);
+    }
+
+    GB_TEST(container, gbdb_registry_write_fails_on_collision_unless_overwrite_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        json_db db;
+        std::vector<json_db::log_event> events;
+        db.add_log_sink([&](const json_db::log_event& event) { events.push_back(event); });
+        db.set({ "Name" }, "AAPL");
+
+        reg::mock_registry_backend backend;
+        backend.set_value(u"Software\\Hive", u"Name", reg::registry_value::string(u"MSFT"));
+
+        must_throw<reg::registry_error>([&] {
+            reg::write_registry_tree(db, backend, u"Software\\Hive");
+        });
+        gbassert(backend.value(u"Software\\Hive", u"Name")->utf16 == u"MSFT");
+        gbassert(!events.empty());
+        gbassert(events.back().category == "registry.collision");
+
+        reg::registry_write_options options;
+        options.collision_policy = reg::registry_collision_policy::overwrite;
+        auto result = reg::write_registry_tree(db, backend, u"Software\\Hive", options);
+        gbassert(result.values_written == 1);
+        gbassert(backend.value(u"Software\\Hive", u"Name")->utf16 == u"AAPL");
+    }
+
+    GB_TEST(container, gbdb_registry_write_dry_run_logs_without_mutating_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        json_db db;
+        std::vector<json_db::log_event> events;
+        db.add_log_sink([&](const json_db::log_event& event) { events.push_back(event); });
+        db.set({ "Name" }, "AAPL");
+
+        reg::mock_registry_backend backend;
+        reg::registry_write_options options;
+        options.dry_run = true;
+        auto result = reg::write_registry_tree(db, backend, u"Software\\Hive", options);
+
+        gbassert(result.values_planned == 1);
+        gbassert(result.values_written == 0);
+        gbassert(!backend.value(u"Software\\Hive", u"Name").has_value());
+        gbassert(!events.empty());
+        gbassert(events.front().category == "registry.write");
+    }
+
+    GB_TEST(container, gbdb_registry_rejects_unsupported_and_invalid_dword_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        json_db db;
+        std::vector<json_db::log_event> events;
+        db.add_log_sink([&](const json_db::log_event& event) { events.push_back(event); });
+        db.set({ "Price" }, 193.25);
+        db.set({ "TooLarge" }, static_cast<std::uint64_t>(0x1'0000'0000ULL));
+        reg::set_registry_value_type(db, { "TooLarge" }, reg::registry_value_type::dword);
+
+        reg::mock_registry_backend backend;
+        must_throw<reg::registry_error>([&] {
+            reg::write_registry_tree(db, backend, u"Software\\Hive");
+        });
+        gbassert(!events.empty());
+        gbassert(events.back().category == "registry.type");
+
+        db.set({ "Price" }, static_cast<std::uint64_t>(1));
+        must_throw<reg::registry_error>([&] {
+            reg::write_registry_tree(db, backend, u"Software\\Hive");
+        });
+        gbassert(!backend.value(u"Software\\Hive", u"TooLarge").has_value());
+    }
+
+    GB_TEST(container, gbdb_registry_mock_handles_large_deep_and_long_names_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        reg::mock_registry_backend backend;
+        constexpr auto value_count = 2000;
+        for (int i = 0; i < value_count; ++i)
+            backend.set_value(u"Software\\Hive", std::u16string{ u"Value" } + reg::utf8_to_utf16(std::to_string(i)), reg::registry_value::dword(static_cast<std::uint32_t>(i)));
+
+        std::u16string deep_key = u"Software\\Hive";
+        std::vector<std::string> deep_parts;
+        for (int i = 0; i < 64; ++i) {
+            auto part = std::string{ "L" } + std::to_string(i);
+            deep_key += u"\\";
+            deep_key += reg::utf8_to_utf16(part);
+            deep_parts.push_back(std::move(part));
+        }
+        backend.set_value(deep_key, u"Leaf", reg::registry_value::string(u"ok"));
+
+        std::u16string long_name(16000, u'x');
+        backend.set_value(u"Software\\Hive", long_name, reg::registry_value::string(u"long"));
+
+        json_db db;
+        auto result = reg::read_registry_tree(db, backend, u"Software\\Hive");
+
+        gbassert(result.values_read == value_count + 2);
+        gbassert(std::get<std::uint64_t>(*db.get({ "Value1999" })) == 1999);
+        std::vector<std::string_view> deep_path;
+        for (auto& part : deep_parts)
+            deep_path.push_back(part);
+        deep_path.push_back("Leaf");
+        gbassert(db.string(std::get<json_db::string_ref>(*db.get(std::span<const std::string_view>{ deep_path.data(), deep_path.size() }))) == "ok");
+        auto long_name_utf8 = std::string(16000, 'x');
+        gbassert(db.get({ std::string_view{ long_name_utf8 } }) != nullptr);
+        gbassert(result.max_depth >= 64);
+    }
+
+    GB_TEST(container, gbdb_registry_win32_integration_test)
+    {
+        namespace reg = gb::yadro::container::registry;
+
+        auto root = std::u16string{ u"Software\\YadroTestHive\\" } + reg::utf8_to_utf16(std::to_string(::GetCurrentProcessId()));
+        auto to_wide = [](std::u16string_view value) {
+            std::wstring result;
+            result.reserve(value.size());
+            for (auto ch : value)
+                result.push_back(static_cast<wchar_t>(ch));
+            return result;
+        };
+        auto root_w = to_wide(root);
+        ::RegDeleteTreeW(HKEY_CURRENT_USER, root_w.c_str());
+
+        try {
+            reg::win32_registry_backend backend{ HKEY_CURRENT_USER };
+            json_db db;
+            db.set({ "Name" }, "AAPL");
+            db.set({ "Count" }, static_cast<std::uint64_t>(42));
+            reg::write_registry_tree(db, backend, root);
+
+            json_db imported;
+            auto result = reg::read_registry_tree(imported, backend, root);
+            gbassert(result.values_read == 2);
+            gbassert(imported.string(std::get<json_db::string_ref>(*imported.get({ "Name" }))) == "AAPL");
+            gbassert(std::get<std::uint64_t>(*imported.get({ "Count" })) == 42);
+        }
+        catch (...) {
+            ::RegDeleteTreeW(HKEY_CURRENT_USER, root_w.c_str());
+            throw;
+        }
+
+        ::RegDeleteTreeW(HKEY_CURRENT_USER, root_w.c_str());
+    }
+#endif
 
     GB_TEST(container, gbdb_json_writer_test)
     {
