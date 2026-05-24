@@ -54,6 +54,8 @@
 #include <array>
 #include <limits>
 #include <algorithm>
+#include <optional>
+#include <condition_variable>
 
 #ifdef GBWINDOWS
 
@@ -88,6 +90,7 @@ namespace gb::yadro::util
     inline constexpr auto max_pipe_frame_size = 16ull * 1024 * 1024;
     inline constexpr auto max_pipe_instances = 255u;
     inline constexpr auto max_pending_pipe_connections = max_pipe_instances - 1u;
+    inline constexpr DWORD pipe_io_timeout_ms = 30'000;
     inline constexpr std::uint32_t server_disconnect = -1;
     inline constexpr std::uint32_t server_shutdown = -2;
     inline constexpr auto pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
@@ -149,11 +152,33 @@ namespace gb::yadro::util
         HANDLE _handle = INVALID_HANDLE_VALUE;
     };
 
+    template<class Rep, class Period>
+    inline auto pipe_timeout_milliseconds(const std::chrono::duration<Rep, Period>& timeout)
+    {
+        if (timeout < timeout.zero())
+            throw util::exception_t("pipe timeout must be non-negative");
+
+        auto timeout_ms = std::chrono::ceil<std::chrono::milliseconds>(timeout).count();
+        if (timeout_ms > (std::numeric_limits<DWORD>::max)())
+            throw util::exception_t("pipe timeout is too large");
+
+        return static_cast<DWORD>(timeout_ms);
+    }
+
+    inline auto create_pipe_event()
+    {
+        unique_win_handle event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        if (!event.valid())
+            throw util::exception_t("failed to create pipe event: ", GetLastError());
+        return event;
+    }
+
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
     {
         using char_type = char;
-        explicit owinpipe_stream(HANDLE pipe) : _pipe(pipe) {}
+        explicit owinpipe_stream(HANDLE pipe, DWORD timeout_ms = pipe_io_timeout_ms) : _pipe(pipe), _timeout_ms(timeout_ms) {}
+        explicit owinpipe_stream(HANDLE pipe, auto timeout) : owinpipe_stream(pipe, pipe_timeout_milliseconds(timeout)) {}
 
         void write(const char_type* c, std::streamsize size)
         {
@@ -161,8 +186,33 @@ namespace gb::yadro::util
             {
                 auto bytes_to_send = static_cast<DWORD>(std::min<std::streamsize>(size - sent_bytes, pipe_chunk_size));
 
+                auto event = create_pipe_event();
+                OVERLAPPED overlapped{};
+                overlapped.hEvent = event.get();
+
                 DWORD bytes_written{};
-                if (not WriteFile(_pipe, &c[sent_bytes], bytes_to_send, &bytes_written, nullptr))
+                if (not WriteFile(_pipe, &c[sent_bytes], bytes_to_send, nullptr, &overlapped))
+                {
+                    auto last_error = GetLastError();
+                    if (last_error != ERROR_IO_PENDING)
+                        throw util::exception_t(std::format("owinpipe_stream write failed, error: {}, bytes requested: {}, sent bytes: {}, bytes to send: {}, bytes written: {}",
+                            last_error, size, sent_bytes, bytes_to_send, bytes_written));
+
+                    auto wait_result = WaitForSingleObject(event.get(), _timeout_ms);
+                    if (wait_result == WAIT_TIMEOUT)
+                    {
+                        CancelIoEx(_pipe, &overlapped);
+                        WaitForSingleObject(event.get(), INFINITE);
+                        throw util::exception_t(std::format("owinpipe_stream write timed out after {} ms, bytes requested: {}, sent bytes: {}, bytes to send: {}",
+                            _timeout_ms, size, sent_bytes, bytes_to_send));
+                    }
+
+                    if (wait_result != WAIT_OBJECT_0)
+                        throw util::exception_t(std::format("owinpipe_stream write wait failed, error: {}, bytes requested: {}, sent bytes: {}, bytes to send: {}",
+                            GetLastError(), size, sent_bytes, bytes_to_send));
+                }
+
+                if (!GetOverlappedResult(_pipe, &overlapped, &bytes_written, FALSE))
                     throw util::exception_t(std::format("owinpipe_stream write failed, error: {}, bytes requested: {}, sent bytes: {}, bytes to send: {}, bytes written: {}",
                         GetLastError(), size, sent_bytes, bytes_to_send, bytes_written));
 
@@ -176,6 +226,7 @@ namespace gb::yadro::util
 
     private:
         HANDLE _pipe = INVALID_HANDLE_VALUE;
+        DWORD _timeout_ms = pipe_io_timeout_ms;
     };
 
     using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
@@ -184,7 +235,8 @@ namespace gb::yadro::util
     struct iwinpipe_stream
     {
         using char_type = char;
-        explicit iwinpipe_stream(HANDLE pipe) : _pipe(pipe) {}
+        explicit iwinpipe_stream(HANDLE pipe, DWORD timeout_ms = pipe_io_timeout_ms) : _pipe(pipe), _timeout_ms(timeout_ms) {}
+        explicit iwinpipe_stream(HANDLE pipe, auto timeout) : iwinpipe_stream(pipe, pipe_timeout_milliseconds(timeout)) {}
 
         void read(char_type* c, std::streamsize size)
         {
@@ -192,8 +244,33 @@ namespace gb::yadro::util
             {
                 auto bytes_to_read = static_cast<DWORD>(std::min<std::streamsize>(size - received_bytes, pipe_chunk_size));
 
+                auto event = create_pipe_event();
+                OVERLAPPED overlapped{};
+                overlapped.hEvent = event.get();
+
                 DWORD bytes_read{};
-                if (not ReadFile(_pipe, &c[received_bytes], bytes_to_read, &bytes_read, nullptr))
+                if (not ReadFile(_pipe, &c[received_bytes], bytes_to_read, nullptr, &overlapped))
+                {
+                    auto last_error = GetLastError();
+                    if (last_error != ERROR_IO_PENDING)
+                        throw util::exception_t(std::format("iwinpipe_stream read failed, error: {}, bytes requested: {}, received bytes: {}, bytes to read: {}, bytes read: {}, buffer location: {}",
+                            last_error, size, received_bytes, bytes_to_read, bytes_read, (void*)(c)));
+
+                    auto wait_result = WaitForSingleObject(event.get(), _timeout_ms);
+                    if (wait_result == WAIT_TIMEOUT)
+                    {
+                        CancelIoEx(_pipe, &overlapped);
+                        WaitForSingleObject(event.get(), INFINITE);
+                        throw util::exception_t(std::format("iwinpipe_stream read timed out after {} ms, bytes requested: {}, received bytes: {}, bytes to read: {}, buffer location: {}",
+                            _timeout_ms, size, received_bytes, bytes_to_read, (void*)(c)));
+                    }
+
+                    if (wait_result != WAIT_OBJECT_0)
+                        throw util::exception_t(std::format("iwinpipe_stream read wait failed, error: {}, bytes requested: {}, received bytes: {}, bytes to read: {}, buffer location: {}",
+                            GetLastError(), size, received_bytes, bytes_to_read, (void*)(c)));
+                }
+
+                if (!GetOverlappedResult(_pipe, &overlapped, &bytes_read, FALSE))
                     throw util::exception_t(std::format("iwinpipe_stream read failed, error: {}, bytes requested: {}, received bytes: {}, bytes to read: {}, bytes read: {}, buffer location: {}",
                         GetLastError(), size, received_bytes, bytes_to_read, bytes_read, (void*)(c)));
 
@@ -207,13 +284,32 @@ namespace gb::yadro::util
 
     private:
         HANDLE _pipe = INVALID_HANDLE_VALUE;
+        DWORD _timeout_ms = pipe_io_timeout_ms;
     };
 
     using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
 
     struct winpipe_server_state
     {
+        winpipe_server_state() : shutdown_event(CreateEvent(nullptr, TRUE, FALSE, nullptr))
+        {
+            if (!shutdown_event.valid())
+                throw util::exception_t("failed to create pipe shutdown event: ", GetLastError());
+        }
+
+        void request_shutdown() noexcept
+        {
+            shutdown = true;
+            if (shutdown_event.valid())
+                SetEvent(shutdown_event.get());
+            active_connections_changed.notify_all();
+        }
+
         std::atomic_bool shutdown{ false };
+        unique_win_handle shutdown_event;
+        std::mutex active_connections_mutex;
+        std::condition_variable active_connections_changed;
+        std::size_t active_connections = 0;
     };
 
     inline auto pipe_server_mutex_name(const std::wstring& pipename)
@@ -319,6 +415,7 @@ namespace gb::yadro::util
     
     protected:
         unique_win_handle _pipe;
+        std::shared_ptr<util::logger> _log;
     private:
         std::vector<char> receive_frame() const
         {
@@ -338,7 +435,6 @@ namespace gb::yadro::util
             return frame;
         }
 
-        std::shared_ptr<util::logger> _log;
         bool _log_send_receive = false;
     };
 
@@ -372,7 +468,7 @@ namespace gb::yadro::util
                         0,              // no sharing 
                         nullptr,        // default security attributes
                         OPEN_EXISTING,  // opens existing pipe 
-                        0,              // default attributes 
+                        FILE_FLAG_OVERLAPPED,
                         nullptr);       // no template file 
                 }
             }
@@ -681,6 +777,15 @@ namespace gb::yadro::util
                 }
             }
         }
+
+        static std::optional<winpipe_server_t> accept(const std::wstring& pipename, HANDLE shutdown_event, std::shared_ptr<util::logger> log = nullptr);
+
+    private:
+        winpipe_server_t(unique_win_handle pipe, std::shared_ptr<util::logger> log)
+            : winpipe_base_t(std::move(log))
+        {
+            _pipe = std::move(pipe);
+        }
     };
 
     inline auto run_pipe_functions(winpipe_server_t& server, auto& functions)
@@ -688,70 +793,106 @@ namespace gb::yadro::util
         return std::apply([&](auto&... fn) { return server.run(fn...); }, functions);
     }
 
-    inline void wake_pipe_accept(const std::wstring& pipename) noexcept
+    inline std::optional<unique_win_handle> connect_pipe_instance(const std::wstring& pipename, HANDLE shutdown_event, std::shared_ptr<util::logger> log)
     {
-        try
+        auto log_pipe = [&](HANDLE pipe, auto&&... args)
+            {
+                if (log)
+                    log->writeln(util::time_stamp(), ':', pipe, ':', std::forward<decltype(args)>(args)...);
+            };
+
+        const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
+        unique_win_handle pipe{ CreateNamedPipe(
+            pipename.c_str(),             // pipe name
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            pipe_mode,                    // byte type, byte-read mode, blocking mode
+            PIPE_UNLIMITED_INSTANCES,     // max. instances (255)
+            buf_size,                     // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
+            buf_size,                     // input buffer size
+            NMPWAIT_WAIT_FOREVER,         // client time-out in ms
+            nullptr) };                   // default security attribute
+
+        if (!pipe.valid())
         {
-            if (!WaitNamedPipe(pipename.c_str(), 10))
-                return;
-
-            unique_win_handle pipe{ CreateFile(
-                pipename.c_str(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                nullptr,
-                OPEN_EXISTING,
-                0,
-                nullptr) };
-
-            if (!pipe.valid())
-                return;
-
-            DWORD mode = PIPE_READMODE_BYTE;
-            SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+            auto str_name = pipe_name_for_error(pipename);
+            log_pipe(pipe.get(), "failed to create pipe: ", str_name, ": ", GetLastError());
+            throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
         }
-        catch (...)
-        {}
+
+        log_pipe(pipe.get(), "server created a pipe");
+
+        auto event = create_pipe_event();
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.get();
+
+        const auto connected = ConnectNamedPipe(pipe.get(), &overlapped);
+        if (connected)
+        {
+            log_pipe(pipe.get(), "server connected client");
+            return std::move(pipe);
+        }
+
+        auto last_error = GetLastError();
+        if (last_error == ERROR_PIPE_CONNECTED)
+        {
+            log_pipe(pipe.get(), "server connected client");
+            return std::move(pipe);
+        }
+
+        if (last_error != ERROR_IO_PENDING)
+        {
+            log_pipe(pipe.get(), "failed to connect to pipe: ", last_error);
+            throw util::exception_t("failed to connect to pipe: ", last_error);
+        }
+
+        HANDLE events[] = { event.get(), shutdown_event };
+        const auto event_count = shutdown_event != nullptr ? 2u : 1u;
+        const auto wait_result = WaitForMultipleObjects(event_count, events, FALSE, INFINITE);
+
+        if (wait_result == WAIT_OBJECT_0)
+        {
+            DWORD ignored{};
+            if (!GetOverlappedResult(pipe.get(), &overlapped, &ignored, FALSE))
+            {
+                last_error = GetLastError();
+                log_pipe(pipe.get(), "failed to complete pipe connection: ", last_error);
+                throw util::exception_t("failed to complete pipe connection: ", last_error);
+            }
+
+            log_pipe(pipe.get(), "server connected client");
+            return std::move(pipe);
+        }
+
+        if (event_count == 2u && wait_result == WAIT_OBJECT_0 + 1)
+        {
+            CancelIoEx(pipe.get(), &overlapped);
+            WaitForSingleObject(event.get(), INFINITE);
+            return std::nullopt;
+        }
+
+        last_error = GetLastError();
+        log_pipe(pipe.get(), "failed waiting for pipe connection: ", last_error);
+        throw util::exception_t("failed waiting for pipe connection: ", last_error);
     }
 
     //----------------------------------------------------------------------------------------------
     inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, auto&& ...log_args)
         : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...)
     {
-        const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
+        auto connected_pipe = connect_pipe_instance(pipename, nullptr, _log);
+        if (!connected_pipe)
+            throw util::exception_t("pipe connection was cancelled without a shutdown event");
 
-        if (_pipe = CreateNamedPipe(
-            pipename.c_str(),             // pipe name 
-            PIPE_ACCESS_DUPLEX,       // read/write access 
-            pipe_mode,                // byte type, byte-read mode, blocking mode
-            PIPE_UNLIMITED_INSTANCES, // max. instances (255)
-            buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
-            buf_size,                  // input buffer size 
-            NMPWAIT_WAIT_FOREVER,      // client time-out in ms
-            nullptr);                  // default security attribute             
+        _pipe = std::move(*connected_pipe);
+    }
 
-            _pipe == INVALID_HANDLE_VALUE)
-        {
-            auto str_name = pipe_name_for_error(pipename);
-            log("failed to create pipe: ", str_name, ": ", GetLastError());
-            throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
-        }
+    inline std::optional<winpipe_server_t> winpipe_server_t::accept(const std::wstring& pipename, HANDLE shutdown_event, std::shared_ptr<util::logger> log)
+    {
+        auto connected_pipe = connect_pipe_instance(pipename, shutdown_event, log);
+        if (!connected_pipe)
+            return std::nullopt;
 
-        log("server created a pipe");
-
-        // connect to client, ERROR_PIPE_CONNECTED means client connected before ConnectNamedPipe called
-        // ConnectNamedPipe blocks indefinitely until connected or failed
-        const auto connected = ConnectNamedPipe(_pipe, nullptr);
-        if (!connected)
-        {
-            auto last_error = GetLastError();
-            if (last_error != ERROR_PIPE_CONNECTED)
-            {
-                log("failed to connect to pipe: ", last_error);
-                throw util::exception_t("failed to connect to pipe: ", last_error);
-            }
-        }
-        log("server connected client");
+        return winpipe_server_t{ std::move(*connected_pipe), std::move(log) };
     }
 
     //----------------------------------------------------------------------------------------------
@@ -802,37 +943,64 @@ namespace gb::yadro::util
 
         if (l.try_lock_for(100ms))
         {
-            std::vector<std::future<void>> v;
             auto state = std::make_shared<winpipe_server_state>();
             auto functions = std::make_shared<std::tuple<std::decay_t<Fn>...>>(std::forward<Fn>(fn)...);
 
             while (!state->shutdown)
             {
-                std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
-
-                if (v.size() >= max_pending_pipe_connections)
                 {
-                    std::this_thread::sleep_for(10ms);
-                    continue;
+                    std::unique_lock lock{ state->active_connections_mutex };
+                    state->active_connections_changed.wait(lock, [&] {
+                        return state->shutdown || state->active_connections < max_pending_pipe_connections;
+                        });
+
+                    if (state->shutdown)
+                        break;
                 }
 
-                auto server = winpipe_server_t{ pipename, log };
-                if (state->shutdown)
+                auto server = winpipe_server_t::accept(pipename, state->shutdown_event.get(), log);
+                if (!server)
                     break;
 
-                auto f = std::future<void>(tp([state, functions, pipename, s = std::move(server)]() mutable {
-                    auto ret = run_pipe_functions(s, *functions);
-                    if(ret == server_shutdown)
+                {
+                    std::lock_guard lock{ state->active_connections_mutex };
+                    if (state->shutdown)
+                        break;
+                    ++state->active_connections;
+                }
+
+                try
+                {
+                    static_cast<void>(tp([state, functions, s = std::move(*server)]() mutable {
+                        try
+                        {
+                            auto ret = run_pipe_functions(s, *functions);
+                            if (ret == server_shutdown)
+                                state->request_shutdown();
+                        }
+                        catch (...)
+                        {}
+
+                        {
+                            std::lock_guard lock{ state->active_connections_mutex };
+                            --state->active_connections;
+                        }
+                        state->active_connections_changed.notify_all();
+                        }));
+                }
+                catch (...)
+                {
                     {
-                        state->shutdown = true;
-                        wake_pipe_accept(pipename);
+                        std::lock_guard lock{ state->active_connections_mutex };
+                        --state->active_connections;
                     }
-                    }));
-                v.push_back(std::move(f));
+                    state->active_connections_changed.notify_all();
+                    throw;
+                }
             }
 
-            for (auto& f : v)
-                f.wait();
+            std::unique_lock lock{ state->active_connections_mutex };
+            state->active_connections_changed.wait(lock, [&] { return state->active_connections == 0; });
         }
         else
         {

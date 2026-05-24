@@ -944,6 +944,70 @@ unset multiplot)*";
 #endif
     }
 
+    GB_TEST(util, win_pipe_accept_can_be_cancelled_without_client)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono_literals;
+        unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        gbassert(shutdown_event.valid());
+
+        auto accept_result = std::async(std::launch::async, [&]
+            {
+                return winpipe_server_t::accept(L"\\\\.\\pipe\\yadro\\cancel_accept", shutdown_event.get(), nullptr).has_value();
+            });
+
+        std::this_thread::sleep_for(50ms);
+        gbassert(SetEvent(shutdown_event.get()));
+        gbassert(accept_result.wait_for(1s) == std::future_status::ready);
+        gbassert(!accept_result.get());
+#endif
+    }
+
+    GB_TEST(util, win_pipe_read_times_out_with_idle_peer)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono_literals;
+        const auto pipename = L"\\\\.\\pipe\\yadro\\read_timeout";
+
+        unique_win_handle server_pipe{ CreateNamedPipe(
+            pipename,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            pipe_mode,
+            1,
+            pipe_chunk_size,
+            pipe_chunk_size,
+            NMPWAIT_WAIT_FOREVER,
+            nullptr) };
+        gbassert(server_pipe.valid());
+
+        unique_win_handle client_pipe{ CreateFile(
+            pipename,
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            nullptr) };
+        gbassert(client_pipe.valid());
+
+        if (!ConnectNamedPipe(server_pipe.get(), nullptr))
+            gbassert(GetLastError() == ERROR_PIPE_CONNECTED);
+
+        char value{};
+        const auto start = std::chrono::steady_clock::now();
+        try
+        {
+            iwinpipe_stream{ server_pipe.get(), 50ms }.read(&value, 1);
+            gbassert(false);
+        }
+        catch (std::exception& e)
+        {
+            gbassert(std::string{ e.what() }.find("timed out") != std::string::npos);
+        }
+        gbassert(std::chrono::steady_clock::now() - start < 1s);
+#endif
+    }
+
     GB_TEST(util, win_pipe_pending_limit_leaves_accept_instance)
     {
 #if defined(GBWINDOWS)
