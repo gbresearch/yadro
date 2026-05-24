@@ -919,6 +919,25 @@ unset multiplot)*";
 #endif
     }
 
+    GB_TEST(util, win_pipe_unique_handle_self_reset_keeps_handle_open)
+    {
+#if defined(GBWINDOWS)
+        unique_win_handle event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        gbassert(event.valid());
+        const auto raw = event.get();
+
+        event.reset(raw);
+        gbassert(event.get() == raw);
+        gbassert(SetEvent(event.get()));
+        gbassert(WaitForSingleObject(event.get(), 0) == WAIT_OBJECT_0);
+
+        event = event.get();
+        gbassert(event.get() == raw);
+        gbassert(ResetEvent(event.get()));
+        gbassert(WaitForSingleObject(event.get(), 0) == WAIT_TIMEOUT);
+#endif
+    }
+
     GB_TEST(util, win_pipe_move_preserves_send_receive_logging)
     {
 #if defined(GBWINDOWS)

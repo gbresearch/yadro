@@ -128,6 +128,9 @@ namespace gb::yadro::util
 
         void reset(HANDLE handle = INVALID_HANDLE_VALUE) noexcept
         {
+            if (handle == _handle)
+                return;
+
             auto old_handle = std::exchange(_handle, handle);
             if (old_handle != INVALID_HANDLE_VALUE && old_handle != nullptr)
                 CloseHandle(old_handle);
@@ -182,11 +185,17 @@ namespace gb::yadro::util
 
         void write(const char_type* c, std::streamsize size)
         {
+            if (size <= 0)
+                return;
+
+            auto event = create_pipe_event();
             for (std::streamsize sent_bytes = 0; sent_bytes < size;)
             {
                 auto bytes_to_send = static_cast<DWORD>(std::min<std::streamsize>(size - sent_bytes, pipe_chunk_size));
 
-                auto event = create_pipe_event();
+                if (!ResetEvent(event.get()))
+                    throw util::exception_t("owinpipe_stream reset event failed, error: ", GetLastError());
+
                 OVERLAPPED overlapped{};
                 overlapped.hEvent = event.get();
 
@@ -240,11 +249,17 @@ namespace gb::yadro::util
 
         void read(char_type* c, std::streamsize size)
         {
+            if (size <= 0)
+                return;
+
+            auto event = create_pipe_event();
             for (std::streamsize received_bytes = 0; received_bytes < size; gbassert(received_bytes <= size))
             {
                 auto bytes_to_read = static_cast<DWORD>(std::min<std::streamsize>(size - received_bytes, pipe_chunk_size));
 
-                auto event = create_pipe_event();
+                if (!ResetEvent(event.get()))
+                    throw util::exception_t("iwinpipe_stream reset event failed, error: ", GetLastError());
+
                 OVERLAPPED overlapped{};
                 overlapped.hEvent = event.get();
 
