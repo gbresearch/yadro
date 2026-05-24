@@ -35,10 +35,17 @@
 #include <deque>
 #include <future>
 #include <numeric>
+#include <atomic>
 
 namespace
 {
     using namespace gb::yadro::util;
+
+#if defined(GBWINDOWS)
+    static_assert(noexcept(std::declval<winpipe_client_t&>().disconnect()));
+    static_assert(noexcept(std::declval<winpipe_client_t&>().shutdown()));
+    static_assert(pipe_chunk_size >= 64 * 1024);
+#endif
 
     GB_TEST(util, logtest)
     {
@@ -685,6 +692,88 @@ unset multiplot)*";
         }
      
         gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
+#endif
+    }
+
+    GB_TEST(util, win_pipe_shared_client_concurrent_requests)
+    {
+        using namespace std::chrono_literals;
+#if defined(GBWINDOWS)
+        auto server = std::async(std::launch::async, []
+            {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\shared_client");
+                server.run(
+                    [](int i) { return i; }
+                    );
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\shared_client", "shared client", 10);
+
+        auto worker = [&](int base)
+            {
+                for (auto i = 0; i < 25; ++i)
+                {
+                    auto value = base + i;
+                    auto response = client.request<int>(0, value);
+                    gbassert(response && response.value() == value);
+                }
+            };
+
+        auto f1 = std::async(std::launch::async, worker, 0);
+        auto f2 = std::async(std::launch::async, worker, 1000);
+        auto f3 = std::async(std::launch::async, worker, 2000);
+        auto f4 = std::async(std::launch::async, worker, 3000);
+
+        f1.get();
+        f2.get();
+        f3.get();
+        f4.get();
+
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_threadpool_shutdown_waits_for_active_clients)
+    {
+        using namespace std::chrono_literals;
+#if defined(GBWINDOWS)
+        std::promise<void> handler_started;
+        std::promise<void> release_handler;
+        auto started = handler_started.get_future().share();
+        auto release = release_handler.get_future().share();
+        std::atomic_bool set_started{ false };
+        gb::yadro::async::threadpool tp(2);
+
+        auto server = std::async(std::launch::async, [&]
+            {
+                start_server(tp, L"\\\\.\\pipe\\yadro\\shutdown_wait", nullptr,
+                    std::tuple{ "hold", [&](int value)
+                        {
+                            if (!set_started.exchange(true))
+                                handler_started.set_value();
+                            release.wait();
+                            return value;
+                        } },
+                    std::tuple{ "ping", [] { return 1; } }
+                    );
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\shutdown_wait", "held client", 10);
+        auto held_request = std::async(std::launch::async, [&]
+            {
+                return client.request<int>("hold", 42).value();
+            });
+
+        gbassert(started.wait_for(5s) == std::future_status::ready);
+        winpipe_client_t(L"\\\\.\\pipe\\yadro\\shutdown_wait", "shutdown client", 10).shutdown();
+
+        gbassert(server.wait_for(100ms) == std::future_status::timeout);
+        release_handler.set_value();
+        gbassert(held_request.get() == 42);
+        client.disconnect();
+        gbassert(server.wait_for(5s) == std::future_status::ready);
+        server.get();
 #endif
     }
 }
