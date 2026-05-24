@@ -51,6 +51,9 @@
 #include <future>
 #include <thread>
 #include <chrono>
+#include <array>
+#include <limits>
+#include <algorithm>
 
 #ifdef GBWINDOWS
 
@@ -66,6 +69,8 @@ namespace gb::yadro::util
     // multi-instance server
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
+    template<class TreadPool, class ...Fn>
+    void start_server(TreadPool& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
     bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args);
 
     // server function concept
@@ -80,6 +85,9 @@ namespace gb::yadro::util
 
     // constants
     inline constexpr auto pipe_chunk_size = 64 * 1024;
+    inline constexpr auto max_pipe_frame_size = 16ull * 1024 * 1024;
+    inline constexpr auto max_pipe_instances = 255u;
+    inline constexpr auto max_pending_pipe_connections = max_pipe_instances - 1u;
     inline constexpr std::uint32_t server_disconnect = -1;
     inline constexpr std::uint32_t server_shutdown = -2;
     inline constexpr auto pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
@@ -151,15 +159,18 @@ namespace gb::yadro::util
         {
             for (std::streamsize sent_bytes = 0; sent_bytes < size;)
             {
-                auto bytes_to_send = size - sent_bytes > pipe_chunk_size ? pipe_chunk_size : size - sent_bytes;
+                auto bytes_to_send = static_cast<DWORD>(std::min<std::streamsize>(size - sent_bytes, pipe_chunk_size));
 
-                if (DWORD bytes_written{};
-                    not WriteFile(_pipe, &c[sent_bytes], (DWORD)bytes_to_send, &bytes_written, nullptr)
-                    || bytes_written != bytes_to_send)
-                    throw util::exception_t(std::format("owinpipe_stream failed to write chunk to pipe, error: {}, bytes requested: {}, sent bytes: {}, bytes written: {}", 
-                        GetLastError(), size, sent_bytes, bytes_written));
-                else
-                    sent_bytes += bytes_written;
+                DWORD bytes_written{};
+                if (not WriteFile(_pipe, &c[sent_bytes], bytes_to_send, &bytes_written, nullptr))
+                    throw util::exception_t(std::format("owinpipe_stream write failed, error: {}, bytes requested: {}, sent bytes: {}, bytes to send: {}, bytes written: {}",
+                        GetLastError(), size, sent_bytes, bytes_to_send, bytes_written));
+
+                if (bytes_written != bytes_to_send)
+                    throw util::exception_t(std::format("owinpipe_stream short write, bytes requested: {}, sent bytes: {}, bytes to send: {}, bytes written: {}",
+                        size, sent_bytes, bytes_to_send, bytes_written));
+
+                sent_bytes += bytes_written;
             }
         }
 
@@ -179,14 +190,18 @@ namespace gb::yadro::util
         {
             for (std::streamsize received_bytes = 0; received_bytes < size; gbassert(received_bytes <= size))
             {
-                auto bytes_to_read = std::min<std::streamsize>(size - received_bytes, pipe_chunk_size);
+                auto bytes_to_read = static_cast<DWORD>(std::min<std::streamsize>(size - received_bytes, pipe_chunk_size));
 
-                if (DWORD bytes_read{};
-                    not ReadFile(_pipe, &c[received_bytes], (DWORD)bytes_to_read, &bytes_read, nullptr) || bytes_read == 0)
-                    throw util::exception_t(std::format("iwinpipe_stream failed to read chunk from pipe, error: {}, bytes requested: {}, received bytes: {}, bytes read: {}, buffer location: {}",
-                        GetLastError(), size, received_bytes, bytes_read, (void*)(c)));
-                else
-                    received_bytes += bytes_read;
+                DWORD bytes_read{};
+                if (not ReadFile(_pipe, &c[received_bytes], bytes_to_read, &bytes_read, nullptr))
+                    throw util::exception_t(std::format("iwinpipe_stream read failed, error: {}, bytes requested: {}, received bytes: {}, bytes to read: {}, bytes read: {}, buffer location: {}",
+                        GetLastError(), size, received_bytes, bytes_to_read, bytes_read, (void*)(c)));
+
+                if (bytes_read == 0)
+                    throw util::exception_t(std::format("iwinpipe_stream short read, bytes requested: {}, received bytes: {}, bytes to read: {}, bytes read: {}, buffer location: {}",
+                        size, received_bytes, bytes_to_read, bytes_read, (void*)(c)));
+
+                received_bytes += bytes_read;
             }
         }
 
@@ -203,8 +218,22 @@ namespace gb::yadro::util
 
     inline auto pipe_server_mutex_name(const std::wstring& pipename)
     {
-        auto digest = util::md5{}.update(util::from_wstring(pipename)).finalize().to_string();
+        auto digest = util::md5{}.update(utf8_from_utf16(pipename)).finalize().to_string();
         return L"Local\\yadro_winpipe_" + std::wstring(digest.begin(), digest.end());
+    }
+
+    inline auto pipe_name_for_error(const std::wstring& pipename)
+    {
+        return utf8_from_utf16(pipename);
+    }
+
+    inline void validate_pipe_frame_size(std::uint64_t frame_size)
+    {
+        if (frame_size > max_pipe_frame_size)
+            throw util::exception_t(std::format("pipe frame too large: {} bytes, maximum: {} bytes", frame_size, max_pipe_frame_size));
+
+        if (frame_size > static_cast<std::uint64_t>((std::numeric_limits<std::streamsize>::max)()))
+            throw util::exception_t(std::format("pipe frame too large for stream: {} bytes", frame_size));
     }
 
     inline auto tuple_any(auto&& tuple, auto&& predicate)
@@ -224,7 +253,7 @@ namespace gb::yadro::util
         winpipe_base_t(std::shared_ptr<util::logger> log) : _log(log) {}
 
         winpipe_base_t(winpipe_base_t&& other) noexcept
-            : _pipe(std::move(other._pipe)), _log(std::move(other._log)) {}
+            : _pipe(std::move(other._pipe)), _log(std::move(other._log)), _log_send_receive(other._log_send_receive) {}
 
         void set_logger(auto&&...args) 
         {
@@ -270,9 +299,20 @@ namespace gb::yadro::util
                 log("sending: ", frame_size, " bytes");
 
             owinpipe_stream stream{ _pipe };
-            stream.write(reinterpret_cast<const char*>(&frame_size), sizeof(frame_size));
-            if (!frame.empty())
+            if (frame.size() <= pipe_chunk_size - sizeof(frame_size))
+            {
+                thread_local std::array<char, pipe_chunk_size> packet{};
+                auto frame_size_bytes = reinterpret_cast<const char*>(&frame_size);
+                const auto packet_size = sizeof(frame_size) + frame.size();
+                std::copy_n(frame_size_bytes, sizeof(frame_size), packet.data());
+                std::copy(frame.begin(), frame.end(), packet.data() + sizeof(frame_size));
+                stream.write(packet.data(), static_cast<std::streamsize>(packet_size));
+            }
+            else
+            {
+                stream.write(reinterpret_cast<const char*>(&frame_size), sizeof(frame_size));
                 stream.write(frame.data(), static_cast<std::streamsize>(frame.size()));
+            }
         }
 
         auto get_handle() const { return _pipe.get(); }
@@ -285,6 +325,8 @@ namespace gb::yadro::util
             iwinpipe_stream stream{ _pipe };
             std::uint64_t frame_size{};
             stream.read(reinterpret_cast<char*>(&frame_size), sizeof(frame_size));
+
+            validate_pipe_frame_size(frame_size);
 
             std::vector<char> frame(static_cast<std::size_t>(frame_size));
             if (!frame.empty())
@@ -337,8 +379,7 @@ namespace gb::yadro::util
 
             if (_pipe == INVALID_HANDLE_VALUE)
             {
-                std::string str_name(pipename.size(), 0);
-                std::transform(pipename.begin(), pipename.end(), str_name.begin(), [](auto wc) { return static_cast<char>(wc); });
+                auto str_name = pipe_name_for_error(pipename);
                 auto error_string = util::to_string("\"", _client_name, "\": failed to open pipe: ", str_name, ": ", GetLastError());
                 log(error_string);
                 throw util::exception_t(error_string);
@@ -351,7 +392,7 @@ namespace gb::yadro::util
                 nullptr,     // don't set maximum bytes 
                 nullptr))    // don't set maximum time 
             {
-                std::string str_name(pipename.size(), 0);
+                auto str_name = pipe_name_for_error(pipename);
                 auto error_string = util::to_string("\"", _client_name, "\":  pipe: ", str_name, ": SetNamedPipeHandleState failed: ", GetLastError());
                 log(error_string);
                 throw util::exception_t(error_string);
@@ -584,25 +625,43 @@ namespace gb::yadro::util
                         {
                             auto&& fn = std::get<1>(fn_tuple);
                             using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
-                            auto params = receive<callable_pure_args_t<lambda_type>>();
-                            log("received parameters for function: ", fun_name);
                             using sent_t = std::expected< callable_return_t<lambda_type>, std::string>;
 
-                            if constexpr (std::is_void_v<callable_return_t<lambda_type>>)
+                            try
                             {
-                                std::apply([&](auto&& ...args)
-                                    {
-                                        fn(std::move(args)...); // no response required
-                                    }, params);
-                                send(sent_t{});
-                            }
-                            else
-                                send(sent_t{ std::apply([&](auto&& ...args)
-                                {
-                                    return fn(std::move(args)...);
-                                }, params) });
-                            log("sent response from function: ", fun_name);
+                                auto params = receive<callable_pure_args_t<lambda_type>>();
+                                log("received parameters for function: ", fun_name);
 
+                                if constexpr (std::is_void_v<callable_return_t<lambda_type>>)
+                                {
+                                    std::apply([&](auto&& ...args)
+                                        {
+                                            fn(std::move(args)...); // no response required
+                                        }, params);
+                                    send(sent_t{});
+                                }
+                                else
+                                    send(sent_t{ std::apply([&](auto&& ...args)
+                                    {
+                                        return fn(std::move(args)...);
+                                    }, params) });
+                                log("sent response from function: ", fun_name);
+                            }
+                            catch (util::exception_t<>& e)
+                            {
+                                log("exception: ", e.what());
+                                send(sent_t{ std::unexpected{e.what()} });
+                            }
+                            catch (std::exception& e)
+                            {
+                                log("exception: ", e.what());
+                                send(sent_t{ std::unexpected{e.what()} });
+                            }
+                            catch (...)
+                            {
+                                log("unknown exception");
+                                send(sent_t{ std::unexpected{std::string("unknown exception")} });
+                            }
                         });
                 }
                 catch (util::exception_t<>& e)
@@ -623,8 +682,6 @@ namespace gb::yadro::util
             }
         }
     };
-
-    inline constexpr std::size_t max_pending_pipe_connections = 256;
 
     inline auto run_pipe_functions(winpipe_server_t& server, auto& functions)
     {
@@ -675,7 +732,7 @@ namespace gb::yadro::util
 
             _pipe == INVALID_HANDLE_VALUE)
         {
-            std::string str_name = util::from_wstring(pipename);
+            auto str_name = pipe_name_for_error(pipename);
             log("failed to create pipe: ", str_name, ": ", GetLastError());
             throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
         }
@@ -684,11 +741,15 @@ namespace gb::yadro::util
 
         // connect to client, ERROR_PIPE_CONNECTED means client connected before ConnectNamedPipe called
         // ConnectNamedPipe blocks indefinitely until connected or failed
-        if (auto is_connected = ConnectNamedPipe(_pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED; !is_connected)
+        const auto connected = ConnectNamedPipe(_pipe, nullptr);
+        if (!connected)
         {
             auto last_error = GetLastError();
-            log("failed to connect to pipe: ", last_error);
-            throw util::exception_t("failed to connect to pipe: ", last_error);
+            if (last_error != ERROR_PIPE_CONNECTED)
+            {
+                log("failed to connect to pipe: ", last_error);
+                throw util::exception_t("failed to connect to pipe: ", last_error);
+            }
         }
         log("server connected client");
     }
@@ -716,56 +777,17 @@ namespace gb::yadro::util
     }
 
     //----------------------------------------------------------------------------------------------
-    // pipe creates a new thread for every connection
+    // Function objects are shared across connection handlers and can be invoked concurrently.
+    // Synchronize mutable captures inside handlers, or pass stateless callables.
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
-        auto mutex_name = pipe_server_mutex_name(pipename);
-        global_mutex mtx{ mutex_name };
-        std::unique_lock l(mtx, std::defer_lock);
-        using namespace std::chrono_literals;
+        auto max_threads = std::thread::hardware_concurrency();
+        if (max_threads < 2)
+            max_threads = 2;
 
-        if (l.try_lock_for(100ms))
-        {
-            std::vector<std::future<void>> v;
-            auto state = std::make_shared<winpipe_server_state>();
-            auto functions = std::make_shared<std::tuple<std::decay_t<Fn>...>>(std::forward<Fn>(fn)...);
-
-            while (!state->shutdown)
-            {
-                std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
-
-                if (v.size() >= max_pending_pipe_connections)
-                {
-                    std::this_thread::sleep_for(10ms);
-                    continue;
-                }
-
-                auto server = winpipe_server_t{ pipename, log };
-                if (state->shutdown)
-                    break;
-
-                auto f = std::async(std::launch::async,
-                    [state, functions, pipename, s = std::move(server)]() mutable {
-                        auto ret = run_pipe_functions(s, *functions);
-                        if (ret == server_shutdown)
-                        {
-                            state->shutdown = true;
-                            wake_pipe_accept(pipename);
-                        }
-                    });
-
-                v.push_back(std::move(f));
-            }
-
-            for (auto& f : v)
-                f.wait();
-        }
-        else
-        {
-            auto message = to_string("failed to start the server another instance is already running, mutex: ", util::from_wstring(mutex_name));
-            throw_error(message);
-        }
+        gb::yadro::async::threadpool tp(max_threads);
+        start_server(tp, pipename, std::move(log), std::forward<Fn>(fn)...);
     }
 
     //----------------------------------------------------------------------------------------------
@@ -832,17 +854,36 @@ namespace gb::yadro::util
     inline bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args)
     {
         using namespace std::chrono_literals;
-        try {
-            // make at most 100 attemps to shutdown server
-            for (auto i = 0; is_server_running(pipename, 100ms) && i < 100; ++i)
+        constexpr auto shutdown_timeout = 5s;
+        std::string last_error;
+        const auto deadline = std::chrono::steady_clock::now() + shutdown_timeout;
+
+        while (std::chrono::steady_clock::now() < deadline && is_server_running(pipename, 100ms))
+        {
+            try
             {
                 winpipe_client_t(pipename, "shutdown", attempts, log_args...).shutdown();
-                std::this_thread::sleep_for(50ms);
             }
-        }
-        catch (...) {}
+            catch (std::exception& e)
+            {
+                last_error = e.what();
+            }
+            catch (...)
+            {
+                last_error = "unknown shutdown exception";
+            }
 
-        return !is_server_running(pipename);
+            std::this_thread::sleep_for(50ms);
+        }
+
+        const auto stopped = !is_server_running(pipename);
+        if (!stopped && !last_error.empty())
+        {
+            try { logger{ log_args... }.writeln("failed to shutdown pipe server: ", pipe_name_for_error(pipename), ": ", last_error); }
+            catch (...) {}
+        }
+
+        return stopped;
     }
 }
 #endif

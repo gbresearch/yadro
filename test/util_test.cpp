@@ -36,6 +36,7 @@
 #include <future>
 #include <numeric>
 #include <atomic>
+#include <limits>
 
 namespace
 {
@@ -846,6 +847,129 @@ unset multiplot)*";
         gbassert(shutdown_server(L"\\\\.\\pipe\\yadro_full_name_b\\same", 10));
         server1.get();
         server2.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_rejects_oversized_frame)
+    {
+#if defined(GBWINDOWS)
+        validate_pipe_frame_size(max_pipe_frame_size);
+        must_throw([] { validate_pipe_frame_size(max_pipe_frame_size + 1); });
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_error_uses_utf8_pipe_name)
+    {
+#if defined(GBWINDOWS)
+        const std::wstring pipename = L"\\\\.\\pipe\\yadro\\unicode_\u0436";
+        try
+        {
+            winpipe_client_t client(pipename, "unicode error client", 1);
+            gbassert(false);
+        }
+        catch (std::exception& e)
+        {
+            const auto expected_name = utf8_from_utf16(pipename);
+            gbassert(std::string{ e.what() }.find(expected_name) != std::string::npos);
+        }
+#endif
+    }
+
+    GB_TEST(util, win_pipe_server_error_uses_utf8_pipe_name)
+    {
+#if defined(GBWINDOWS)
+        const std::wstring pipename = L"\\\\.\\not_pipe\\yadro\\unicode_\u0436";
+        try
+        {
+            winpipe_server_t server(pipename);
+            gbassert(false);
+        }
+        catch (std::exception& e)
+        {
+            const auto expected_name = utf8_from_utf16(pipename);
+            gbassert(std::string{ e.what() }.find(expected_name) != std::string::npos);
+        }
+#endif
+    }
+
+    GB_TEST(util, win_pipe_stream_errors_describe_api_failure)
+    {
+#if defined(GBWINDOWS)
+        char value{};
+        must_throw([] { owinpipe_stream{ INVALID_HANDLE_VALUE }.write("x", 1); });
+        must_throw([&] { iwinpipe_stream{ INVALID_HANDLE_VALUE }.read(&value, 1); });
+
+        try
+        {
+            owinpipe_stream{ INVALID_HANDLE_VALUE }.write("x", 1);
+        }
+        catch (std::exception& e)
+        {
+            gbassert(std::string{ e.what() }.find("write failed") != std::string::npos);
+        }
+
+        try
+        {
+            iwinpipe_stream{ INVALID_HANDLE_VALUE }.read(&value, 1);
+        }
+        catch (std::exception& e)
+        {
+            gbassert(std::string{ e.what() }.find("read failed") != std::string::npos);
+        }
+#endif
+    }
+
+    GB_TEST(util, win_pipe_move_preserves_send_receive_logging)
+    {
+#if defined(GBWINDOWS)
+        std::ostringstream log_output;
+        auto log = std::make_shared<logger>(log_output);
+
+        auto server = std::async(std::launch::async, [log]
+            {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\move_logging", log);
+                server.set_send_receive_log(true);
+                winpipe_server_t moved{ std::move(server) };
+                moved.run([](int value) { return value + 1; });
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\move_logging", "move logging client", 10);
+        gbassert(client.request<int>(0, 41).value() == 42);
+        client.disconnect();
+        server.get();
+
+        const auto log_text = log_output.str();
+        gbassert(log_text.find("received:") != std::string::npos);
+        gbassert(log_text.find("sending:") != std::string::npos);
+#endif
+    }
+
+    GB_TEST(util, win_pipe_pending_limit_leaves_accept_instance)
+    {
+#if defined(GBWINDOWS)
+        gbassert(max_pending_pipe_connections <= 254);
+#endif
+    }
+
+    GB_TEST(util, win_pipe_named_exception_response_keeps_connection_usable)
+    {
+#if defined(GBWINDOWS)
+        auto server = std::async(std::launch::async, []
+            {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\named_exception");
+                server.run(
+                    std::tuple{ "boom", []() -> int { throw std::runtime_error{ "named failure" }; } },
+                    std::tuple{ "ok", [] { return 3; } }
+                    );
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\named_exception", "named exception client", 10);
+        auto failed = client.request<int>("boom");
+        gbassert(!failed);
+        gbassert(failed.error().find("named failure") != std::string::npos);
+        gbassert(client.request<int>("ok").value() == 3);
+        client.disconnect();
+        server.get();
 #endif
     }
 }
