@@ -82,6 +82,7 @@ namespace gb::yadro::util
     inline constexpr auto pipe_chunk_size = 64 * 1024;
     inline constexpr std::uint32_t server_disconnect = -1;
     inline constexpr std::uint32_t server_shutdown = -2;
+    inline constexpr auto pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
 
     //----------------------------------------------------------------------------------------------
     struct unique_win_handle
@@ -199,7 +200,20 @@ namespace gb::yadro::util
     {
         std::atomic_bool shutdown{ false };
     };
-    
+
+    inline auto pipe_server_mutex_name(const std::wstring& pipename)
+    {
+        auto digest = util::md5{}.update(util::from_wstring(pipename)).finalize().to_string();
+        return L"Local\\yadro_winpipe_" + std::wstring(digest.begin(), digest.end());
+    }
+
+    inline auto tuple_any(auto&& tuple, auto&& predicate)
+    {
+        return std::apply([&](auto&&... values) {
+            return (false || ... || static_cast<bool>(predicate(values)));
+            }, std::forward<decltype(tuple)>(tuple));
+    }
+
     //----------------------------------------------------------------------------------------------
     struct winpipe_base_t
     {
@@ -223,10 +237,9 @@ namespace gb::yadro::util
         template<class T> requires(archive::serializable<iwinpipe_archive, std::remove_cvref_t<T>>)
         void receive(T& t) const
         {
-            iwinpipe_archive a{ _pipe };
+            auto frame = receive_frame();
+            archive::imem_archive<> a{ std::move(frame) };
             a(t);
-            if(_log_send_receive)
-                log("received: ", archive::serialization_size(t), " bytes");
         }
 
         template<class T> requires(archive::serializable<iwinpipe_archive, std::remove_cvref_t<T>>)
@@ -240,13 +253,26 @@ namespace gb::yadro::util
         template<class T> requires(std::is_void_v<T>)
         auto receive() const { return std::tuple{}; }
 
+        void discard_receive_frame() const
+        {
+            static_cast<void>(receive_frame());
+        }
+
         template<class T> requires(archive::serializable<owinpipe_archive, std::remove_cvref_t<T>>)
         void send(const T& t) const
         {
-            if (_log_send_receive)
-                log("sending: ", archive::serialization_size(t), " bytes");
-            owinpipe_archive a{ _pipe };
+            archive::omem_archive<> a;
             a(t);
+            const auto& frame = a.get_stream().buffer();
+            const auto frame_size = static_cast<std::uint64_t>(frame.size());
+
+            if (_log_send_receive)
+                log("sending: ", frame_size, " bytes");
+
+            owinpipe_stream stream{ _pipe };
+            stream.write(reinterpret_cast<const char*>(&frame_size), sizeof(frame_size));
+            if (!frame.empty())
+                stream.write(frame.data(), static_cast<std::streamsize>(frame.size()));
         }
 
         auto get_handle() const { return _pipe.get(); }
@@ -254,6 +280,22 @@ namespace gb::yadro::util
     protected:
         unique_win_handle _pipe;
     private:
+        std::vector<char> receive_frame() const
+        {
+            iwinpipe_stream stream{ _pipe };
+            std::uint64_t frame_size{};
+            stream.read(reinterpret_cast<char*>(&frame_size), sizeof(frame_size));
+
+            std::vector<char> frame(static_cast<std::size_t>(frame_size));
+            if (!frame.empty())
+                stream.read(frame.data(), static_cast<std::streamsize>(frame.size()));
+
+            if (_log_send_receive)
+                log("received: ", frame_size, " bytes");
+
+            return frame;
+        }
+
         std::shared_ptr<util::logger> _log;
         bool _log_send_receive = false;
     };
@@ -302,8 +344,8 @@ namespace gb::yadro::util
                 throw util::exception_t(error_string);
             }
 
-            // The pipe connected; change to message-read mode. 
-            if(DWORD mode = PIPE_READMODE_MESSAGE; not SetNamedPipeHandleState(
+            // The pipe connected; keep byte-read mode. Top-level send/receive calls provide framing.
+            if(DWORD mode = PIPE_READMODE_BYTE; not SetNamedPipeHandleState(
                 _pipe,    // pipe handle 
                 &mode,  // new pipe mode 
                 nullptr,     // don't set maximum bytes 
@@ -332,8 +374,7 @@ namespace gb::yadro::util
             log("\"", _client_name, "\": sending request for function: ", name);
             send(0u);
             send(name);
-            if constexpr (sizeof ...(params))
-                send(std::tuple{ params... });
+            send(std::tuple{ std::forward<decltype(params)>(params)... });
             return receive<std::expected<T, std::string>>();
         }
 
@@ -344,8 +385,7 @@ namespace gb::yadro::util
             std::scoped_lock lock(_mutex);
             log("\"", _client_name, "\": sending request");
             send(fn_id);
-            if constexpr(sizeof ...(params))
-                send(std::tuple{ params... });
+            send(std::tuple{ std::forward<decltype(params)>(params)... });
             return receive<std::expected<T, std::string>>();
         }
 
@@ -412,7 +452,6 @@ namespace gb::yadro::util
 
             if (_pipe.valid())
             {
-                FlushFileBuffers(_pipe);
                 DisconnectNamedPipe(_pipe);
                 _pipe.reset();
             }
@@ -528,6 +567,15 @@ namespace gb::yadro::util
                 auto fun_name = receive<std::string>();
                 log("client requested function: ", fun_name);
 
+                if (!tuple_any(tuple_functions, [&](auto&& fun_tup) { return std::get<0>(fun_tup) == fun_name; }))
+                {
+                    auto message = std::format("unknown pipe function: {}", fun_name);
+                    log("error: ", message);
+                    discard_receive_frame();
+                    send(std::expected<void, std::string>{ std::unexpected{std::move(message)} });
+                    continue;
+                }
+
                 try
                 {
                     util::tuple_visit(tuple_functions,
@@ -602,7 +650,7 @@ namespace gb::yadro::util
             if (!pipe.valid())
                 return;
 
-            DWORD mode = PIPE_READMODE_MESSAGE;
+            DWORD mode = PIPE_READMODE_BYTE;
             SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
         }
         catch (...)
@@ -618,9 +666,7 @@ namespace gb::yadro::util
         if (_pipe = CreateNamedPipe(
             pipename.c_str(),             // pipe name 
             PIPE_ACCESS_DUPLEX,       // read/write access 
-            PIPE_TYPE_MESSAGE |       // message type pipe 
-            PIPE_READMODE_MESSAGE |   // message-read mode 
-            PIPE_WAIT,                // blocking mode 
+            pipe_mode,                // byte type, byte-read mode, blocking mode
             PIPE_UNLIMITED_INSTANCES, // max. instances (255)
             buf_size,                  // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
             buf_size,                  // input buffer size 
@@ -650,7 +696,7 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     inline auto is_server_running(const std::wstring& pipename)
     {
-        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+        auto mutex_name = pipe_server_mutex_name(pipename);
         global_mutex mtx{ mutex_name };
         return !std::unique_lock(mtx, std::defer_lock).try_lock();
     }
@@ -674,7 +720,7 @@ namespace gb::yadro::util
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
-        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+        auto mutex_name = pipe_server_mutex_name(pipename);
         global_mutex mtx{ mutex_name };
         std::unique_lock l(mtx, std::defer_lock);
         using namespace std::chrono_literals;
@@ -727,7 +773,7 @@ namespace gb::yadro::util
     template<class TreadPool, class ...Fn>
     void start_server(TreadPool& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
-        auto mutex_name = L"Local" + pipename.substr(pipename.find_last_of(L'\\'));
+        auto mutex_name = pipe_server_mutex_name(pipename);
         global_mutex mtx{ mutex_name };
         std::unique_lock l(mtx, std::defer_lock);
         using namespace std::chrono_literals;

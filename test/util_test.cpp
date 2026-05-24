@@ -776,4 +776,76 @@ unset multiplot)*";
         server.get();
 #endif
     }
+
+    GB_TEST(util, win_pipe_uses_byte_mode)
+    {
+#if defined(GBWINDOWS)
+        auto server = std::async(std::launch::async, []
+            {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\byte_mode");
+                DWORD flags{};
+                gbassert(GetNamedPipeInfo(server.get_handle(), &flags, nullptr, nullptr, nullptr));
+                gbassert((flags & PIPE_TYPE_MESSAGE) == 0);
+                server.run([] { return 7; });
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\byte_mode", "byte mode client", 10);
+        DWORD state{};
+        gbassert(GetNamedPipeHandleState(client.get_handle(), &state, nullptr, nullptr, nullptr, nullptr, 0));
+        gbassert((state & PIPE_READMODE_MESSAGE) == 0);
+        gbassert(client.request<int>(0).value() == 7);
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_named_missing_function_reports_name)
+    {
+#if defined(GBWINDOWS)
+        auto server = std::async(std::launch::async, []
+            {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\missing_function");
+                server.run(
+                    std::tuple{ "known", [] { return 1; } }
+                    );
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\missing_function", "missing function client", 10);
+        auto response = client.request<int>("unknown");
+        gbassert(!response);
+        gbassert(response.error().find("unknown") != std::string::npos);
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_mutex_uses_full_pipe_name)
+    {
+#if defined(GBWINDOWS)
+        auto server1 = std::async(std::launch::async, []
+            {
+                start_server(L"\\\\.\\pipe\\yadro_full_name_a\\same", nullptr,
+                    std::tuple{ "value", [] { return 1; } }
+                    );
+            });
+
+        auto server2 = std::async(std::launch::async, []
+            {
+                start_server(L"\\\\.\\pipe\\yadro_full_name_b\\same", nullptr,
+                    std::tuple{ "value", [] { return 2; } }
+                    );
+            });
+
+        winpipe_client_t client1(L"\\\\.\\pipe\\yadro_full_name_a\\same", "full name client 1", 10);
+        winpipe_client_t client2(L"\\\\.\\pipe\\yadro_full_name_b\\same", "full name client 2", 10);
+        gbassert(client1.request<int>("value").value() == 1);
+        gbassert(client2.request<int>("value").value() == 2);
+        client1.disconnect();
+        client2.disconnect();
+        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro_full_name_a\\same", 10));
+        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro_full_name_b\\same", 10));
+        server1.get();
+        server2.get();
+#endif
+    }
 }
