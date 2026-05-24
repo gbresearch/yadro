@@ -45,6 +45,12 @@
 #include <type_traits>
 #include <cstdint>
 #include <semaphore>
+#include <mutex>
+#include <utility>
+#include <vector>
+#include <future>
+#include <thread>
+#include <chrono>
 
 #ifdef GBWINDOWS
 
@@ -66,10 +72,73 @@ namespace gb::yadro::util
     template<class T, class Functions>
     concept server_function_c = std::convertible_to< T, std::tuple<std::string, Functions>>;
 
+    template<class T>
+    concept named_server_function_tuple_c =
+        tuple_like<std::remove_cvref_t<T>> &&
+        std::tuple_size_v<std::remove_cvref_t<T>> == 2 &&
+        std::convertible_to<std::tuple_element_t<0, std::remove_cvref_t<T>>, const char*>;
+
     // constants
-    inline constexpr auto pipe_chunk_size = 1024;
+    inline constexpr auto pipe_chunk_size = 64 * 1024;
     inline constexpr std::uint32_t server_disconnect = -1;
     inline constexpr std::uint32_t server_shutdown = -2;
+
+    //----------------------------------------------------------------------------------------------
+    struct unique_win_handle
+    {
+        unique_win_handle() noexcept = default;
+        explicit unique_win_handle(HANDLE handle) noexcept : _handle(handle) {}
+        unique_win_handle(const unique_win_handle&) = delete;
+        auto operator=(const unique_win_handle&) -> unique_win_handle& = delete;
+
+        unique_win_handle(unique_win_handle&& other) noexcept
+            : _handle(std::exchange(other._handle, INVALID_HANDLE_VALUE))
+        {}
+
+        auto operator=(unique_win_handle&& other) noexcept -> unique_win_handle&
+        {
+            if (this != &other)
+                reset(std::exchange(other._handle, INVALID_HANDLE_VALUE));
+            return *this;
+        }
+
+        ~unique_win_handle() noexcept { reset(); }
+
+        auto operator=(HANDLE handle) noexcept -> unique_win_handle&
+        {
+            reset(handle);
+            return *this;
+        }
+
+        [[nodiscard]] auto get() const noexcept { return _handle; }
+        [[nodiscard]] auto valid() const noexcept { return _handle != INVALID_HANDLE_VALUE && _handle != nullptr; }
+        operator HANDLE() const noexcept { return _handle; }
+
+        void reset(HANDLE handle = INVALID_HANDLE_VALUE) noexcept
+        {
+            auto old_handle = std::exchange(_handle, handle);
+            if (old_handle != INVALID_HANDLE_VALUE && old_handle != nullptr)
+                CloseHandle(old_handle);
+        }
+
+        [[nodiscard]] auto release() noexcept
+        {
+            return std::exchange(_handle, INVALID_HANDLE_VALUE);
+        }
+
+        friend auto operator==(const unique_win_handle& handle, HANDLE value) noexcept
+        {
+            return handle.get() == value;
+        }
+
+        friend auto operator!=(const unique_win_handle& handle, HANDLE value) noexcept
+        {
+            return !(handle == value);
+        }
+
+    private:
+        HANDLE _handle = INVALID_HANDLE_VALUE;
+    };
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
@@ -125,6 +194,11 @@ namespace gb::yadro::util
     };
 
     using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
+
+    struct winpipe_server_state
+    {
+        std::atomic_bool shutdown{ false };
+    };
     
     //----------------------------------------------------------------------------------------------
     struct winpipe_base_t
@@ -136,7 +210,7 @@ namespace gb::yadro::util
         winpipe_base_t(std::shared_ptr<util::logger> log) : _log(log) {}
 
         winpipe_base_t(winpipe_base_t&& other) noexcept
-            : _pipe(other._pipe), _log(std::move(other._log)) { other._pipe = INVALID_HANDLE_VALUE; }
+            : _pipe(std::move(other._pipe)), _log(std::move(other._log)) {}
 
         void set_logger(auto&&...args) 
         {
@@ -175,10 +249,10 @@ namespace gb::yadro::util
             a(t);
         }
 
-        auto get_handle() const { return _pipe; }
+        auto get_handle() const { return _pipe.get(); }
     
     protected:
-        HANDLE _pipe = INVALID_HANDLE_VALUE;
+        unique_win_handle _pipe;
     private:
         std::shared_ptr<util::logger> _log;
         bool _log_send_receive = false;
@@ -243,9 +317,10 @@ namespace gb::yadro::util
 
             log("\"", _client_name, "\": opened pipe after ", attempt, " attempts");
         }
-        ~winpipe_client_t()
+        ~winpipe_client_t() noexcept
         {
-            log("\"", _client_name, "\": destructor");
+            try { log("\"", _client_name, "\": destructor"); }
+            catch (...) {}
             disconnect();
         }
 
@@ -253,6 +328,7 @@ namespace gb::yadro::util
         [[nodiscard]]
         auto request(const std::string& name, auto&& ...params) const
         {
+            std::scoped_lock lock(_mutex);
             log("\"", _client_name, "\": sending request for function: ", name);
             send(0u);
             send(name);
@@ -265,6 +341,7 @@ namespace gb::yadro::util
         [[nodiscard]]
         auto request(std::uint32_t fn_id, auto&& ...params) const
         {
+            std::scoped_lock lock(_mutex);
             log("\"", _client_name, "\": sending request");
             send(fn_id);
             if constexpr(sizeof ...(params))
@@ -279,30 +356,46 @@ namespace gb::yadro::util
             return request<T>(Index, std::forward<decltype(params)>(params)...);
         }
 
-        void disconnect()
+        void disconnect() noexcept
         {
-            if (_pipe != INVALID_HANDLE_VALUE)
-            {
-                send<std::uint32_t>(server_disconnect);
-                CloseHandle(_pipe);
-                _pipe = INVALID_HANDLE_VALUE;
-            }
+            close_pipe(server_disconnect, "disconnect");
         }
 
-        void shutdown()
+        void shutdown() noexcept
         {
-            if (_pipe != INVALID_HANDLE_VALUE)
-            {
-                send<std::uint32_t>(server_shutdown);
-                CloseHandle(_pipe);
-                _pipe = INVALID_HANDLE_VALUE;
-            }
+            close_pipe(server_shutdown, "shutdown");
         }
 
         auto&& get_name() const { return _client_name; }
 
     private:
+        void close_pipe(std::uint32_t message, const char* action) noexcept
+        {
+            std::scoped_lock lock(_mutex);
+
+            if (!_pipe.valid())
+                return;
+
+            try
+            {
+                send<std::uint32_t>(message);
+            }
+            catch (std::exception& e)
+            {
+                try { log("\"", _client_name, "\": ", action, " notification failed: ", e.what()); }
+                catch (...) {}
+            }
+            catch (...)
+            {
+                try { log("\"", _client_name, "\": ", action, " notification failed with unknown exception"); }
+                catch (...) {}
+            }
+
+            _pipe.reset();
+        }
+
         std::string _client_name;
+        mutable std::mutex _mutex;
     };
 
     //----------------------------------------------------------------------------------------------
@@ -312,27 +405,29 @@ namespace gb::yadro::util
 
         winpipe_server_t(winpipe_server_t&& other) : winpipe_base_t(static_cast<winpipe_base_t&&>(other)) {}
         
-        ~winpipe_server_t()
+        ~winpipe_server_t() noexcept
         {
-            log("server destructor");
+            try { log("server destructor"); }
+            catch (...) {}
 
-            if (_pipe != INVALID_HANDLE_VALUE)
+            if (_pipe.valid())
             {
                 FlushFileBuffers(_pipe);
                 DisconnectNamedPipe(_pipe);
-                CloseHandle(_pipe);
+                _pipe.reset();
             }
         }
 
         // functions are invoked by index
         template<class ...Fn>
-        int run(Fn... functions)
+            requires(!(named_server_function_tuple_c<Fn> || ...))
+        int run(Fn&&... functions)
         {
             if (_pipe == INVALID_HANDLE_VALUE)
                 throw util::exception_t("can't run unconnected server");
 
             static_assert(sizeof...(Fn) != 0, "server must have at least one function");
-            std::tuple<Fn...> fun_tuple{ functions... };
+            auto fun_tuple = std::forward_as_tuple(functions...);
 
             for (;;)
             {
@@ -358,7 +453,10 @@ namespace gb::yadro::util
 
                 log("client requested function: ", fun_index);
 
-                std::visit([&](auto&& fn)
+                std::size_t current_index = 0;
+                util::tuple_visit(fun_tuple,
+                    [&](auto&&) { return current_index++ == fun_index; },
+                    [&](auto&& fn)
                     {
                         using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
                         auto params = receive<callable_pure_args_t<lambda_type>>();
@@ -398,19 +496,19 @@ namespace gb::yadro::util
                             send(sent_t{ std::unexpected{std::string("unknown exception")} });
                         }
 
-                    }, util::tuple_to_variant(fun_tuple, fun_index));
+                    });
             }
         }
 
         // functions are invoked by name
-        template<class ...Fn>
-        int run(std::tuple<const char*, Fn> ... functions)
+        template<named_server_function_tuple_c ...Fn>
+        int run(Fn&&... functions)
         {
             if (_pipe == INVALID_HANDLE_VALUE)
                 throw util::exception_t("can't run unconnected server");
 
             static_assert(sizeof...(Fn) != 0, "server must have at least one function");
-            auto tuple_functions{ std::tuple{functions...} };
+            auto tuple_functions = std::forward_as_tuple(functions...);
             for (;;)
             {
                 auto call_id = receive<std::uint32_t>();
@@ -432,7 +530,9 @@ namespace gb::yadro::util
 
                 try
                 {
-                    std::visit([&](auto&& fn_tuple)
+                    util::tuple_visit(tuple_functions,
+                        [&](auto&& fun_tup) { return std::get<0>(fun_tup) == fun_name; },
+                        [&](auto&& fn_tuple)
                         {
                             auto&& fn = std::get<1>(fn_tuple);
                             using lambda_type = std::remove_cvref_t<decltype(fn)>; // tuple
@@ -455,7 +555,7 @@ namespace gb::yadro::util
                                 }, params) });
                             log("sent response from function: ", fun_name);
 
-                        }, util::tuple_to_variant(tuple_functions, [&](auto&& fun_tup) { return std::get<0>(fun_tup) == fun_name; }));
+                        });
                 }
                 catch (util::exception_t<>& e)
                 {
@@ -476,11 +576,44 @@ namespace gb::yadro::util
         }
     };
 
+    inline constexpr std::size_t max_pending_pipe_connections = 256;
+
+    inline auto run_pipe_functions(winpipe_server_t& server, auto& functions)
+    {
+        return std::apply([&](auto&... fn) { return server.run(fn...); }, functions);
+    }
+
+    inline void wake_pipe_accept(const std::wstring& pipename) noexcept
+    {
+        try
+        {
+            if (!WaitNamedPipe(pipename.c_str(), 10))
+                return;
+
+            unique_win_handle pipe{ CreateFile(
+                pipename.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                0,
+                nullptr) };
+
+            if (!pipe.valid())
+                return;
+
+            DWORD mode = PIPE_READMODE_MESSAGE;
+            SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+        }
+        catch (...)
+        {}
+    }
+
     //----------------------------------------------------------------------------------------------
     inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, auto&& ...log_args)
         : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...)
     {
-        const DWORD buf_size = 4096; // unsigned long (Windows doesn't have to honor it)
+        const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
 
         if (_pipe = CreateNamedPipe(
             pipename.c_str(),             // pipe name 
@@ -549,22 +682,38 @@ namespace gb::yadro::util
         if (l.try_lock_for(100ms))
         {
             std::vector<std::future<void>> v;
-            std::atomic_bool shutdown{ false }; // signals client requesting server shutdown
+            auto state = std::make_shared<winpipe_server_state>();
+            auto functions = std::make_shared<std::tuple<std::decay_t<Fn>...>>(std::forward<Fn>(fn)...);
 
-            while (!shutdown && v.size() < 256) // something is wrong if there are 256 threads pending
+            while (!state->shutdown)
             {
-                if (v.size() % 10 == 0) // clean up periodically
-                    std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
+                std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
+
+                if (v.size() >= max_pending_pipe_connections)
+                {
+                    std::this_thread::sleep_for(10ms);
+                    continue;
+                }
+
+                auto server = winpipe_server_t{ pipename, log };
+                if (state->shutdown)
+                    break;
 
                 auto f = std::async(std::launch::async,
-                    [&, s = winpipe_server_t{ pipename, log }]() mutable {
-                        auto ret = s.run(std::forward<decltype(fn)>(fn)...);
+                    [state, functions, pipename, s = std::move(server)]() mutable {
+                        auto ret = run_pipe_functions(s, *functions);
                         if (ret == server_shutdown)
-                            shutdown = true;
+                        {
+                            state->shutdown = true;
+                            wake_pipe_accept(pipename);
+                        }
                     });
 
                 v.push_back(std::move(f));
             }
+
+            for (auto& f : v)
+                f.wait();
         }
         else
         {
@@ -586,19 +735,36 @@ namespace gb::yadro::util
         if (l.try_lock_for(100ms))
         {
             std::vector<std::future<void>> v;
+            auto state = std::make_shared<winpipe_server_state>();
+            auto functions = std::make_shared<std::tuple<std::decay_t<Fn>...>>(std::forward<Fn>(fn)...);
 
-            for (std::atomic_bool shutdown{ false }; !shutdown;)
+            while (!state->shutdown)
             {
-                if (v.size() % 10 == 0) // clean up periodically
-                    std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
+                std::erase_if(v, [](auto&& fut) { return fut.wait_for(0s) == std::future_status::ready; });
 
-                auto f = tp([&, s = winpipe_server_t{ pipename, log }]() mutable {
-                    auto ret = s.run(std::forward<decltype(fn)>(fn)...);
+                if (v.size() >= max_pending_pipe_connections)
+                {
+                    std::this_thread::sleep_for(10ms);
+                    continue;
+                }
+
+                auto server = winpipe_server_t{ pipename, log };
+                if (state->shutdown)
+                    break;
+
+                auto f = std::future<void>(tp([state, functions, pipename, s = std::move(server)]() mutable {
+                    auto ret = run_pipe_functions(s, *functions);
                     if(ret == server_shutdown)
-                        shutdown = true;
-                    });
+                    {
+                        state->shutdown = true;
+                        wake_pipe_accept(pipename);
+                    }
+                    }));
                 v.push_back(std::move(f));
             }
+
+            for (auto& f : v)
+                f.wait();
         }
         else
         {
