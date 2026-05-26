@@ -2080,6 +2080,73 @@ namespace
         });
     }
 
+    GB_TEST(container, gbdb_json_path_normalization_test)
+    {
+        gbassert(normalize_json_path("") == "");
+        gbassert(normalize_json_path("/") == "");
+        gbassert(normalize_json_path("/market/symbol") == "market/symbol");
+        gbassert(normalize_json_path("market/symbol") == "market/symbol");
+        gbassert(normalize_json_path("\\market\\symbol") == "market/symbol");
+
+        must_throw<std::invalid_argument>([] {
+            [[maybe_unused]] auto path = normalize_json_path("/market//symbol");
+        });
+    }
+
+    GB_TEST(container, gbdb_json_write_path_test)
+    {
+        if constexpr (!gbdb_json_axe_enabled)
+            return;
+
+        json_db db;
+        insert_json_at_path(db, "/market/splits", R"({"AAPL":[2,1]})");
+        db.set({ "market", "symbol" }, "AAPL");
+
+        json_write_options options;
+        options.pretty = false;
+        options.sort_keys = true;
+
+        auto subtree = write_json_path(db, "/market/splits", options);
+        gbassert(subtree == R"({"splits":{"AAPL":[2,1]}})");
+        gbassert(write_json_path(db, "/market/symbol", options) == R"("AAPL")");
+
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto missing = write_json_path(db, "/missing", options);
+        });
+    }
+
+    GB_TEST(container, gbdb_json_insert_at_path_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            json_db db;
+            insert_json_at_path(db, "/market/splits", R"({"AAPL":[2,1]})");
+
+            gbassert(db.contains({ "market", "splits", "AAPL" }));
+            auto text = write_json_path(db, "/market/splits", { .pretty = false, .sort_keys = true });
+            gbassert(text == R"({"splits":{"AAPL":[2,1]}})");
+        }
+    }
+
+    GB_TEST(container, gbdb_file_roundtrip_test)
+    {
+        auto file = std::filesystem::temp_directory_path() / "yadro_gbdb_file_roundtrip.db";
+        std::filesystem::remove(file);
+        std::filesystem::remove(file.string() + ".tmp");
+
+        json_db db;
+        db.set({ "market", "symbol" }, "AAPL");
+        db.set({ "market", "price" }, 193.25);
+
+        save_json_db_file(db, file);
+        auto restored = load_json_db_file(file);
+
+        auto symbol_ref = std::get<json_db::string_ref>(*restored.get({ "market", "symbol" }));
+        gbassert(restored.string(symbol_ref) == "AAPL");
+        gbassert(std::get<double>(*restored.get({ "market", "price" })) == 193.25);
+
+        std::filesystem::remove(file);
+    }
+
     GB_TEST(container, gbdb_table_set_view_test)
     {
         json_db db;

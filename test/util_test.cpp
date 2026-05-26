@@ -37,6 +37,7 @@
 #include <numeric>
 #include <atomic>
 #include <limits>
+#include <filesystem>
 
 namespace
 {
@@ -54,6 +55,21 @@ namespace
         logger log(oss);
         log() << "abc" << 1 << 2 << tab{ 10, '.' } << "pi=" << tab{ 15 } << 3.14;
         gbassert(oss.str() == "abc12.....pi=  3.14");
+    }
+
+    GB_TEST(util, named_resource_lock_rejects_duplicate_owner)
+    {
+        auto resource = std::filesystem::temp_directory_path() / "yadro_named_resource_lock_test.db";
+        auto lock = named_resource_lock::acquire("yadro_test_resource", resource);
+        gbassert(lock);
+        gbassert(is_named_resource_locked("yadro_test_resource", resource));
+
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto duplicate = named_resource_lock::acquire("yadro_test_resource", resource);
+        });
+
+        lock = {};
+        gbassert(!is_named_resource_locked("yadro_test_resource", resource));
     }
 
     GB_TEST(util, tuples)

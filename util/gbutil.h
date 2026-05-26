@@ -39,6 +39,7 @@
 #include "gnuplot.h"
 #include "hash_util.h"
 #include "misc.h"
+#include "named_resource_lock.h"
 #include "string_util.h"
 #include "time_util.h"
 #include "traits.h"

@@ -57,6 +57,9 @@
     <ClInclude Include="..\util\misc.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\named_resource_lock.h">
+      <Filter>util</Filter>
+    </ClInclude>
     <ClInclude Include="..\util\gberror.h">
       <Filter>util</Filter>
     </ClInclude>
@@ -188,6 +191,12 @@
       <Filter>container</Filter>
     </ClInclude>
     <ClInclude Include="..\container\gbdb_json.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\gbdb_file.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\gbdb_json_path.h">
       <Filter>container</Filter>
     </ClInclude>
     <ClInclude Include="..\container\gbdb_registry.h">
