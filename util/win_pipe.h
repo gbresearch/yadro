@@ -362,9 +362,20 @@ namespace gb::yadro::util
         {}
 
         winpipe_base_t(std::shared_ptr<util::logger> log) : _log(log) {}
+        
+        template<class Rep, class Period>
+        winpipe_base_t(std::chrono::duration<Rep, Period> timeout, std::shared_ptr<util::logger> log) : _log(log), 
+            _timeout_ms(pipe_timeout_milliseconds(timeout)) 
+        {}
+
+        template<class Rep, class Period>
+        winpipe_base_t(std::chrono::duration<Rep, Period> timeout, auto&&... log_args)
+            : _log(std::make_shared<util::logger>(std::forward<decltype(log_args)>(log_args)...))
+            , _timeout_ms(pipe_timeout_milliseconds(timeout))
+        {}
 
         winpipe_base_t(winpipe_base_t&& other) noexcept
-            : _pipe(std::move(other._pipe)), _log(std::move(other._log)), _log_send_receive(other._log_send_receive) {}
+            : _pipe(std::move(other._pipe)), _log(std::move(other._log)), _log_send_receive(other._log_send_receive), _timeout_ms(other._timeout_ms) {}
 
         void set_logger(auto&&...args) 
         {
@@ -409,7 +420,7 @@ namespace gb::yadro::util
             if (_log_send_receive)
                 log("sending: ", frame_size, " bytes");
 
-            owinpipe_stream stream{ _pipe };
+            owinpipe_stream stream{ _pipe, _timeout_ms };
             if (frame.size() <= pipe_chunk_size - sizeof(frame_size))
             {
                 thread_local std::array<char, pipe_chunk_size> packet{};
@@ -431,10 +442,11 @@ namespace gb::yadro::util
     protected:
         unique_win_handle _pipe;
         std::shared_ptr<util::logger> _log;
+        DWORD _timeout_ms = pipe_io_timeout_ms;
     private:
         std::vector<char> receive_frame() const
         {
-            iwinpipe_stream stream{ _pipe };
+            iwinpipe_stream stream{ _pipe, _timeout_ms };
             std::uint64_t frame_size{};
             stream.read(reinterpret_cast<char*>(&frame_size), sizeof(frame_size));
 
@@ -461,9 +473,21 @@ namespace gb::yadro::util
             : winpipe_client_t(pipename, "", connection_attempts, std::forward<decltype(log_args)>(log_args)...)
         {}
         
+        template<class Rep, class Period>
+        winpipe_client_t(const std::wstring& pipename, std::chrono::duration<Rep, Period> timeout, unsigned connection_attempts, 
+            auto&& ...log_args) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
+            : winpipe_client_t(pipename, "", timeout, connection_attempts, std::forward<decltype(log_args)>(log_args)...)
+        {}
+
         // named client
         winpipe_client_t(const std::wstring& pipename, std::string client_name, unsigned connection_attempts, auto&& ...log_args) // Win10, v 1709 "\\\\.\\pipe\\LOCAL\\"
-            : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
+            : winpipe_client_t(pipename, std::move(client_name), std::chrono::milliseconds(pipe_io_timeout_ms), connection_attempts, std::forward<decltype(log_args)>(log_args)...)
+        {}
+
+        template<class Rep, class Period>
+        winpipe_client_t(const std::wstring& pipename, std::string client_name, std::chrono::duration<Rep, Period> timeout,
+            unsigned connection_attempts, auto&&... log_args)
+            : winpipe_base_t(timeout, std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
         {
             using namespace std::chrono_literals;
             auto attempt = 0u;
@@ -497,7 +521,7 @@ namespace gb::yadro::util
             }
 
             // The pipe connected; keep byte-read mode. Top-level send/receive calls provide framing.
-            if(DWORD mode = PIPE_READMODE_BYTE; not SetNamedPipeHandleState(
+            if (DWORD mode = PIPE_READMODE_BYTE; not SetNamedPipeHandleState(
                 _pipe,    // pipe handle 
                 &mode,  // new pipe mode 
                 nullptr,     // don't set maximum bytes 
@@ -511,6 +535,7 @@ namespace gb::yadro::util
 
             log("\"", _client_name, "\": opened pipe after ", attempt, " attempts");
         }
+
         ~winpipe_client_t() noexcept
         {
             try { log("\"", _client_name, "\": destructor"); }
