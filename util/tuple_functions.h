@@ -392,20 +392,22 @@ namespace gb::yadro::util
         return std::max({ std::apply([](auto&& ...val) { return std::max({ val... }); }, t)... });
     }
 
-#if defined(clang_p1061)
+#if defined(__cpp_structured_bindings) && __cpp_structured_bindings >= 202411L
     //-------------------------------------------------------------------------
     // return member count of a class
-    constexpr auto class_member_count(auto&& t)
+    template<class T>
+    constexpr auto class_member_count(T&& t)
     {
-        auto&& [...x] = std::forward<decltype(t)>(t);
+        auto&& [...x] = std::forward<T>(t);
         return sizeof...(x);
     }
     
     //-------------------------------------------------------------------------
     // create a tuple from the members of class
-    constexpr auto class_to_tuple(auto&& t)
+    template<class T>
+    constexpr auto class_to_tuple(T&& t)
     {
-        auto&& [...x] = std::forward<decltype(t)>(t);
+        auto&& [...x] = std::forward<T>(t);
         return std::tuple{ std::forward<decltype(x)>(x)...};
     }
 #endif
