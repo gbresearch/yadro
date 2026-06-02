@@ -32,7 +32,7 @@
 
 #pragma comment(lib, "yadro")
 
-int main()
+int main(int argc, char* argv[])
 {
     using namespace gb::yadro::util;
     tester::set_verbose(true);
@@ -41,9 +41,11 @@ int main()
     tester::disable_tests("util", "win_pipe1");
     tester::disable_tests("util", "win_pipe2");
     tester::disable_tests("util", "win_pipe3");
-#endif
-#if !defined(GB_YADRO_ENABLE_REGISTRY_INTEGRATION_TESTS)
-    tester::disable_tests("container", "gbdb_registry_win32_integration_test");
+#else
+    if (argc < 2 || argv[1] != std::string("--run-all"))
+    {
+        tester::disable_tests("container", "gbdb_registry_win32_integration_test");
+    }
 #endif
     tester::set_policy(std::launch::deferred);
     auto success = tester::run();
