@@ -39,36 +39,6 @@ namespace
     using namespace gb::yadro::util;
     using namespace gb::yadro::archive;
 
-    //--------------------------------------------------------------------------------------------
-    // test optimization with tuples of fundamental types
-    GB_TEST(algorithm, genetic_optimization_test, std::launch::deferred)
-    {
-        using namespace std::chrono_literals;
-
-        fast::genetic_optimization_t optimizer([&](auto x, auto y, auto z, auto v)
-            { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
-            std::less<>{},
-            std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
-
-        auto [stat, opt_map] = optimizer.optimize(20ms, 5);
-        
-        // only testing in optimized build, debug build can be too slow and tests would fail randomly
-#if defined(NDEBUG)
-        gbassert(opt_map.size() == 5);
-        gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-        std::cout << "\n" << stat << "\n";
-        for (auto&& opt : opt_map)
-        {
-            auto&& [target, xyzv] = opt;
-            auto [x, y, z, v] = xyzv;
-            std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
-        }
-#endif
-    }
-
     GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::deferred)
     {
         using namespace std::chrono_literals;
@@ -207,176 +177,6 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    // test optimization with tuples of fundamental types, providing acceptable_target
-    GB_TEST(algorithm, genetic_optimization_test1, std::launch::deferred)
-    {
-        using namespace std::chrono_literals;
-
-        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
-            { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
-            std::less<>{},
-            std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
-
-        auto [stat, opt_map] = optimizer.optimize(0.01, 100ms, 5);
-
-        // only testing in optimized build, debug build can be too slow and tests would fail randomly
-#if defined(NDEBUG)
-        gbassert(opt_map.size() == 5);
-        gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-        std::cout << "\n" << stat << "\n";
-        for (auto&& opt : opt_map)
-        {
-            auto&& [target, xyzv] = opt;
-            auto [x, y, z, v] = xyzv;
-            std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
-        }
-#endif
-    }
-
-    //--------------------------------------------------------------------------------------------
-    // test optimization with tuples of ranges
-    GB_TEST(algorithm, genetic_opt_range_test, std::launch::deferred)
-    {
-        using namespace std::chrono_literals;
-
-        genetic_optimization_t optimizer([](auto&& r)
-            { return r[0] * r[0] + r[1] * r[1] + std::exp(r[2]) / 2 + std::exp(-r[2]) / 2 - 1 + (r[3] + std::sin(r[3])) * (r[3] + std::sin(r[3])); },
-            std::less<>{},
-            std::tuple{ std::vector{0., -10., -10., -10.}, std::vector{10., 10., 10., 10.} });
-
-        optimizer.set_opt_parameters(0.6, 0.5, 0.4);
-        auto [stat, opt_map] = optimizer.optimize(100ms, 5);
-
-        // only testing in optimized build, debug build can be too slow and tests would fail randomly
-#if defined(NDEBUG)
-        gbassert(opt_map.size() == 5);
-        gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-        std::cout << "\n" << stat << "\n";
-        for (auto&& opt : opt_map)
-        {
-            auto&& [target, xyzv] = opt;
-            auto&& [v] = xyzv;
-            std::cout << "target: " << target << ", " << v[0] << ", " << v[1] << ", " << v[2] << ", " << v[3] << "\n";
-        }
-#endif
-    }
-
-    //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, genetic_optimization_mt_test, std::launch::deferred)
-    {
-        using namespace std::chrono_literals;
-
-        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
-            {
-                auto sum{ 0. };
-                for (auto i = 0; i < 1000; ++i)
-                    sum += x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v));
-                return sum;
-            },
-            std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
-
-        optimizer.add_solution(1, 0, 1e-2f, 1e-3);
-
-        {// single thread
-            //optimizer.optimize(10ms, 5);
-            auto [stat, opt_map] = optimizer.optimize(200ms, 5);
-
-#if defined(NDEBUG)
-            gbassert(opt_map.size() == 5);
-            gbassert(opt_map.begin()->first < 0.1); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-            std::cout << "single thread:\n" << stat << "\n";
-            for (auto&& opt : opt_map)
-            {
-                auto [target, xyzv] = opt;
-                auto [x, y, z, v] = xyzv;
-                std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
-            }
-#endif
-        }
-        {// multithreaded
-            optimizer.clear();
-            gb::yadro::async::threadpool tp;
-            auto [stat, opt_map] = optimizer.optimize(tp, 100ms, 5);
-#if defined(NDEBUG)
-            gbassert(opt_map.size() == 5);
-            gbassert(opt_map.begin()->first < 1); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-            std::cout << "multithreaded:\n" << stat << "\n";
-            for (auto&& opt : opt_map)
-            {
-                auto [target, xyzv] = opt;
-                auto [x, y, z, v] = xyzv;
-                std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
-            }
-#endif
-        }
-        {// multithreaded with acceptable_target
-            optimizer.clear();
-            gb::yadro::async::threadpool tp;
-            auto [stat, opt_map] = optimizer.optimize(tp, 0.01, 100ms, 5);
-#if defined(NDEBUG)
-            gbassert(opt_map.size() == 5);
-            gbassert(opt_map.begin()->first < 1); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-            std::cout << "multithreaded with acceptable_target:\n" << stat << "\n";
-            for (auto&& opt : opt_map)
-            {
-                auto [target, xyzv] = opt;
-                auto [x, y, z, v] = xyzv;
-                std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
-            }
-#endif
-        }
-    }
-
-    //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, genetic_opt_serialization_test, std::launch::deferred)
-    {
-        using namespace std::chrono_literals;
-
-        genetic_optimization_t optimizer([](auto x, auto y, auto z, auto v)
-            { return x * x + y * y + std::exp(z) / 2 + std::exp(-z) / 2 - 1 + (v + std::sin(v)) * (v + std::sin(v)); },
-            std::tuple(0u, 10u), std::tuple(-10LL, 10LL), std::tuple(-10.f, 10.f), std::tuple(-10., 10.));
-
-        optimizer.optimize(10ms, 5);
-        // serialize to memory archive
-        gb::yadro::archive::omem_archive<> oma;
-        oma(optimizer);
-        optimizer.clear();
-        // deserialize from memory archive
-        gb::yadro::archive::imem_archive ima(std::move(oma));
-        ima(optimizer);
-        auto [stat, opt_map] = optimizer.optimize(1ms, 5);
-#if defined(NDEBUG)
-        gbassert(opt_map.size() == 5);
-        gbassert(opt_map.begin()->first < 0.01); // may fail on very slow machines
-#endif
-
-#if defined(GB_DEBUGGING)
-        std::cout << "\n" << stat << "\n";
-        for (auto&& opt : opt_map)
-        {
-            auto [target, xyzv] = opt;
-            auto [x, y, z, v] = xyzv;
-            std::cout << "target: " << target << ", " << x << ", " << y << ", " << z << ", " << v << "\n";
-        }
-#endif
-    }
-
-    //--------------------------------------------------------------------------------------------
     GB_TEST(algorithm, least_squares_test, std::launch::deferred)
     {
         using namespace std::chrono_literals;
@@ -389,46 +189,38 @@ namespace
         {
             // least-squares optimization
             auto opt = least_squares_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
-                data, std::tuple{ -2., 2. }, std::tuple{ -3., 3. });
+                data, conv::min_max_value_range(-2., 2.), conv::min_max_value_range(-3., 3.));
 
-            auto [stat, opt_map] = opt.optimize(50ms, 4);
+            auto [stat, history] = opt.optimize(500ms, 20, 4);
 
 #if defined(GB_DEBUGGING)
-            std::cout << stat << "\n";
-
-            for (auto&& opt : opt_map)
-            {
-                auto [target, ab] = opt;
-                std::cout << "target: " << target << ", " << tuple_to_string(ab) << "\n";
-            }
+            SetConsoleOutputCP(CP_UTF8);
+            opt.report(std::cout);
 #endif
-            gbassert(opt_map.size() == 4);
-            auto [target, a, b] = make_flat_tuple(*opt_map.begin());
+            gbassert(history.size() == 4);
+#if defined(NDEBUG)
+            auto [target, a, b] = make_flat_tuple(history.best());
             gbassert(almost_equal(target, 0., 0.01));
             gbassert(almost_equal(a, 1., 0.1));
             gbassert(almost_equal(b, 1., 0.1));
+#endif
         }
 
         // least absolute value optimization
         {
             auto opt = least_abs_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
-                data, std::tuple{ -2., 2. }, std::tuple{ -3., 3. });
+                data, conv::min_max_value_range(-2., 2.), conv::min_max_value_range(-3., 3.));
 
-            auto [stat, opt_map] = opt.optimize(50ms, 4);
+            auto [stat, history] = opt.optimize(500ms, 20, 4);
 
 #if defined(GB_DEBUGGING)
-            std::cout << stat << "\n";
-
-            for (auto&& opt : opt_map)
-            {
-                auto [target, ab] = opt;
-                std::cout << "target: " << target << ", " << tuple_to_string(ab) << "\n";
-            }
+            SetConsoleOutputCP(CP_UTF8);
+            opt.report(std::cout);
 #endif
-            gbassert(opt_map.size() == 4);
+            gbassert(history.size() == 4);
 
 #if defined(NDEBUG)
-            auto [target, a, b] = make_flat_tuple(*opt_map.begin());
+            auto [target, a, b] = make_flat_tuple(history.best());
             gbassert(almost_equal(target, 0., 0.1));
             gbassert(almost_equal(a, 1., 0.1));
             gbassert(almost_equal(b, 1., 0.1));

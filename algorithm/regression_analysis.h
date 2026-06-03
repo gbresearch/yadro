@@ -78,27 +78,26 @@ namespace gb::yadro::algorithm
     //----------------------------------------------------------------------------------------------
     // least squares optimization
     // function fun(p...) -> function(p..., x...)
-    template<class ...ParameterTypes>
-    auto least_squares_optimizer(auto fun, const data_range auto& data, std::tuple<ParameterTypes, ParameterTypes> ... min_max_parameters)
+    auto least_squares_optimizer(auto fun, const data_range auto& data, auto&& ... min_max_parameters)
     {
-        genetic_optimization_t opt([=, &data](auto&& ...params)
+        conv::genetic_optimization_t opt([=, &data](auto&& ...params)
             {
                 auto fn = std::invoke(fun, std::forward<decltype(params)>(params)...);
                 auto&& v = residuals(fn, data);
                 auto zero = static_cast<std::remove_reference_t<decltype(v[0])>>(0);
                 return std::reduce(std::begin(v), std::end(v), zero, [](auto&& v1, auto&& v2) { return v1 + v2 * v2; });
             }, std::less<>{}, min_max_parameters ...);
-
+        
+        static_assert(std::is_move_constructible_v<decltype(opt)>);
         return opt;
     }
 
     //----------------------------------------------------------------------------------------------
     // least abs optimization
     // function fun(p...) -> function(p..., x...)
-    template<class ...ParameterTypes>
-    auto least_abs_optimizer(auto fun, const data_range auto& data, std::tuple<ParameterTypes, ParameterTypes> ... min_max_parameters)
+    auto least_abs_optimizer(auto fun, const data_range auto& data, auto&& ... min_max_parameters)
     {
-        genetic_optimization_t opt([=, &data](auto&& ...params)
+        conv::genetic_optimization_t opt([=, &data](auto&& ...params)
             {
                 auto fn = std::invoke(fun, std::forward<decltype(params)>(params)...);
                 auto&& v = residuals(fn, data);
@@ -106,6 +105,7 @@ namespace gb::yadro::algorithm
                 return std::reduce(std::begin(v), std::end(v), zero, [](auto&& v1, auto&& v2) { return v1 + std::abs(v2); });
             }, std::less<>{}, min_max_parameters ...);
 
+        static_assert(std::is_move_constructible_v<decltype(opt)>);
         return opt;
     }
 }

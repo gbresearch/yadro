@@ -215,11 +215,32 @@ namespace gb::yadro::util
     template<class Mutex>
     struct mutexer : Mutex
     {
-        mutexer() = default;
-        mutexer(const mutexer&) {}
-        auto& operator= (const mutexer&) { return *this; }
+        mutexer() noexcept = default;
+        mutexer(const mutexer&) noexcept {}
+        mutexer(mutexer&&) noexcept {}
+        auto& operator= (const mutexer&) noexcept { return *this; }
+        auto& operator= (mutexer&&) noexcept { return *this; }
     };
 
+    //-------------------------------------------------------------------------
+    // movable atomic
+    template <typename T>
+    struct movable_atomic : std::atomic<T> {
+        using std::atomic<T>::atomic; // inherit constructors
+
+        movable_atomic(movable_atomic&& other) noexcept
+            : std::atomic<T>(other.load(std::memory_order_relaxed))
+        {
+            other.store(T{}, std::memory_order_relaxed);
+        }
+
+        movable_atomic& operator= (movable_atomic&& other) noexcept {
+            this->store(other.load(std::memory_order_relaxed),
+                std::memory_order_relaxed);
+            other.store(T{}, std::memory_order_relaxed);
+            return *this;
+        }
+    };
     //-------------------------------------------------------------------------
     // resource locked with mutex from construction to destruction
     // serialized access to locked resource is through visit() function
