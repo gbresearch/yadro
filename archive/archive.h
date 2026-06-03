@@ -939,7 +939,7 @@ namespace gb::yadro::archive
     template<archive_stream Stream, class... Ts>
     void bin_serialize(Stream&& s, Ts&& ... ts) requires(sizeof...(Ts) > 0)
     {
-        serialize(bin_archive(std::forward<Stream>(s)), std::forward<Ts>(ts)...);
+        bin_archive(std::forward<Stream>(s))(std::forward<Ts>(ts)...);
     }
 
 }
