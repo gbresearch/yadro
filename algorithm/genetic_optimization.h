@@ -45,6 +45,7 @@
 #include <stdexcept>
 #include <concepts>
 #include <type_traits>  
+#include <compare>
 
 #include "../util/gbutil.h"
 #include "../util/hash_util.h"
@@ -742,6 +743,8 @@ namespace gb::yadro::algorithm::conv {
         [[nodiscard]] auto get_eta() const noexcept { return eta; }
         [[nodiscard]] auto get_diversity_epsilon() const noexcept { return diversity_epsilon; }
 
+        auto operator<=>(const min_max_value_range&) const = default;
+
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
             if constexpr (std::is_integral_v<T>)
@@ -931,6 +934,8 @@ namespace gb::yadro::algorithm::conv {
         [[nodiscard]] auto& get_value(std::size_t index) const { return allowed_values[index]; }
         [[nodiscard]] auto size() const noexcept { return allowed_values.size(); }
 
+        auto operator<=>(const discrete_value_range&) const = default;
+
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
             size_t i = std::uniform_int_distribution<size_t>{ 0, allowed_values.size() - 1 }(rng);  
@@ -1022,6 +1027,8 @@ namespace gb::yadro::algorithm::conv {
         
         auto get_container_size() const noexcept { return container_size; }
 
+        auto operator<=>(const container_range&) const = default;
+
         template<typename RNG>
         [[nodiscard]] value_type random_value(RNG& rng) const {
             value_type result;
@@ -1111,6 +1118,8 @@ namespace gb::yadro::algorithm::conv {
                 self.memo_capacity
             );
         }
+
+        auto operator<=>(const ga_config&) const = default;
     };
 
     // =========================================================================
@@ -1160,6 +1169,8 @@ namespace gb::yadro::algorithm::conv {
                 self.low_cache_threshold
             );
         }
+
+        auto operator<=>(const adaptive_phase_config&) const = default;
     };
 
     // -----------------------------------------------------------------------------
@@ -1245,6 +1256,8 @@ namespace gb::yadro::algorithm::conv {
                 self.max_elite_perturbation_count
             );
         }
+
+        auto operator<=>(const stopping_criteria&) const = default;
     };
 
     enum class stop_reason : uint8_t {

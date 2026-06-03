@@ -39,6 +39,20 @@ namespace
     using namespace gb::yadro::util;
     using namespace gb::yadro::archive;
 
+    GB_TEST(algorithm, genetic_optimization_value_types_are_three_way_comparable, std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+
+        static_assert(std::three_way_comparable<min_max_value_range<int>>);
+        static_assert(std::three_way_comparable<min_max_value_range<double>>);
+        static_assert(std::three_way_comparable<discrete_value_range<int>>);
+        static_assert(std::three_way_comparable<container_range<std::vector<int>, min_max_value_range<int>>>);
+        static_assert(std::three_way_comparable<ga_config>);
+        static_assert(std::three_way_comparable<adaptive_phase_config>);
+        static_assert(std::three_way_comparable<stopping_criteria>);
+        static_assert(std::three_way_comparable<optimization_stats>);
+    }
+
     GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::deferred)
     {
         using namespace std::chrono_literals;
@@ -191,7 +205,7 @@ namespace
             auto opt = least_squares_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
                 data, conv::min_max_value_range(-2., 2.), conv::min_max_value_range(-3., 3.));
 
-            auto [stat, history] = opt.optimize(500ms, 20, 4);
+            auto [stat, history] = opt.optimize(500ms, 50, 4);
 
 #if defined(GB_DEBUGGING)
             SetConsoleOutputCP(CP_UTF8);
@@ -211,7 +225,7 @@ namespace
             auto opt = least_abs_optimizer([](auto a, auto b) { return [=](auto x) { return a + b * x; }; },
                 data, conv::min_max_value_range(-2., 2.), conv::min_max_value_range(-3., 3.));
 
-            auto [stat, history] = opt.optimize(500ms, 20, 4);
+            auto [stat, history] = opt.optimize(500ms, 50, 4);
 
 #if defined(GB_DEBUGGING)
             SetConsoleOutputCP(CP_UTF8);
