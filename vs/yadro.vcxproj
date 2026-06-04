@@ -64,20 +64,20 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>lib\$(ProjectName)\$(PlatformName)\$(Configuration)\</OutDir>
-    <IntDir>obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
+    <OutDir>..\lib\$(PlatformName)\$(Configuration)\</OutDir>
+    <IntDir>..\obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <OutDir>lib\$(ProjectName)\$(PlatformName)\$(Configuration)\</OutDir>
-    <IntDir>obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
+    <OutDir>..\lib\$(PlatformName)\$(Configuration)\</OutDir>
+    <IntDir>..\obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>lib\$(ProjectName)\$(PlatformName)\$(Configuration)\</OutDir>
-    <IntDir>obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
+    <OutDir>..\lib\$(PlatformName)\$(Configuration)\</OutDir>
+    <IntDir>..\obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>lib\$(ProjectName)\$(PlatformName)\$(Configuration)\</OutDir>
-    <IntDir>obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
+    <OutDir>..\lib\$(PlatformName)\$(Configuration)\</OutDir>
+    <IntDir>..\obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
