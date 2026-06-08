@@ -941,12 +941,32 @@ namespace gb::yadro::async {
             task->self_.reset();   // releases shared ownership; deletes if no Task<R> copy
 
             const auto prev = tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
-            if (prev == 1) {
-                drain_cv_.notify_all();
-                if (idle_.on_idle
-                    && state_.load(std::memory_order_acquire) == PoolState::Running)
-                    notify_idle();
+            if (prev == 1)
+                on_system_idle();
+        }
+
+        // Signal the drain predicate when the system has just gone fully idle.
+        //
+        // shutdown_mutex_ is acquired (and immediately released) *before*
+        // notifying drain_cv_.  This is mandatory, not an optimisation:
+        // tasks_in_system_ is decremented WITHOUT shutdown_mutex_, while
+        // shutdown()'s drain_cv_.wait() evaluates `tasks_in_system_ == 0` under
+        // that mutex.  A bare notify_all() can therefore land in the window
+        // between the waiter's predicate check (sees 1, decides to block) and
+        // its registration on drain_cv_, and be lost — leaving shutdown()
+        // parked forever even though tasks_in_system_ is already 0.  Briefly
+        // serialising on shutdown_mutex_ closes that window: shutdown() either
+        // observes 0 on its next predicate evaluation, or is already registered
+        // and receives the wake.  (Only worker threads reach here, and workers
+        // never call shutdown(), so this can never self-deadlock.)
+        void on_system_idle() noexcept {
+            {
+                std::lock_guard<std::mutex> lk{ shutdown_mutex_ };
             }
+            drain_cv_.notify_all();
+            if (idle_.on_idle
+                && state_.load(std::memory_order_acquire) == PoolState::Running)
+                notify_idle();
         }
 
         void notify_idle() noexcept {
@@ -1012,12 +1032,8 @@ namespace gb::yadro::async {
             tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
             work();
             const auto prev = tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
-            if (prev == 1) {
-                drain_cv_.notify_all();
-                if (idle_.on_idle
-                    && state_.load(std::memory_order_acquire) == PoolState::Running)
-                    notify_idle();
-            }
+            if (prev == 1)
+                on_system_idle();
         }
 
         // Wrap work in a minimal TaskBase and enqueue via the normal inbox path.
