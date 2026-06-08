@@ -420,14 +420,28 @@ namespace gb::yadro::async {
     // Task abstraction — TaskBase + TaskNode
     // ─────────────────────────────────────────────────────────────────────────────
     // TaskNode<F,R> holds the callable AND the SharedState<R> in one allocation.
-    // On destruction without execute() (immediate shutdown), ~TaskNode sets
-    // broken_promise so .get() does not hang indefinitely.
+    // Every node is created with std::make_shared and kept alive by self_ (and any
+    // aliasing Task<R> handle that shares the same control block) while the raw
+    // TaskBase* sits in a deque/inbox.  A node that will never run (the pool was
+    // stopped before it was dispatched) must therefore be reclaimed through that
+    // shared_ptr — never freed through the raw pointer.  abandon() does this and,
+    // for TaskNode, also faults the SharedState<R> with broken_promise so blocked
+    // .get()/.wait() callers unblock instead of hanging.
     // ─────────────────────────────────────────────────────────────────────────────
 
     struct TaskBase {
         std::shared_ptr<TaskBase> self_;   // keeps node alive while in deque
         virtual ~TaskBase() = default;
         virtual void execute() noexcept = 0;
+
+        // Discard a node that will never execute.  The node was allocated via
+        // make_shared, so the only correct way to free it is to drop the
+        // self-reference (the control block then reclaims it once the last
+        // owner — self_ plus any live Task<R> handle — is gone).  Calling
+        // `delete` on the raw TaskBase* instead corrupts the heap and can free
+        // memory still referenced by a Task<R> handle.
+        // self_.reset() may delete *this, so it must be the final statement.
+        virtual void abandon() noexcept { self_.reset(); }
     };
 
     template <typename F, typename R>
@@ -449,6 +463,19 @@ namespace gb::yadro::async {
             catch (...) {
                 SharedState<R>::set_exception(std::current_exception());
             }
+        }
+
+        void abandon() noexcept override {
+            // Fault the result so waiters on this Task<R> unblock rather than
+            // hang forever.  set_exception locks the SharedState mutex, which in
+            // a teardown path could in principle throw; swallow it so we still
+            // release the node correctly below.
+            try {
+                SharedState<R>::set_exception(std::make_exception_ptr(
+                    std::future_error(std::future_errc::broken_promise)));
+            }
+            catch (...) {}
+            self_.reset();   // may delete *this — keep last
         }
     };
 
@@ -595,14 +622,14 @@ namespace gb::yadro::async {
 
             for (auto& ctl : ctls_) {
                 std::lock_guard inbox_lk{ ctl->mutex };
-                for (auto* t : ctl->inbox) delete t;
+                for (auto* t : ctl->inbox) t->abandon();
                 ctl->inbox.clear();
             }
             for (auto& dq : deques_) {
                 while (true) {
                     auto [s, task] = dq->pop_bottom();
                     if (s != StealResult::Success) break;
-                    delete task;
+                    task->abandon();
                 }
             }
         }
@@ -922,13 +949,13 @@ namespace gb::yadro::async {
 
             {
                 std::lock_guard lk{ my_ctl.mutex };
-                for (auto* t : my_ctl.inbox) delete t;
+                for (auto* t : my_ctl.inbox) t->abandon();
                 my_ctl.inbox.clear();
             }
             while (true) {
                 auto [s, t] = my_deque.pop_bottom();
                 if (s != StealResult::Success) break;
-                delete t;
+                t->abandon();
             }
         }
 
