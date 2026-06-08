@@ -45,8 +45,6 @@ namespace gb::yadro::util
     inline auto make_hash(const wchar_t* str) { return std::hash<std::wstring>{}(str); }
     inline auto make_hash(const auto& v) requires requires{ std::hash<std::remove_cvref_t<decltype(v)>>{}(v); }
     { return std::hash<std::remove_cvref_t<decltype(v)>>{}(v); };
-    // TODO: remove after experiment
-    inline auto make_hash(unsigned v) { return v; };
 
     // combine hashes
     inline auto make_hash(const auto& v, const auto&... ts) requires(sizeof ...(ts) != 0);

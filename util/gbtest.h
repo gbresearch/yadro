@@ -32,6 +32,7 @@
 #include <exception>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <future>
 
 #include "gblog.h"
@@ -226,7 +227,7 @@ namespace gb::yadro::util
             auto [b, e] = _tests.equal_range(name);
             for (; b != e; ++b)
                 for (auto&& test : b->second)
-                    if(test->_test_name == test_name)
+                    if(std::string_view(test->_test_name) == test_name)
                         test->_enabled = false;
         }
     };
@@ -234,7 +235,7 @@ namespace gb::yadro::util
 
 //---------------------------------------------------------------------------------------------------------------------
 inline gb::yadro::util::test_base::test_base(const char* test_name, const char* suite, std::launch policy)
-    : _test_name(test_name), _policy(policy)
+    : _policy(policy), _test_name(test_name)
 {
     gb::yadro::util::tester::get()._tests[suite].push_back(this);
 }

@@ -48,6 +48,8 @@
 // C++ interface for gnuplot (Windows only)
 //-------------------------------------------------------------------------------------------------
 
+#ifdef GBWINDOWS
+
 namespace gb::yadro::util
 {
     // exception thrown when gnuplot fails
@@ -502,10 +504,6 @@ namespace gb::yadro::util
         return gnuplot::plot_cmd(std::forward<decltype(args)>(args)...);
     }
 
-    inline auto foo()
-    {
-        return get_plot_cmd(1, pane(std::vector<int>{1, 2, 3, 4, 5}));
-    }
     //------------------------------------------------------------------------------
     // constructor creates a pipe to gnuplot.exe
     //
@@ -539,3 +537,5 @@ namespace gb::yadro::util
         set_terminal_output();
     }
 }
+
+#endif // GBWINDOWS

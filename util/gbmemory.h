@@ -83,6 +83,11 @@ namespace gb::yadro::util
     struct aligned_allocator
     {
         using value_type = T;
+
+        constexpr aligned_allocator() noexcept = default;
+        template <class U>
+        constexpr aligned_allocator(const aligned_allocator<U, Alignment>&) noexcept {}
+
         [[nodiscard]] constexpr T* allocate(std::size_t n)
         {
             return static_cast<T*>(
@@ -91,7 +96,7 @@ namespace gb::yadro::util
 
         constexpr void deallocate(T* p, std::size_t n)
         {
-            ::operator delete (p, n, std::align_val_t{ Alignment });
+            ::operator delete (p, sizeof(T) * n, std::align_val_t{ Alignment });
         }
 
         constexpr auto operator==(const aligned_allocator&) const { return true; }

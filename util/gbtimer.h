@@ -169,7 +169,7 @@ namespace gb::yadro::util
     template<class time_unit,
         class clock = std::chrono::high_resolution_clock,
         class mutex = detail::nonlocking_mutex>
-    inline [[nodiscard]] auto make_accumulating_timer(std::string name)
+    [[nodiscard]] inline auto make_accumulating_timer(std::string name)
     {
         return accumulating_timer<time_unit, clock, mutex>([=](auto duration, auto count)
             {
@@ -180,7 +180,7 @@ namespace gb::yadro::util
 
     // dependent timers for sub-blocks
     template<class time_unit, class clock, class mutex>
-    inline [[nodiscard]] auto make_slave_timer(std::string name, const accumulating_timer<time_unit, clock, mutex>& master_timer)
+    [[nodiscard]] inline auto make_slave_timer(std::string name, const accumulating_timer<time_unit, clock, mutex>& master_timer)
     {
         return accumulating_timer<time_unit, clock, mutex>(
             [timer_name = std::move(name), master = &master_timer](auto duration, auto count)

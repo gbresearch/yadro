@@ -38,10 +38,10 @@
 
 // macro for frequently used named scope timer, e.g. GB_TIMER(name, milliseconds);
 #define GB_TIMER(name, time_unit) auto GM_MACRO_CONCAT(name, __LINE__) {\
-    gb::yadro::util::global_timer_map_t<std::chrono::##time_unit>::get(GM_MACRO_STRING(GM_MACRO_CONCAT(name,__LINE__)),\
+    gb::yadro::util::global_timer_map_t<std::chrono::time_unit>::get(GM_MACRO_STRING(GM_MACRO_CONCAT(name,__LINE__)),\
     [=](auto duration, auto count)\
     {\
         auto str = std::format("[TIMER] {}:{}, time: {} {}, count: {}\n", #name, __LINE__, duration.count(), \
-            gb::yadro::util::get_duration_suffix<std::chrono::##time_unit>(), count);\
+            gb::yadro::util::get_duration_suffix<std::chrono::time_unit>(), count);\
         printf(str.c_str());\
     }).make_scope_timer()}

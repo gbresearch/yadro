@@ -255,6 +255,15 @@ namespace
         gbassert(almost_equal(1.55, 1.54, 0.011));
         gbassert(!almost_equal(std::vector{ 1.1, 1.2, 2.2 }, std::deque{ 1.11, 1.19, 2.3 }, 0.001));
         gbassert(almost_equal(std::vector{ 1.1, 1.2, 2.2 }, std::deque{ 1.11, 1.19, 2.3 }, 0.11));
+
+        // window_function: in-range returns the value unchanged; below min and
+        // above max each invoke fun on the (distinct) boundary offset
+        auto identity = [](auto offset) { return offset; };
+        gbassert(window_function(5, identity, 0, 10) == 5);     // in range
+        gbassert(window_function(0, identity, 0, 10) == 0);     // at min (in range)
+        gbassert(window_function(10, identity, 0, 10) == 10);   // at max (in range)
+        gbassert(window_function(-3, identity, 0, 10) == -3);   // below min: value - min_value
+        gbassert(window_function(15, identity, 0, 10) == -5);   // above max: max_value - value
     }
 
     GB_TEST(util, xxhash128_test)
@@ -344,6 +353,7 @@ namespace
 
     GB_TEST(util, gnuplot)
     {
+#if defined(GBWINDOWS)
         auto golden = R"*(set multiplot layout 3,2 columnsfirst
 set pointsize 5
 set grid
@@ -413,6 +423,7 @@ unset multiplot)*";
             };
 
         gbassert(clean_str(cmd) == clean_str(golden));
+#endif
     }
 
     GB_TEST(util, misc_locked)
@@ -422,6 +433,60 @@ unset multiplot)*";
         lstr.visit([](auto&& s) { gbassert(s == "xxx"); });
         lstr.visit([](auto&& s, auto&& arg) { s = std::string("hello") + arg; }, " world");
         lstr.visit([](auto&& s) { gbassert(s == "hello world"); });
+    }
+
+    GB_TEST(util, hybrid_mutex_test)
+    {
+        using namespace std::chrono_literals;
+        hybrid_mutex m;
+
+        // basic lock/unlock; while held, try_lock must fail
+        {
+            std::lock_guard lock(m);
+            gbassert(!m.try_lock());
+        }
+        // released after scope
+        gbassert(m.try_lock());
+        m.unlock();
+
+        // try_lock_for must time out (and not block past the deadline) when held
+        {
+            std::unique_lock held(m);
+            auto start = std::chrono::steady_clock::now();
+            gbassert(!m.try_lock_for(50ms));
+            auto elapsed = std::chrono::steady_clock::now() - start;
+            gbassert(elapsed >= 50ms);
+            gbassert(elapsed < 5s); // regression: blocking phase honors the timeout
+        }
+        // once released try_lock_for succeeds promptly
+        gbassert(m.try_lock_for(1s));
+        m.unlock();
+
+        // mutual exclusion under contention
+        hybrid_mutex hm;
+        std::size_t counter = 0;
+        auto worker = [&] {
+            for (auto i = 0; i < 10000; ++i)
+            {
+                std::lock_guard lock(hm);
+                ++counter;
+            }
+            };
+        std::vector<std::future<void>> futures;
+        for (auto t = 0; t < 4; ++t)
+            futures.push_back(std::async(std::launch::async, worker));
+        for (auto& f : futures)
+            f.get();
+        gbassert(counter == 40000);
+    }
+
+    GB_TEST(util, test_harness_disable_is_safe_noop)
+    {
+        // disabling a non-existent suite/test exercises the name-matching path
+        // (string content comparison, see _disable_test) and must be a no-op
+        tester::disable_suites("yadro_no_such_suite_xyz");
+        tester::disable_tests("yadro_no_such_suite_xyz", "yadro_no_such_test_xyz");
+        gbassert(true); // reaching here without disabling real tests is the assertion
     }
 
     GB_TEST(util, string_util)
@@ -434,6 +499,18 @@ unset multiplot)*";
         gbassert(base64_encode(base64_decode(base64_encode(v))) == "AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAA==");
         gbassert(base64_encode(2024) == "6AcAAA==");
         gbassert(base64_encode(std::array{ 2024u, 7u, 8u }) == "6AcAAAcAAAAIAAAA");
+
+        // base64 round-trip across all padding cases; sizes that are multiples of 3
+        // produce unpadded output (encoded length % 4 == 0, no '=') and are a
+        // regression test for the decode off-by-one that dropped the last byte
+        for (std::size_t n : { 0u, 1u, 2u, 3u, 4u, 5u, 6u, 9u, 12u, 15u, 16u })
+        {
+            std::vector<unsigned char> data(n);
+            for (std::size_t i = 0; i < n; ++i)
+                data[i] = static_cast<unsigned char>(i * 7 + 1);
+            auto decoded = base64_decode(base64_encode(data));
+            gbassert(std::ranges::equal(data, decoded));
+        }
 
         // test MD5
         gbassert(md5string("The quick brown fox jumps over the lazy dog") == "9e107d9d372bb6826bd81d3542a419d6");

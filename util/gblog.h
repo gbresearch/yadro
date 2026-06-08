@@ -36,7 +36,6 @@
 #include <ostream>
 #include <fstream>
 #include <concepts>
-#include <process.h> // for getpid
 #include <cassert>
 #include <map>
 #include <set>

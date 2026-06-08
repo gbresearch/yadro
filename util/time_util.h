@@ -31,8 +31,25 @@
 #include <sstream>
 #include <thread>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace gb::yadro::util
 {
+    //-------------------------------------------------------------------------
+    // portable process id
+    inline auto get_process_id()
+    {
+#if defined(_WIN32)
+        return ::_getpid();
+#else
+        return ::getpid();
+#endif
+    }
+
     //-------------------------------------------------------------------------
     // get time stamp for specified time zone (current zone by default)
     // e.g. time_stamp("UTC"), time_stamp("America/New_York")
@@ -41,11 +58,11 @@ namespace gb::yadro::util
         using namespace std::chrono;
         try {
             return std::format("[{:%F %T}][pid: {}, tid: {}]", zoned_time{ zone, system_clock::now() },
-                ::_getpid(), std::this_thread::get_id());
+                get_process_id(), std::this_thread::get_id());
         }
         catch (std::exception&)
         {
-            return std::format("[invalid time zone: {}][pid: {}, tid: {}]", zone, ::_getpid(), std::this_thread::get_id());
+            return std::format("[invalid time zone: {}][pid: {}, tid: {}]", zone, get_process_id(), std::this_thread::get_id());
         }
     }
     //-------------------------------------------------------------------------

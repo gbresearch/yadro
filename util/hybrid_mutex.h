@@ -99,7 +99,7 @@ namespace gb::yadro::util
         // -------------------------------------------------------------------------
         // Lock / Try lock / Unlock
         // -------------------------------------------------------------------------
-        [[nodiscard]] void lock() noexcept
+        void lock() noexcept
         {
             // Phase 1: short spin
             for(spin_wait spinner; spinner.get_count() < spin_threshold; )
@@ -158,7 +158,12 @@ namespace gb::yadro::util
             if (Clock::now() >= timeout_time)
                 return false;
 
-            // Phase 2: timed wait
+            // Phase 2: timed wait with bounded backoff.
+            // std::atomic::wait() has no timed form before C++26, so a plain
+            // wait() could block past timeout_time; sleep in capped increments
+            // bounded by the remaining time instead, so the deadline is honored.
+            auto backoff = std::chrono::nanoseconds(1000); // 1us
+            constexpr auto max_backoff = std::chrono::nanoseconds(512000); // 512us
             while (Clock::now() < timeout_time) {
                 int expected = 0;
                 if (state.compare_exchange_strong(expected, 1,
@@ -169,7 +174,10 @@ namespace gb::yadro::util
                 if (now >= timeout_time)
                     return false;
 
-                state.wait(1, std::memory_order_relaxed);
+                auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout_time - now);
+                std::this_thread::sleep_for((std::min)(backoff, remaining));
+                if (backoff < max_backoff)
+                    backoff *= 2;
             }
             return false;
         }

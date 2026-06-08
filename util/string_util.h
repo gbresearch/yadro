@@ -262,7 +262,7 @@ namespace gb::yadro::util
         unsigned char char_array_4[4], char_array_3[3];
 
         for (std::size_t in_len = encoded_string.size(), idx = 0;
-            --in_len && (encoded_string[idx] != '=') && is_base64(encoded_string[idx]);)
+            in_len-- && (encoded_string[idx] != '=') && is_base64(encoded_string[idx]);)
         {
             char_array_4[i++] = encoded_string[idx]; 
             ++idx;
@@ -308,7 +308,7 @@ namespace gb::yadro::util
         std::vector<std::basic_string<T>> tokens;
         std::basic_istringstream<T> token_stream(input);
 
-        for (std::string token; std::getline(token_stream, token, separator);)
+        for (std::basic_string<T> token; std::getline(token_stream, token, separator);)
             tokens.push_back(token);
 
         return tokens;

@@ -16,9 +16,7 @@
 #include <string_view>
 #include <utility>
 
-#ifdef GBWINDOWS
-#include <windows.h>
-#endif
+#include "gbwin.h" // defines GBWINDOWS and pulls in <windows.h> on Windows
 
 namespace gb::yadro::util
 {
@@ -40,7 +38,7 @@ namespace gb::yadro::util
     [[nodiscard]] inline std::string comparable_resource_path(const std::filesystem::path& path)
     {
         auto text = normalized_resource_path(path).generic_string();
-#ifdef _WIN32
+#ifdef GBWINDOWS
         std::ranges::transform(text, text.begin(), [](unsigned char ch) {
             return static_cast<char>(std::tolower(ch));
         });

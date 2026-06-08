@@ -414,7 +414,7 @@ namespace gb::yadro::util
         std::convertible_to<decltype(value)> auto&& min_value,
         std::convertible_to<decltype(value)> auto&& max_value)
     {
-        return value < min_value || value > max_value ? std::invoke(std::forward<decltype(fun)>(fun), value - min_value)
+        return value < min_value ? std::invoke(std::forward<decltype(fun)>(fun), value - min_value)
             : value > max_value ? std::invoke(std::forward<decltype(fun)>(fun), max_value - value) : value;
     }
 

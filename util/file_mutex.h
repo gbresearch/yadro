@@ -38,6 +38,9 @@
 
 #ifdef POSIX
 #include "../util/hybrid_mutex.h"
+#include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
 
 namespace gb::yadro::util
 {
