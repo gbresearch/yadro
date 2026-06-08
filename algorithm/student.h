@@ -97,6 +97,13 @@ namespace gb::yadro::algorithm
             auto target = 1.0 - alpha / 2.0;
             auto low = 0.0, high = 10.0;
 
+            // Grow the upper bracket until it brackets the target. The fixed
+            // high=10 was too small for df=1 (true 95% value ~12.7). (Finding 2.B)
+            while (t_cdf(high, df) < target && high < 1e12) {
+                low = high;
+                high *= 2.0;
+            }
+
             while ((high - low) > 1e-10) {
                 auto mid = (low + high) / 2.0;
                 if (t_cdf(mid, df) < target) low = mid;
@@ -114,7 +121,15 @@ namespace gb::yadro::algorithm
 
         static double chi2_critical(double p, int df) {
             auto low = 0.0, high = 1000.0;
-            
+
+            // Grow the upper bracket until it brackets the target. The fixed
+            // high=1000 was too small for large df (e.g. df~1000 needs ~1090).
+            // (Finding 2.B)
+            while (chi2_cdf(high, df) < p && high < 1e12) {
+                low = high;
+                high *= 2.0;
+            }
+
             while ((high - low) > 1e-8) {
                 auto mid = (low + high) / 2.0;
                 if (chi2_cdf(mid, df) < p) low = mid;

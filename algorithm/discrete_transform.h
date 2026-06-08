@@ -265,6 +265,9 @@ namespace gb::yadro::algorithm
             return power;
             };
         size_t N = std::ranges::size(data);
+        // Guard empty input: 2*N - 1 underflows size_t to SIZE_MAX and
+        // next_power_of_two would overflow to 0 and loop forever. (Finding 5.D)
+        if (N == 0) return {};
         // Choose M as the next power of 2 >= 2*N - 1.
         size_t M = next_power_of_two(2 * N - 1);
 

@@ -204,8 +204,17 @@ namespace gb::yadro::algorithm
         if (default_max_lag < 0) default_max_lag = 0;
         int max_lag_use = (max_lag < 0) ? default_max_lag : max_lag;
 
-        // Ensure sufficient observations
-        gbassert(series.size() >= 5 + static_cast<size_t>(max_lag_use), "adfuller: series too short for requested max_lag");
+        // Ensure sufficient observations. The regression at the largest lag has
+        //   nobs = (n - 1) - lag    rows
+        //   k    = trend_cols + 1 + lag   columns
+        // and needs nobs >= k + 1 for a finite residual variance s2 = ssr/(nobs-k).
+        // The previous guard (5 + max_lag_use) ignored trend_cols, so for
+        // CONSTANT_TREND at minimum length the highest lag produced nobs-k <= 0
+        // (divide-by-zero / 0/0). (Finding 3.C)
+        const size_t trend_cols = (trend == TrendType::CONSTANT_TREND ? 2u :
+            trend == TrendType::CONSTANT ? 1u : 0u);
+        const size_t min_obs = trend_cols + 2u * static_cast<size_t>(max_lag_use) + 3u;
+        gbassert(series.size() >= min_obs, "adfuller: series too short for requested max_lag/trend");
         // Precompute first differences once (optimization)
         vector<double> dy;
         dy.reserve(series.size() - 1);

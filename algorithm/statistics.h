@@ -47,7 +47,9 @@ namespace gb::yadro::algorithm
     //--------------------------------------------------------------------------------------------
     // 1090-sigmoid function: maps x10 to 0.1 and x90 to 0.9, with a smooth transition in between
     inline double sigmoid1090(double x, double x10, double x90) {
-        util::gbassert(!util::almost_equal(x10, x90) && "x10 must not be equal to x90");
+        // Require strict ordering: reversed inputs would silently invert the
+        // 10/90 semantics (f(x10) -> 0.9). (Finding 1.1)
+        util::gbassert(x10 < x90, "x10 must be less than x90");
 
         auto x50 = 0.5 * (x10 + x90);
         auto k = 2.0 * std::log(9.0) / (x90 - x10);
@@ -137,7 +139,10 @@ namespace gb::yadro::algorithm
             ? static_cast<double>(n)
             : static_cast<double>(n - 1);
 
-        const double variance = m2 / divisor;
+        // Clamp at zero: m2 is non-negative in exact arithmetic, but
+        // catastrophic cancellation could yield a tiny negative value and
+        // std::sqrt would return NaN. (Finding 1.2)
+        const double variance = std::max(m2 / divisor, 0.0);
         return { mean, std::sqrt(variance) };
     }
 
@@ -147,6 +152,13 @@ namespace gb::yadro::algorithm
     std::pair<double, double> kolmogorov_smirnov_test(const Sequence1& sample1, const Sequence2& sample2)
         requires requires(typename Sequence1::value_type t, typename Sequence2::value_type u) { { t <= u } -> std::convertible_to<bool>; }
     {
+        // The statistic and p-value are undefined for an empty sample; guard
+        // before the p-value division by (n1 + n2). (Finding 2.E)
+        if (std::ranges::empty(sample1) || std::ranges::empty(sample2)) {
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            return { nan, nan };
+        }
+
         auto computeECDF = [](const auto& data) {
             using value_type = typename std::remove_cvref_t<decltype(data)>::value_type;
             std::vector<value_type> sorted_data(data.begin(), data.end());
@@ -184,7 +196,10 @@ namespace gb::yadro::algorithm
         // Compute p-value using Kolmogorov-Smirnov distribution
         auto n1 = sample1.size();
         auto n2 = sample2.size();
-        auto en_square = static_cast<double>(n1 * n2) / (n1 + n2);
+        // Cast before multiplying: n1 * n2 in size_t overflows on 32-bit builds
+        // (Win32) for samples above ~65k. (Finding 2.D)
+        auto en_square = static_cast<double>(n1) * static_cast<double>(n2)
+            / static_cast<double>(n1 + n2);
         auto p_value = std::min(1.0, 2.0 * std::exp(-2.0 * en_square * d_max * d_max));
 
         return { d_max, p_value };
@@ -254,8 +269,31 @@ namespace gb::yadro::algorithm
         numerator = std::pow(numerator, 2);
         auto w = numerator / denominator;
 
-        // Approximate p-value (simple approximation)
-        auto p_value = 1.0 - std::exp(-1.2725 * std::pow(w - 1.0, 2));
+        // Royston (1993) normalizing transformation for the Shapiro-Francia
+        // statistic W' (calibrated for n in [5, 5000]).
+        //
+        // The previous heuristic, p = 1 - exp(-1.2725 (W-1)^2), was inverted:
+        // near-normal samples (W' -> 1) produced p -> 0, i.e. it rejected
+        // normality precisely when the data looked most normal. See
+        // CODE_REVIEW.md finding 2.A.
+        //
+        //   w'    = ln(1 - W')
+        //   mu    = -1.2725 + 1.0521 (ln ln n - ln n)
+        //   sigma =  1.0308 - 0.26758 (ln ln n + 2 / ln n)
+        //   z     = (w' - mu) / sigma
+        //   p     = upper-tail normal probability = Phi(-z)
+        //
+        // W' near 1 => z very negative => p near 1 (fail to reject normality);
+        // small W' => large z => small p (reject normality).
+        const double nd = static_cast<double>(n);
+        const double ln_n = std::log(nd);
+        const double ln_ln_n = std::log(ln_n);
+        const double mu = -1.2725 + 1.0521 * (ln_ln_n - ln_n);
+        const double sigma = 1.0308 - 0.26758 * (ln_ln_n + 2.0 / ln_n);
+        // Guard the log against W' >= 1 from floating-point rounding.
+        const double one_minus_w = std::max(1.0 - w, 1e-300);
+        const double z = (std::log(one_minus_w) - mu) / sigma;
+        const double p_value = 0.5 * std::erfc(z / std::numbers::sqrt2);
 
         return { w, p_value };
     }

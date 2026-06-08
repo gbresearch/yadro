@@ -389,25 +389,31 @@ namespace
     //--------------------------------------------------------------------------------------------
     GB_TEST(algorithm, shapiro_francia_tst, std::launch::async)
     {
-        // NOTE: this exercises shapiro_francia_test (renamed from shapiro_wilk_test,
-        // see CODE_REVIEW.md 2.A). The asserted p-values pin the current heuristic
-        // output and are NOT validated against R/scipy; the p-value formula is still
-        // flagged as invalid (finding 2.A, open).
+        // shapiro_francia_test now returns a Royston(1993)-normalized p-value
+        // (finding 2.A, fixed). Near-normal samples must yield LARGE p-values
+        // (fail to reject normality) — the opposite of the old inverted output.
         std::vector<double> vec_data = { 12.9, 14.6, 15.3, 13.7, 14.1, 14.8 };
         auto [W1, p_value1] = shapiro_francia_test(vec_data);
         gbassert(almost_equal(W1, 0.979, 0.001));
-        gbassert(almost_equal(p_value1, 0.0005, 0.0001));
+        gbassert(almost_equal(p_value1, 0.9898, 0.001));  // high p: fail to reject normality
 
         std::array<double, 6> arr_data = { 12.9, 14.6, 15.3, 13.7, 14.1, 14.8 };
         auto [W2, p_value2] = shapiro_francia_test(arr_data);
         gbassert(almost_equal(W2, 0.979, 0.001));
-        gbassert(almost_equal(p_value2, 0.0005, 0.0001));
+        gbassert(almost_equal(p_value2, p_value1, 1e-9)); // identical data -> identical result
 
         // Using a transformed range (e.g., square all values)
         auto transformed_data = vec_data | std::views::transform([](double x) { return x * x; });
         auto [W3, p_value3] = shapiro_francia_test(transformed_data);
         gbassert(almost_equal(W3, 0.985, 0.001));
-        gbassert(almost_equal(p_value3, 0.0003, 0.0001));
+        gbassert(almost_equal(p_value3, 0.9982, 0.001));
+
+        // Strongly non-normal sample (linear ramp with a large outlier): must
+        // yield a SMALL p-value (reject normality) — verifies the direction.
+        std::vector<double> skewed = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 200 };
+        auto [W4, p_value4] = shapiro_francia_test(skewed);
+        gbassert(almost_equal(W4, 0.3265, 0.001));
+        gbassert(p_value4 < 1e-4);
     }
 
     //--------------------------------------------------------------------------------------------
@@ -691,5 +697,73 @@ namespace
                 std::vector<double> nan_series = { 1.0, std::nan(""), 2.0 };
                 adfuller(nan_series);
             });
+    }
+
+    //--------------------------------------------------------------------------------------------
+    // Coverage for statistics.h descriptive stats and shaping filters (Group 1).
+    GB_TEST(algorithm, descriptive_stats_and_filters, std::launch::deferred)
+    {
+        // mean_stddev (Welford). Classic dataset: mean 5, population stddev 2.
+        std::vector<double> d = { 2, 4, 4, 4, 5, 5, 7, 9 };
+        auto [mean_p, sd_p] = mean_stddev(d, VarianceType::Population);
+        gbassert(almost_equal(mean_p, 5.0, 1e-9));
+        gbassert(almost_equal(sd_p, 2.0, 1e-9));
+        auto [mean_s, sd_s] = mean_stddev(d, VarianceType::Sample);
+        gbassert(almost_equal(mean_s, 5.0, 1e-9));
+        gbassert(almost_equal(sd_s, std::sqrt(32.0 / 7.0), 1e-9));
+
+        // Edge cases.
+        std::vector<double> empty;
+        auto [m0, s0] = mean_stddev(empty);
+        gbassert(std::isnan(m0) && std::isnan(s0));
+        std::vector<double> one = { 42.0 };
+        auto [m1, s1] = mean_stddev(one, VarianceType::Sample);
+        gbassert(almost_equal(m1, 42.0, 1e-9) && std::isnan(s1));
+
+        // sigmoid1090: maps x10->0.1, x90->0.9, midpoint->0.5.
+        gbassert(almost_equal(sigmoid1090(2.0, 2.0, 8.0), 0.1, 1e-9));
+        gbassert(almost_equal(sigmoid1090(8.0, 2.0, 8.0), 0.9, 1e-9));
+        gbassert(almost_equal(sigmoid1090(5.0, 2.0, 8.0), 0.5, 1e-9));
+
+        // gauss_filter: f(center)=1, f(left50)=f(right50)=0.5.
+        gbassert(almost_equal(gauss_filter(5.0, 1.0, 5.0, 9.0), 1.0, 1e-9));
+        gbassert(almost_equal(gauss_filter(1.0, 1.0, 5.0, 9.0), 0.5, 1e-9));
+        gbassert(almost_equal(gauss_filter(9.0, 1.0, 5.0, 9.0), 0.5, 1e-9));
+
+        // sigmoid_filter: f(center)=1, f(left50)=f(right50)=0.5 (asymmetric ok).
+        gbassert(almost_equal(sigmoid_filter(5.0, 1.0, 5.0, 12.0), 1.0, 1e-9));
+        gbassert(almost_equal(sigmoid_filter(1.0, 1.0, 5.0, 12.0), 0.5, 1e-9));
+        gbassert(almost_equal(sigmoid_filter(12.0, 1.0, 5.0, 12.0), 0.5, 1e-9));
+
+        // Invalid inputs must throw (gbassert throws in all build configs).
+        must_throw([] { sigmoid1090(0.0, 8.0, 2.0); });          // x10 >= x90
+        must_throw([] { gauss_filter(0.0, 5.0, 5.0, 9.0); });    // left50 == center
+        must_throw([] { sigmoid_filter(0.0, 5.0, 1.0, 9.0); });  // center < left50
+    }
+
+    //--------------------------------------------------------------------------------------------
+    // Coverage for hmm.h two-state Baum-Welch fit (finding 4.A).
+    GB_TEST(algorithm, hmm_fit_on_signs_test, std::launch::async)
+    {
+        // Too few points -> invalid fit (needs >= 20 samples).
+        auto bad = fit_hmm_on_signs(std::vector<double>{ 1, 2, 3, 4, 5 });
+        gbassert(!bad.valid);
+
+        // Regime-switching series: alternating up/down runs of length 15 produce
+        // two persistent sign states with long sojourn times.
+        std::vector<double> series;
+        double level = 0.0;
+        for (int block = 0; block < 8; ++block) {
+            double step = (block % 2 == 0) ? +1.0 : -1.0;
+            for (int i = 0; i < 15; ++i) { level += step; series.push_back(level); }
+        }
+
+        auto m = fit_hmm_on_signs(series);
+        gbassert(m.valid);
+        gbassert(m.A[0][0] > 0.5 && m.A[1][1] > 0.5);          // persistent states
+        gbassert(m.sojourn[0] > 1.0 && m.sojourn[1] > 1.0);
+        gbassert(m.mean_sojourn > 3.0);
+        gbassert(almost_equal(m.A[0][0] + m.A[0][1], 1.0, 1e-6));
+        gbassert(almost_equal(m.A[1][0] + m.A[1][1], 1.0, 1e-6));
     }
 }

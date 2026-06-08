@@ -2958,8 +2958,13 @@ namespace gb::yadro::algorithm::conv {
                 static_cast<size_t>(pop_size * config.elitism_fraction));
         }
 
+        // The max_tries budget counts actual fitness-function evaluations
+        // (cache misses), NOT total requests — cache hits do not consume the
+        // budget. This matches the optimize() contract: max_tries limits the
+        // number of expensive fitness calls. (Finding 6.B: previously this
+        // returned total_eval_requests_, which included cache hits.)
         [[nodiscard]] size_t total_attempts() const {
-            return total_eval_requests_.load(std::memory_order_relaxed);
+            return fn_call_count_.load(std::memory_order_relaxed);
         }
 
         // FIX #2:  fitnesses is a strict 1:1 mirror of population_; the assert
