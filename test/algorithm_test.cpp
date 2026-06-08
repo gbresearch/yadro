@@ -32,6 +32,7 @@
 #include "../algorithm/gbalgorithm.h"
 #include "../async/async.h"
 #include <iostream>
+#include <sstream>
 
 namespace
 {
@@ -51,6 +52,55 @@ namespace
         static_assert(std::three_way_comparable<adaptive_phase_config>);
         static_assert(std::three_way_comparable<stopping_criteria>);
         static_assert(std::three_way_comparable<optimization_stats>);
+    }
+
+    // Detection trait the optimizer uses to recognise container wrappers; must
+    // key on the public tag, not a private member (finding 6.A).
+    template<class W>
+    concept has_container_wrapper_tag = requires { typename W::container_wrapper_tag; };
+
+    // Verifies finding 6.A: container_range's two-level mutation gating must
+    // bypass the outer mutation_rate gate. With mutation_rate = 0 a non-container
+    // gene never mutates; a container gene with per_element_mut_prob = 1.0 must
+    // still mutate every element.
+    GB_TEST(algorithm, container_range_mutation_gating, std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        // The detection tag must be publicly visible on containers and absent
+        // on scalar wrappers.
+        static_assert(has_container_wrapper_tag<
+            container_range<std::vector<double>, min_max_value_range<double>>>);
+        static_assert(!has_container_wrapper_tag<min_max_value_range<double>>);
+
+        container_range<std::vector<double>, min_max_value_range<double>> cr(
+            /*container_size=*/      32,
+            min_max_value_range<double>{ -100.0, 100.0 },
+            /*per_element_mut_prob=*/ 1.0);
+
+        auto wrappers = std::make_tuple(cr);
+        std::mt19937_64 rng{ 12345 };
+
+        auto chrom = cdetail::random_chromosome(rng, wrappers);
+
+        // Outer mutation_rate = 0.0: only the container bypass can cause mutation.
+        auto mutated = cdetail::mutate_chromosome(rng, chrom, wrappers, /*mutation_rate=*/ 0.0);
+
+        const auto& before = std::get<0>(chrom);
+        const auto& after = std::get<0>(mutated);
+        gbassert(before.size() == after.size());
+        std::size_t changed = 0;
+        for (std::size_t i = 0; i < before.size(); ++i)
+            if (before[i] != after[i]) ++changed;
+        // With the bypass working every element mutates; pre-fix this would be 0.
+        gbassert(changed > before.size() / 2);
+
+        // describe_wrapper(container_range) previously read private members and
+        // only compiled because containers were never instantiated; exercise it.
+        std::ostringstream oss;
+        cdetail::describe_wrapper(cr, oss);
+        gbassert(!oss.str().empty());
     }
 
     GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::deferred)
@@ -337,21 +387,25 @@ namespace
     }
 
     //--------------------------------------------------------------------------------------------
-    GB_TEST(algorithm, shapiro_wilk_tst, std::launch::async)
+    GB_TEST(algorithm, shapiro_francia_tst, std::launch::async)
     {
+        // NOTE: this exercises shapiro_francia_test (renamed from shapiro_wilk_test,
+        // see CODE_REVIEW.md 2.A). The asserted p-values pin the current heuristic
+        // output and are NOT validated against R/scipy; the p-value formula is still
+        // flagged as invalid (finding 2.A, open).
         std::vector<double> vec_data = { 12.9, 14.6, 15.3, 13.7, 14.1, 14.8 };
-        auto [W1, p_value1] = shapiro_wilk_test(vec_data);
+        auto [W1, p_value1] = shapiro_francia_test(vec_data);
         gbassert(almost_equal(W1, 0.979, 0.001));
         gbassert(almost_equal(p_value1, 0.0005, 0.0001));
 
         std::array<double, 6> arr_data = { 12.9, 14.6, 15.3, 13.7, 14.1, 14.8 };
-        auto [W2, p_value2] = shapiro_wilk_test(arr_data);
+        auto [W2, p_value2] = shapiro_francia_test(arr_data);
         gbassert(almost_equal(W2, 0.979, 0.001));
         gbassert(almost_equal(p_value2, 0.0005, 0.0001));
 
         // Using a transformed range (e.g., square all values)
         auto transformed_data = vec_data | std::views::transform([](double x) { return x * x; });
-        auto [W3, p_value3] = shapiro_wilk_test(transformed_data);
+        auto [W3, p_value3] = shapiro_francia_test(transformed_data);
         gbassert(almost_equal(W3, 0.985, 0.001));
         gbassert(almost_equal(p_value3, 0.0003, 0.0001));
     }

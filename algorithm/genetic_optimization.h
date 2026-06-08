@@ -1010,22 +1010,34 @@ namespace gb::yadro::algorithm::conv {
     template<typename Container, GeneticWrapper ElementWrapper>
         requires std::is_arithmetic_v<typename ElementWrapper::value_type>
     && std::same_as<typename Container::value_type, typename ElementWrapper::value_type>
-        class container_range   
+        class container_range
     {
-        using element_type = typename ElementWrapper::value_type;
-        using value_type = Container;
-
         size_t         container_size;
         ElementWrapper element_wrapper;
         double         per_element_mut_prob;
 
     public:
+        // value_type must be public so the wrapper satisfies the GeneticWrapper
+        // concept (requires typename W::value_type) and so the mutation helpers
+        // can name it. Previously private, which silently kept container_range
+        // from ever satisfying GeneticWrapper (finding 6.A).
+        using element_type = typename ElementWrapper::value_type;
+        using value_type = Container;
+
+        // Public marker used by the mutation/reporting machinery to recognise a
+        // container wrapper. Detection MUST key on a public name: a requires-
+        // expression that names a private member is unsatisfied under standard
+        // access checking, which would silently disable the two-level mutation
+        // gating documented above.
+        using container_wrapper_tag = void;
 
         container_range(size_t container_size, ElementWrapper element_wrapper, double per_element_mut_prob = -1.0)
             : container_size(container_size), element_wrapper(std::move(element_wrapper)), per_element_mut_prob(per_element_mut_prob) {
         }
-        
+
         auto get_container_size() const noexcept { return container_size; }
+        [[nodiscard]] const ElementWrapper& get_element_wrapper() const noexcept { return element_wrapper; }
+        [[nodiscard]] double get_per_element_mut_prob() const noexcept { return per_element_mut_prob; }
 
         auto operator<=>(const container_range&) const = default;
 
@@ -1420,7 +1432,7 @@ namespace gb::yadro::algorithm::conv {
             std::mt19937_64& rng,
             double mutation_rate)
         {
-            if constexpr (requires(const W & w) { w.per_element_mut_prob; }) {
+            if constexpr (requires { typename W::container_wrapper_tag; }) {
                 // Container wrapper: per-element gating is entirely internal.
                 return wrapper.mutate(std::move(value), rng);
             }
@@ -1729,10 +1741,10 @@ namespace gb::yadro::algorithm::conv {
             std::ostream& os)
         {
             os << std::left << std::setw(10) << "container"
-                << "  size=" << w.container_size << "  element: ";
-            describe_wrapper(w.element_wrapper, os);
-            if (w.per_element_mut_prob >= 0.0)
-                os << "  p_mut=" << std::fixed << std::setprecision(3) << w.per_element_mut_prob;
+                << "  size=" << w.get_container_size() << "  element: ";
+            describe_wrapper(w.get_element_wrapper(), os);
+            if (w.get_per_element_mut_prob() >= 0.0)
+                os << "  p_mut=" << std::fixed << std::setprecision(3) << w.get_per_element_mut_prob();
             else
                 os << "  p_mut=1/size";
         }

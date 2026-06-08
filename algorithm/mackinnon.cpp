@@ -1,6 +1,6 @@
 //-----------------------------------------------------------------------------
 //  Copyright (C) 2011-2025, Gene Bushuyev
-//  
+//
 //  Boost Software License - Version 1.0 - August 17th, 2003
 //
 //  Permission is hereby granted, free of charge, to any person or organization
@@ -28,186 +28,20 @@
 
 #include <cmath>
 #include <algorithm>
-#include <array>
 
 #include "mackinnon.h"
 
-// Windows defines small as a macro in rpcndr.h, undefine it to avoid conflicts
-#ifdef small
-#undef small
-#endif
+// NOTE: the former `mackinnon_pvalue` (binary-search response surface) together
+// with its helpers `critical_value`, `norm_ppf`, `norm_cdf` and the
+// `Coefficients` / `MackinnonConstants` tables were removed — see CODE_REVIEW.md
+// finding 3.A. They were dead relative to internal use (adfuller calls
+// `mackinnon_pvalue_fast`), only ever referenced the `small` coefficient set,
+// and did not implement MacKinnon's actual quantile-dependent surface.
 
 namespace gb::yadro::algorithm {
 
-    namespace MacKinnon {
-
-        // Maximum p-value polynomial coefficients (MacKinnon 1994, Table 1)
-        // These map test statistic -> p-value using regression surface
-        // Format: maxstat = c0 + c1/T + c2/T^2 + c3/T^3
-        // Then: p-value computed via inverse normal transformation
-
-        struct Coefficients {
-            std::array<double, 4> small;  // for small p (left tail, < 0.01)
-            std::array<double, 4> large;  // for large p (right tail, > 0.10)
-        };
-
-        struct MackinnonConstants {
-            // Coefficients for "no constant" specification
-            static constexpr Coefficients NO_CONSTANT = {
-                .small = {-2.5658, -1.960, -10.04, 0.0},
-                .large = {0.0, 0.0, 0.0, 0.0}  // not typically used
-            };
-            // Coefficients for "constant" (drift) specification  
-            static constexpr Coefficients CONSTANT = {
-                .small = {-3.4336, -5.999, -29.25, 0.0},
-                .large = {-0.2656, -4.234, -16.786, 0.0}
-            };
-            // Coefficients for "constant and trend" specification
-            static constexpr Coefficients CONSTANT_TREND = {
-                .small = {-3.9638, -8.353, -47.44, 0.0},
-                .large = {-0.6156, -6.193, -21.976, 0.0}
-            };
-        };
-
-        // Standard normal CDF (high precision)
-        inline double norm_cdf(double x);
-
-        // Inverse standard normal CDF (approximation, good to 1e-9)
-        double norm_ppf(double p);
-
-        // Compute critical value for given p-value and sample size
-        double critical_value(double p, int n, const std::array<double, 4>& coef);
-
-    } // namespace MacKinnon
-
-
-    // Standard normal CDF (high precision)
-    double MacKinnon::norm_cdf(double x) {
-        constexpr double M_SQRT1_2 = 0.70710678118654752440; // 1/sqrt(2)
-        return 0.5 * std::erfc(-x * M_SQRT1_2);
-    }
-    
-    // Inverse standard normal CDF (approximation, good to 1e-9)
-    double MacKinnon::norm_ppf(double p) {
-        if (p <= 0.0) return -INFINITY;
-        if (p >= 1.0) return INFINITY;
-
-        // Beasley-Springer-Moro algorithm (1977)
-        constexpr double a0 = 2.50662823884;
-        constexpr double a1 = -18.61500062529;
-        constexpr double a2 = 41.39119773534;
-        constexpr double a3 = -25.44106049637;
-        constexpr double b1 = -8.47351093090;
-        constexpr double b2 = 23.08336743743;
-        constexpr double b3 = -21.06224101826;
-        constexpr double b4 = 3.13082909833;
-        constexpr double c0 = 0.3374754822726147;
-        constexpr double c1 = 0.9761690190917186;
-        constexpr double c2 = 0.1607979714918209;
-        constexpr double c3 = 0.0276438810333863;
-        constexpr double c4 = 0.0038405729373609;
-        constexpr double c5 = 0.0003951896511919;
-        constexpr double c6 = 0.0000321767881768;
-        constexpr double c7 = 0.0000002888167364;
-        constexpr double c8 = 0.0000003960315187;
-
-        double q = p - 0.5;
-        double r, x;
-
-        if (std::abs(q) <= 0.42) {
-            r = q * q;
-            x = q * (((a3 * r + a2) * r + a1) * r + a0) /
-                ((((b4 * r + b3) * r + b2) * r + b1) * r + 1.0);
-        }
-        else {
-            r = (q < 0.0) ? p : 1.0 - p;
-            r = std::sqrt(-std::log(r));
-            x = (((((((c8 * r + c7) * r + c6) * r + c5) * r + c4) * r + c3) * r + c2) * r + c1) * r + c0;
-            if (q < 0.0) x = -x;
-        }
-
-        return x;
-    }
-
-    // Compute critical value for given p-value and sample size
-    double MacKinnon::critical_value(double p, int n, const std::array<double, 4>& coef) {
-        double T = static_cast<double>(n);
-        double z = norm_ppf(p);
-
-        // Response surface: cv = coef[0] + coef[1]/T + coef[2]/T^2 + coef[3]/T^3 + higher order terms with z
-        double cv = coef[0] + coef[1] / T + coef[2] / (T * T) + coef[3] / (T * T * T);
-
-        // Adjust for z (normalized quantile)
-        cv += z * (1.0 + 0.5 / T);  // simplified adjustment
-
-        return cv;
-    }
-
-    // Main p-value function
-    double mackinnon_pvalue(double test_stat, int nobs, TrendType trend) {
-        using namespace MacKinnon;
-
-        if (!std::isfinite(test_stat)) return 1.0;
-
-        // Select coefficient table based on trend specification
-        const Coefficients* coef;
-        switch (trend) {
-        case TrendType::NONE:
-            coef = &MackinnonConstants::NO_CONSTANT;
-            break;
-        case TrendType::CONSTANT:
-            coef = &MackinnonConstants::CONSTANT;
-            break;
-        case TrendType::CONSTANT_TREND:
-            coef = &MackinnonConstants::CONSTANT_TREND;
-            break;
-        default:
-            coef = &MackinnonConstants::CONSTANT;
-        }
-
-        // Bound sample size to reasonable range
-        int n = std::clamp(nobs, 10, 100000);
-
-        // For very large negative statistics (strong rejection), use asymptotic approximation
-        if (test_stat < -30.0) return 1e-10;
-
-        // For positive statistics (fail to reject), return high p-value
-        if (test_stat > 0.0) {
-            return std::clamp(0.99 - std::exp(-test_stat * 0.5), 0.5, 0.999);
-        }
-
-        // Bracketing: find p-values that bracket the test statistic
-        // We'll search for p such that critical_value(p, n) ? test_stat
-
-        // Binary search for p-value
-        double p_low = 0.0001, p_high = 0.9999;
-        double cv_low = critical_value(p_low, n, coef->small);
-        double cv_high = critical_value(p_high, n, coef->small);
-
-        // Adjust if test_stat is outside bracket
-        if (test_stat < cv_low) return p_low / 10.0;
-        if (test_stat > cv_high) return std::min(0.9999, p_high * 1.2);
-
-        // Binary search (Newton-like)
-        for (int iter = 0; iter < 30; ++iter) {
-            double p_mid = 0.5 * (p_low + p_high);
-            double cv_mid = critical_value(p_mid, n, coef->small);
-
-            if (std::abs(cv_mid - test_stat) < 1e-6) return p_mid;
-
-            if (cv_mid < test_stat) {
-                p_low = p_mid;
-            }
-            else {
-                p_high = p_mid;
-            }
-        }
-
-        return 0.5 * (p_low + p_high);
-    }
-
-    // Simplified alternative using piecewise linear interpolation
-    // (faster, slightly less accurate)
+    // Simplified p-value using piecewise interpolation around the asymptotic
+    // critical values with an approximate finite-sample correction.
     double mackinnon_pvalue_fast(double test_stat, int nobs, TrendType trend) {
         // Get asymptotic critical values (from MacKinnon 2010 tables)
         double cv01, cv05, cv10;

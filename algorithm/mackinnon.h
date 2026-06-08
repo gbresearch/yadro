@@ -46,10 +46,8 @@ namespace gb::yadro::algorithm {
 
     enum class TrendType { NONE, CONSTANT, CONSTANT_TREND };
 
-    // Main p-value function
-    double mackinnon_pvalue(double test_stat, int nunmber_observations, TrendType trend);
-
-    // Simplified alternative using piecewise linear interpolation
-    // (faster, slightly less accurate)
-    double mackinnon_pvalue_fast(double test_stat, int nunmber_observations, TrendType trend);
+    // p-value via piecewise interpolation around the asymptotic critical values
+    // with an approximate finite-sample correction. (The former higher-order
+    // `mackinnon_pvalue` was removed as dead code — see CODE_REVIEW.md 3.A.)
+    double mackinnon_pvalue_fast(double test_stat, int number_observations, TrendType trend);
 }

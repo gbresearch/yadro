@@ -208,10 +208,16 @@ namespace gb::yadro::algorithm
     }
 
     //--------------------------------------------------------------------------------------------
-    // Shapiro-Wilk test function return W statistic and p-value
+    // Shapiro-Francia normality test: returns the W' statistic and an approximate p-value.
+    //
+    // NOTE: This is the Shapiro-FRANCIA test, not Shapiro-Wilk. The coefficients
+    // a = m / sqrt(sum m^2) use the expected normal order statistics directly and
+    // omit the order-statistic covariance matrix that true Shapiro-Wilk (Royston)
+    // requires. The returned p-value is a rough heuristic only (see CODE_REVIEW.md,
+    // finding 2.A) and should not be relied on for formal inference.
     template <std::ranges::sized_range Range>
         requires std::floating_point<std::ranges::range_value_t<Range>>
-    auto shapiro_wilk_test(const Range& data) -> std::pair<double, double> 
+    auto shapiro_francia_test(const Range& data) -> std::pair<double, double>
     {
         auto n = std::ranges::size(data);
         util::gbassert(n >= 3, "Sample size must be at least 3.");
