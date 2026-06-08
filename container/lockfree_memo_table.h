@@ -190,10 +190,28 @@ namespace gb::yadro::container
                     }
                 }
                 // CASE 2: Slot might match our key
-                else if (existing == h_lo &&
-                    e.h_hi.load(std::memory_order_acquire) == h_hi)
+                else if (existing == h_lo)
                 {
                     State current_state = e.state.load(std::memory_order_acquire);
+
+                    // The claiming thread publishes h_lo (via CAS) BEFORE h_hi and
+                    // state. While the entry is still empty, h_hi may hold its initial
+                    // value, so comparing it now could falsely reject an in-progress
+                    // matching entry and trigger a redundant recompute in another slot.
+                    // Wait until the entry leaves the empty state (state is stored with
+                    // release after h_hi, so once it is observed h_hi is visible too).
+                    while (current_state == State::empty) {
+                        // Slot might have been reset/reclaimed (e.g. after an exception)
+                        if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                            goto next_probe;
+                        }
+                        current_state = e.state.load(std::memory_order_acquire);
+                    }
+
+                    // Entry is fully published; confirm this is really our key.
+                    if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
+                        goto next_probe; // h_lo collision with a different key
+                    }
 
                     while (current_state != State::ready) {
                         // Re-verify hash match (slot might have been reset/reclaimed)
@@ -339,13 +357,31 @@ namespace gb::yadro::container
                     }
                 }
                 // CASE 2: Slot might match our key
-                else if (existing == h_lo &&
-                    e.h_hi.load(std::memory_order_acquire) == h_hi)
+                else if (existing == h_lo)
                 {
+                    State current_state = e.state.load(std::memory_order_acquire);
+
+                    // The claiming thread publishes h_lo (via CAS) BEFORE h_hi and
+                    // state. While the entry is still empty, h_hi may hold its initial
+                    // value, so comparing it now could falsely reject an in-progress
+                    // matching entry and trigger a redundant recompute in another slot.
+                    // Wait until the entry leaves the empty state (state is stored with
+                    // release after h_hi, so once it is observed h_hi is visible too).
+                    while (current_state == State::empty) {
+                        // Slot might have been reset/reclaimed (e.g. after an exception)
+                        if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                            goto next_probe;
+                        }
+                        current_state = e.state.load(std::memory_order_acquire);
+                    }
+
+                    // Entry is fully published; confirm this is really our key.
+                    if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
+                        goto next_probe; // h_lo collision with a different key
+                    }
+
                     if (wait_for_completion_) {
                         // Wait for computation to complete
-                        State current_state = e.state.load(std::memory_order_acquire);
-
                         while (current_state != State::ready) {
                             // Re-verify hash match (slot might have been reset/reclaimed)
                             if (e.h_lo.load(std::memory_order_acquire) != h_lo ||
