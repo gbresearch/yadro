@@ -113,9 +113,12 @@ namespace gb::yadro::archive
             static_assert(std::is_trivial_v<T>);
             if constexpr (fmt == archive_format_t::binary)
             {
+                // sgetn returns the number of char_type extracted, so compare against
+                // the requested char_type count (not the element count) to detect short reads
+                auto to_read = static_cast<std::streamsize>(count * (sizeof(T) / sizeof(char_type)));
                 auto nread = s.rdbuf()->sgetn(static_cast<char_type*>(static_cast<void*>(std::addressof(t))),
-                    count * (sizeof(T) / sizeof(char_type)));
-                if (nread != count)
+                    to_read);
+                if (nread != to_read)
                     s.setstate(std::ios::failbit);  // propagate error to stream state
             }
             else if constexpr (fmt == archive_format_t::text)
@@ -410,6 +413,36 @@ namespace gb::yadro::archive
             a(serialize_as<std::uint64_t>(size));
             if (size)
                 a.write(*std::begin(t), size);
+        }
+    }
+
+    //---------------------------------------------------------------------
+    // serialization of contiguous sequences whose element width is not stable
+    // across 32-/64-bit targets (e.g. std::vector<long>): the length prefix and
+    // every element are written as fixed 64-bit values for binary compatibility.
+    template<archive_like Archive, class T>
+    auto serialize(Archive&& a, T&& t) requires(is_normalizable_sequence_v<T>)
+    {
+        using elem_t = std::remove_cvref_t<decltype(*std::begin(t))>;
+        using wire_t = std::conditional_t<std::is_signed_v<elem_t>, std::int64_t, std::uint64_t>;
+
+        if constexpr (iarchive_like<Archive>)
+        {
+            static_assert(!std::is_const_v<std::remove_reference_t<T>>);
+
+            std::uint64_t size{ 0 };
+            a(serialize_as<std::uint64_t>(size));
+            t.resize(static_cast<std::size_t>(size));
+
+            for (auto&& v : t)
+                a(serialize_as<wire_t>(v));
+        }
+        else
+        {
+            a(serialize_as<std::uint64_t>(std::size(t)));
+
+            for (auto&& v : t)
+                a(serialize_as<wire_t>(v));
         }
     }
 
@@ -715,20 +748,28 @@ namespace gb::yadro::archive
     template<archive_like Archive, variant_like T>
     auto serialize(Archive&& a, T&& t)
     {
+        // platform-stable sentinel for the valueless_by_exception state; using
+        // std::variant_npos directly would write a size_t(-1) whose width differs
+        // between 32-/64-bit targets (0xFFFFFFFF vs 0xFFFFFFFFFFFFFFFF)
+        constexpr std::uint64_t npos64 = ~std::uint64_t{};
+
         if constexpr (iarchive_like<Archive>)
         {
-            std::size_t index{};
+            std::uint64_t index{};
             a(serialize_as<std::uint64_t>(index));
 
-            if (index != std::variant_npos)
+            if (index != npos64)
             {
-                detail::assign_alternative<0>(index, t, [&](auto& val) { a(val); });
+                detail::assign_alternative<0>(static_cast<std::size_t>(index), t,
+                    [&](auto& val) { a(val); });
             }
         }
         else
         {
-            a(serialize_as<std::uint64_t>(t.index()));
-            std::visit([&](auto&& val) { a(val); }, t);
+            const bool valueless = t.valueless_by_exception();
+            a(serialize_as<std::uint64_t>(valueless ? npos64 : static_cast<std::uint64_t>(t.index())));
+            if (!valueless) // std::visit on a valueless variant throws std::bad_variant_access
+                std::visit([&](auto&& val) { a(val); }, t);
         }
     }
     //---------------------------------------------------------------------
@@ -858,10 +899,16 @@ namespace gb::yadro::archive
         using duration_t = std::remove_cvref_t<Dur>;
         using rep_t = typename detail::is_duration_type<duration_t>::rep_type;
 
+        // Integral reps (e.g. duration<long>) change width between 32-/64-bit targets,
+        // so normalize them to a fixed 64-bit value on the wire. Floating-point reps
+        // (float/double) are already fixed-width and pass through unchanged.
         if constexpr (oarchive_like<Archive>) {
             // Save: duration may be const; we only read from it.
             rep_t count = d.count();
-            std::invoke(std::forward<Archive>(ar), count);
+            if constexpr (std::is_integral_v<rep_t>)
+                std::invoke(std::forward<Archive>(ar), serialize_as<std::int64_t>(count));
+            else
+                std::invoke(std::forward<Archive>(ar), count);
 
         }
         else {
@@ -872,7 +919,10 @@ namespace gb::yadro::archive
 
             // Load: read the rep, reconstruct the duration in-place.
             rep_t count{};
-            std::invoke(std::forward<Archive>(ar), count);
+            if constexpr (std::is_integral_v<rep_t>)
+                std::invoke(std::forward<Archive>(ar), serialize_as<std::int64_t>(count));
+            else
+                std::invoke(std::forward<Archive>(ar), count);
             d = duration_t{ count };
         }
     }
@@ -930,7 +980,7 @@ namespace gb::yadro::archive
     auto serialize(Archive&& a, T&& t)
     {
         auto&& [...fields] = std::forward<T>(t);
-        serialize(deltype(a)(a), std::forward<std::remove_cvref_t<decltype(fields)>>(fields)...);
+        serialize(decltype(a)(a), std::forward<std::remove_cvref_t<decltype(fields)>>(fields)...);
     }
 #endif
 

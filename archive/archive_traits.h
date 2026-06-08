@@ -114,20 +114,73 @@ namespace gb::yadro::archive {
     template<class T>
     concept fixed_array = is_fixed_array<std::remove_cvref_t<T>>::value;
 
+    // ── Portably-sized trivial element types ──────────────────────────────────
+    //   A trivially-copyable value may be bulk-copied as raw bytes only when its
+    //   width is identical on every target. These fundamentals change width across
+    //   the ILP32 / LLP64 / LP64 data models, so sequences of them must NOT take
+    //   the raw byte-copy path:
+    //       long, unsigned long   4 on Win32/Win64/ILP32, 8 on LP64 (Linux/macOS)
+    //       any pointer           4 on 32-bit, 8 on 64-bit (and not serializable)
+    //
+    //   The set is unconditional (not gated on the host OS): the on-wire format is
+    //   a single universal contract, identical regardless of which platform built
+    //   the archive, so a stream written anywhere reads back anywhere.
+    //
+    //   IMPORTANT — what this canNOT catch (and so does NOT make portable):
+    //       std::size_t, std::ptrdiff_t, std::uintptr_t, std::intptr_t
+    //   They are transparent typedefs resolving to a *different* fixed-width
+    //   fundamental per target (size_t is `unsigned int` on Win32, but
+    //   `unsigned long long` on Win64), so they are indistinguishable at compile
+    //   time from a genuinely-stable type. Serialize those element types via
+    //   serialize_as<std::uint64_t> per element, or a fixed-width strong typedef.
+
+    template<class T>
+    struct is_width_unstable : std::bool_constant<
+        std::is_pointer_v<T>
+        || std::is_member_pointer_v<T>
+        || std::is_same_v<T, long>
+        || std::is_same_v<T, unsigned long>
+    > {};
+
+    template<class T>
+    constexpr bool is_width_unstable_v = is_width_unstable<std::remove_cv_t<T>>::value;
+
+    // element is safe to bulk-copy as raw bytes with stable cross-target layout
+    template<class T>
+    constexpr bool is_portable_trivial_v = std::is_trivial_v<T> && !is_width_unstable_v<T>;
+
     // ── Trivial sequences: bulk read/write as raw bytes ───────────────────────
     //   Explicit specialization needed — trivial element type can't be
-    //   inferred from an iterator-based concept alone.
+    //   inferred from an iterator-based concept alone. Narrowed to portably-sized
+    //   element types; width-unstable elements fall through to the normalizing
+    //   path below.
 
     template<class T>               struct is_trivial_sequence : std::false_type {};
     template<class T, class A>      struct is_trivial_sequence<std::vector<T, A>>
-    : std::bool_constant<std::is_trivial_v<T>> {};
+    : std::bool_constant<is_portable_trivial_v<T>> {};
     template<class T, class Tr, class A> struct is_trivial_sequence<std::basic_string<T, Tr, A>>
-    : std::bool_constant<std::is_trivial_v<T>> {};
+    : std::bool_constant<is_portable_trivial_v<T>> {};
     template<class T>               struct is_trivial_sequence<std::valarray<T>>
-    : std::bool_constant<std::is_trivial_v<T>> {};
+    : std::bool_constant<is_portable_trivial_v<T>> {};
 
     template<class T>
     constexpr bool is_trivial_sequence_v = is_trivial_sequence<std::remove_cvref_t<T>>::value;
+
+    // ── Width-unstable integral sequences: normalize elements to 64-bit ───────
+    //   Excluded from the bulk path above; routed to an element-wise serializer
+    //   that writes each value as a fixed int64/uint64 (see archive.h). Pointer-
+    //   element sequences are intentionally NOT included here, so they fall to
+    //   common_sequence and trip operator()'s "pointers cannot be serialized"
+    //   static_assert rather than being silently normalized.
+
+    template<class T>               struct is_normalizable_sequence : std::false_type {};
+    template<class T, class A>      struct is_normalizable_sequence<std::vector<T, A>>
+    : std::bool_constant<std::is_integral_v<T> && is_width_unstable_v<T>> {};
+    template<class T>               struct is_normalizable_sequence<std::valarray<T>>
+    : std::bool_constant<std::is_integral_v<T> && is_width_unstable_v<T>> {};
+
+    template<class T>
+    constexpr bool is_normalizable_sequence_v = is_normalizable_sequence<std::remove_cvref_t<T>>::value;
 
     // ── Tuple/pair ────────────────────────────────────────────────────────────
 
@@ -141,6 +194,7 @@ namespace gb::yadro::archive {
     concept common_sequence =
         requires(std::remove_cvref_t<T>&t) { std::begin(t); std::end(t); std::size(t); }
     && !is_trivial_sequence_v<T>
+        && !is_normalizable_sequence_v<T>
         && !std::is_trivial_v<std::remove_cvref_t<T>>
         && (resizable<T> || fixed_array<T>);
 
