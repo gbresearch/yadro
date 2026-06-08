@@ -24,56 +24,58 @@ namespace gb::yadro::util
     struct dll
     {
         dll() = default;
+
         dll(const char* dll_name)
         {
             gbassert(dll_name);
             _handle = LoadLibraryA(dll_name);
         }
+
         dll(const wchar_t* dll_name)
         {
             gbassert(dll_name);
             _handle = LoadLibraryW(dll_name);
         }
-#if defined(__cplusplus) && (__cplusplus >= 201103L)
-        dll(dll&& other) noexcept : _handle(other._handle) { other._handle = nullptr; }
-        dll& operator = (dll&& other) noexcept
+
+        dll(dll&& other) noexcept : _handle(std::exchange(other._handle, nullptr))
         {
-            _handle = other._handle;
-            other._handle = nullptr;
+        }
+
+        dll& operator=(dll&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                _handle = std::exchange(other._handle, nullptr);
+            }
             return *this;
         }
-#endif
+
+        dll(const dll&) = delete;
+        dll& operator=(const dll&) = delete;
+
         ~dll() { if (_handle) FreeLibrary(_handle); }
-        explicit operator bool() const { return _handle; }
 
-        void reset() { reset_handle(nullptr); }
+        explicit operator bool() const noexcept { return _handle; }
 
-        void reset(const char* dll_name)
+        void reset() noexcept
         {
-            gbassert(dll_name);
-            reset_handle(LoadLibraryA(dll_name));
-        }
-
-        void reset(const wchar_t* dll_name)
-        {
-            gbassert(dll_name);
-            reset_handle(LoadLibraryW(dll_name));
+            if (_handle)
+            {
+                FreeLibrary(_handle);
+                _handle = nullptr;
+            }
         }
 
         template<class Fn>
         Fn get_function(const char* fun_name) const
         {
+            static_assert(std::is_pointer_v<Fn>);
             return _handle ? reinterpret_cast<Fn>(GetProcAddress(_handle, fun_name)) : nullptr;
         }
 
     private:
-        HMODULE _handle{ 0 };
-        void reset_handle(HMODULE handle)
-        {
-            if (_handle)
-                FreeLibrary(_handle);
-            _handle = handle;
-        }
+        HMODULE _handle{ nullptr };
     };
 
 #if defined(__cplusplus) && (__cplusplus >= 201402L)
