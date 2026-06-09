@@ -536,6 +536,240 @@ unset multiplot)*";
 #endif
     }
 
+    GB_TEST(util, gbmemory_test)
+    {
+        // make_unique_copy deduces the value type and owns a copy
+        auto p = make_unique_copy(std::string("hello"));
+        static_assert(std::is_same_v<decltype(p), std::unique_ptr<std::string>>);
+        gbassert(*p == "hello");
+
+        // create_unique<T>
+        auto i = create_unique<int>(42);
+        gbassert(*i == 42);
+
+        // create_unique<Base, Derived> returns unique_ptr<Base>
+        struct Base { virtual ~Base() = default; virtual int f() const { return 0; } };
+        struct Derived : Base { int f() const override { return 7; } };
+        std::unique_ptr<Base> b = create_unique<Base, Derived>();
+        gbassert(b->f() == 7);
+
+        // aligned_allocator / aligned_vector honor over-alignment (regression for rebind + byte-size dealloc)
+        aligned_vector<int, 64> v;
+        v.resize(10, 3);
+        gbassert(reinterpret_cast<std::uintptr_t>(v.data()) % 64 == 0);
+        gbassert(v.size() == 10 && v.front() == 3 && v.back() == 3);
+
+        // make_unique_array with alignment, default-initialized
+        auto arr = make_unique_array<double, 32>(8);
+        gbassert(reinterpret_cast<std::uintptr_t>(arr.get()) % 32 == 0);
+        arr[0] = 1.5; arr[7] = 2.5;
+        gbassert(arr[0] == 1.5 && arr[7] == 2.5);
+
+        // aligned_array
+        aligned_array<int, 64, 4> aa{};
+        gbassert(reinterpret_cast<std::uintptr_t>(&aa[0]) % 64 == 0);
+        aa[2] = 5;
+        gbassert(aa[2] == 5);
+    }
+
+    GB_TEST(util, time_util_test)
+    {
+        using namespace std::chrono;
+        using namespace std::chrono_literals;
+
+        // time_stamp embeds the current process id (regression for portable get_process_id)
+        auto ts = time_stamp();
+        gbassert(ts.find(std::to_string(get_process_id())) != std::string::npos);
+
+        // invalid time zone is reported, not thrown
+        auto bad = time_stamp("Not/AZone");
+        gbassert(bad.find("invalid time zone") != std::string::npos);
+
+        // to_time_point: one calendar day apart is exactly 24h (timezone-independent)
+        gbassert(to_time_point(2024, 1, 2) - to_time_point(2024, 1, 1) == 24h);
+
+        // unpack_time yields a populated, plausible tm
+        auto tm = unpack_time(system_clock::now());
+        gbassert(tm.tm_year >= 124); // >= 2024
+        gbassert(tm.tm_mon >= 0 && tm.tm_mon <= 11);
+    }
+
+    // detection-idiom probe used by traits_test
+    template<class T> using has_size_t = decltype(std::declval<T>().size());
+
+    GB_TEST(util, traits_test)
+    {
+        // callable_traits on a lambda
+        auto lam = [](int, double) -> char { return 'x'; };
+        static_assert(std::is_same_v<callable_return_t<decltype(lam)>, char>);
+        static_assert(std::is_same_v<callable_args_t<decltype(lam)>, std::tuple<int, double>>);
+
+        // callable_traits on a function pointer (pure args strip cvref)
+        using fp = int(*)(const std::string&);
+        static_assert(std::is_same_v<callable_return_t<fp>, int>);
+        static_assert(std::is_same_v<callable_pure_args_t<fp>, std::tuple<std::string>>);
+
+        // is_detected / detected_t
+        static_assert(is_detected_v<has_size_t, std::vector<int>>);
+        static_assert(!is_detected_v<has_size_t, int>);
+        static_assert(std::is_same_v<detected_t<has_size_t, int>, nonesuch>);
+        static_assert(is_detected_exact_v<std::size_t, has_size_t, std::vector<int>>);
+
+        // explicitly_convertible_to
+        static_assert(explicitly_convertible_to<double, int>);
+        static_assert(!explicitly_convertible_to<std::string, int>);
+    }
+
+    GB_TEST(util, string_util_extra)
+    {
+        // tokenize for wide strings (regression for hardcoded std::string token)
+        gbassert(tokenize<wchar_t>(L"a,b,c", L',') == std::vector<std::wstring>{ L"a", L"b", L"c" });
+        gbassert(tokenize<char>("", ',').empty());
+
+        // from_wstring narrows wide chars
+        gbassert(from_wstring(L"abc") == "abc");
+
+        // strings_equal compares content and length
+        gbassert(strings_equal("abc", "abc"));
+        gbassert(!strings_equal("abc", "abd"));
+        gbassert(!strings_equal("abc", "ab"));
+
+        // span 3-way comparison
+        std::array a1{ 1, 2, 3 }, a2{ 1, 2, 4 };
+        std::array a3{ 1, 2 };
+        gbassert(compare(std::span(a1), std::span(a2)) < 0);
+        gbassert(compare(std::span(a2), std::span(a1)) > 0);
+        gbassert(compare(std::span(a1), std::span(a1)) == 0);
+        gbassert(compare(std::span(a3), std::span(a1)) < 0); // shorter is less
+
+        // wrap_cmd builds a vector of strings from argv
+        const char* argv[] = { "prog", "--flag", "value" };
+        gbassert(wrap_cmd<char>(3, argv) == std::vector<std::string>{ "prog", "--flag", "value" });
+    }
+
+    GB_TEST(util, gbtimer_test)
+    {
+        using namespace std::chrono;
+
+        // get_duration_suffix
+        gbassert(std::string(get_duration_suffix<milliseconds>()) == "millisec");
+        gbassert(std::string(get_duration_suffix<microseconds>()) == "microsec");
+        gbassert(std::string(get_duration_suffix<nanoseconds>()) == "nanosec");
+        gbassert(std::string(get_duration_suffix<seconds>()) == "sec");
+
+        // accumulating_timer accumulates count and reports on destruction
+        std::size_t reported_count = 0;
+        {
+            accumulating_timer<milliseconds> t{ [&](auto, auto count) { reported_count = count; } };
+            { auto s = t.make_scope_timer(); }
+            { auto s = t.make_scope_timer(); }
+            gbassert(t.get_count() == 2);
+        }
+        gbassert(reported_count == 2);
+
+        // global_timer_map_t::get returns the same timer per name
+        auto& a = global_timer_map_t<milliseconds>::get("gbtimer_test_name", [](auto, auto) {});
+        auto& b = global_timer_map_t<milliseconds>::get("gbtimer_test_name", [](auto, auto) {});
+        gbassert(&a == &b);
+
+        // GB_TIMER macro compiles and runs (regression for the chrono token-paste fix)
+        {
+            GB_TIMER(gbtimer_macro, milliseconds);
+        }
+    }
+
+    GB_TEST(util, gberror_test)
+    {
+        // throw_error throws generic_error by default; message carries the text and location
+        must_throw<generic_error>([] { throw_error("boom"); });
+        try { throw_error("boom"); }
+        catch (const std::exception& e) { gbassert(std::string(e.what()).find("boom") != std::string::npos); }
+
+        // unreachable throws unreachable_error
+        must_throw<unreachable_error>([] { unreachable(); });
+
+        // exception_t without payload exposes message and location
+        try { throw exception_t{ "oops" }; }
+        catch (exception_t<>& e)
+        {
+            gbassert(e.what_str() == "oops");
+            gbassert(e.message().find("oops") != std::string::npos);
+        }
+
+        // exception_t with payload carries typed data and derives from the base
+        try { throw exception_t{ "with data", 42 }; }
+        catch (exception_t<int>& e)
+        {
+            gbassert(e.data() == 42);
+            gbassert(e.what_str() == "with data");
+        }
+
+        // error_t formatting includes the [E<num>] tag
+        try { throw generic_error("xyz"); }
+        catch (const std::exception& e) { gbassert(std::string(e.what()).find("[E1000]") != std::string::npos); }
+    }
+
+    GB_TEST(util, gbwin_test)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono;
+
+        // uuids are unique and well-formed
+        auto u1 = get_uuid_string();
+        auto u2 = get_uuid_string();
+        gbassert(u1 != u2);
+        gbassert(u1.size() == 32); // 32 hex chars, no hyphens/braces
+        auto braced = get_uuid_string(true, true);
+        gbassert(braced.front() == '{' && braced.back() == '}');
+
+        // temp file path lands under the temp dir with the requested extension
+        auto path = get_temp_file_path(".xyz");
+        gbassert(path.extension() == ".xyz");
+        // compare directories via equivalent() to ignore trailing-separator differences
+        gbassert(std::filesystem::equivalent(path.parent_path(), std::filesystem::temp_directory_path()));
+
+        // dll loads a system library and resolves an exported function
+        dll k{ "kernel32.dll" };
+        gbassert(static_cast<bool>(k));
+        auto get_tick = k.get_function<decltype(&GetTickCount)>("GetTickCount");
+        gbassert(get_tick != nullptr);
+        gbassert(k.get_function<void(*)()>("no_such_export_xyz") == nullptr);
+
+        // micro_sleep waits at least the requested time
+        auto start = steady_clock::now();
+        micro_sleep{ 2000 }.sleep(); // 2 ms
+        gbassert(steady_clock::now() - start >= microseconds(1500));
+#endif
+    }
+
+    GB_TEST(util, global_mutex_test)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono_literals;
+        const auto name = "yadro_global_mutex_test_" + get_uuid_string();
+
+        global_mutex m{ name };
+        gbassert(m.try_lock());
+
+        // a different thread cannot acquire the same named mutex while it is held
+        auto contended = std::async(std::launch::async, [&] {
+            global_mutex other{ name };
+            return other.try_lock_for(50ms);
+            });
+        gbassert(!contended.get());
+
+        m.unlock();
+
+        // once released, another thread can acquire it
+        auto acquired = std::async(std::launch::async, [&] {
+            global_mutex other{ name };
+            if (other.try_lock_for(1s)) { other.unlock(); return true; }
+            return false;
+            });
+        gbassert(acquired.get());
+#endif
+    }
+
     GB_TEST(util, win_pipe1)
     {
         using namespace std::chrono_literals;
