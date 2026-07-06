@@ -908,6 +908,31 @@ namespace gb::yadro::async {
                     }
                 }
 
+                // ── Step 3.5: steal from a random victim's inbox ─────────────
+                //
+                // External submitters target one sticky per-thread inbox. If that
+                // inbox's owner is blocked inside a long-running task (e.g. a pipe
+                // connection handler pinned for the connection's lifetime), nobody
+                // would ever drain its inbox: deque stealing (step 3) cannot see
+                // inbox work, so externally submitted tasks would be stranded
+                // behind the blocked owner. Idle workers therefore migrate a
+                // blocked peer's inbox into their own deque, where normal
+                // execution and stealing apply.
+                if (n > 1) {
+                    const std::size_t r = static_cast<std::size_t>(rng() % (n - 1));
+                    const std::size_t victim = r + (r >= id ? 1 : 0);
+                    auto& vctl = *ctls_[victim];
+                    std::unique_lock lk{ vctl.mutex, std::try_to_lock };
+                    if (lk && !vctl.inbox.empty()) {
+                        std::vector<TaskBase*> batch;
+                        std::swap(batch, vctl.inbox);
+                        lk.unlock();
+                        for (auto* t : batch)
+                            my_deque.push_bottom(t);
+                        continue;
+                    }
+                }
+
                 // ── Step 4: park until inbox has work, stealable deque work
                 //           exists, or stop is set ─────────────────────────────
                 //

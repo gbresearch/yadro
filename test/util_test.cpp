@@ -1147,6 +1147,44 @@ unset multiplot)*";
 #endif
     }
 
+    // Persistent-connection regression: one client issues many sequential named requests
+    // (exercising the per-connection event/buffer reuse and the coalesced multi-frame request
+    // write), including payloads larger than pipe_chunk_size so framing is proven intact.
+    GB_TEST(util, win_pipe_many_sequential_requests_on_one_connection)
+    {
+#if defined(GBWINDOWS)
+        auto server = std::async(std::launch::async, []
+            {
+                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\sequential");
+                server.run(
+                    std::tuple{ "echo_int", [](int i) { return i; } },
+                    std::tuple{ "echo_vec", [](std::vector<char> v) { return v; } }
+                    );
+            });
+
+        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\sequential", "sequential client", 10);
+
+        for (int i = 0; i < 500; ++i)
+            gbassert(client.request<int>("echo_int", i).value() == i);
+
+        // > pipe_chunk_size (64K) payload forces the multi-chunk write/read path
+        std::vector<char> big(3 * pipe_chunk_size + 17);
+        for (std::size_t i = 0; i < big.size(); ++i)
+            big[i] = static_cast<char>(i * 31 + 7);
+        gbassert(client.request<std::vector<char>>("echo_vec", big).value() == big);
+
+        // interleave small and large frames on the same connection
+        for (int i = 0; i < 10; ++i)
+        {
+            gbassert(client.request<int>("echo_int", i).value() == i);
+            gbassert(client.request<std::vector<char>>("echo_vec", big).value() == big);
+        }
+
+        client.disconnect();
+        server.get();
+#endif
+    }
+
     GB_TEST(util, win_pipe_mutex_uses_full_pipe_name)
     {
 #if defined(GBWINDOWS)

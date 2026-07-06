@@ -180,7 +180,17 @@ namespace gb::yadro::util
     struct owinpipe_stream
     {
         using char_type = char;
-        explicit owinpipe_stream(HANDLE pipe, DWORD timeout_ms = pipe_io_timeout_ms) : _pipe(pipe), _timeout_ms(timeout_ms) {}
+        // io_event: optional caller-owned event reused across writes (per-connection reuse);
+        // when null the stream creates and owns one for its own lifetime.
+        explicit owinpipe_stream(HANDLE pipe, DWORD timeout_ms = pipe_io_timeout_ms, HANDLE io_event = nullptr)
+            : _pipe(pipe), _timeout_ms(timeout_ms), _event(io_event)
+        {
+            if (!_event)
+            {
+                _owned_event = create_pipe_event();
+                _event = _owned_event.get();
+            }
+        }
         explicit owinpipe_stream(HANDLE pipe, auto timeout) : owinpipe_stream(pipe, pipe_timeout_milliseconds(timeout)) {}
 
         void write(const char_type* c, std::streamsize size)
@@ -188,16 +198,15 @@ namespace gb::yadro::util
             if (size <= 0)
                 return;
 
-            auto event = create_pipe_event();
             for (std::streamsize sent_bytes = 0; sent_bytes < size;)
             {
                 auto bytes_to_send = static_cast<DWORD>(std::min<std::streamsize>(size - sent_bytes, pipe_chunk_size));
 
-                if (!ResetEvent(event.get()))
+                if (!ResetEvent(_event))
                     throw util::exception_t("owinpipe_stream reset event failed, error: ", GetLastError());
 
                 OVERLAPPED overlapped{};
-                overlapped.hEvent = event.get();
+                overlapped.hEvent = _event;
 
                 DWORD bytes_written{};
                 if (not WriteFile(_pipe, &c[sent_bytes], bytes_to_send, nullptr, &overlapped))
@@ -207,11 +216,11 @@ namespace gb::yadro::util
                         throw util::exception_t(std::format("owinpipe_stream write failed, error: {}, bytes requested: {}, sent bytes: {}, bytes to send: {}, bytes written: {}",
                             last_error, size, sent_bytes, bytes_to_send, bytes_written));
 
-                    auto wait_result = WaitForSingleObject(event.get(), _timeout_ms);
+                    auto wait_result = WaitForSingleObject(_event, _timeout_ms);
                     if (wait_result == WAIT_TIMEOUT)
                     {
                         CancelIoEx(_pipe, &overlapped);
-                        WaitForSingleObject(event.get(), INFINITE);
+                        WaitForSingleObject(_event, INFINITE);
                         throw util::exception_t(std::format("owinpipe_stream write timed out after {} ms, bytes requested: {}, sent bytes: {}, bytes to send: {}",
                             _timeout_ms, size, sent_bytes, bytes_to_send));
                     }
@@ -236,6 +245,8 @@ namespace gb::yadro::util
     private:
         HANDLE _pipe = INVALID_HANDLE_VALUE;
         DWORD _timeout_ms = pipe_io_timeout_ms;
+        unique_win_handle _owned_event;
+        HANDLE _event = nullptr;
     };
 
     using owinpipe_archive = gb::yadro::archive::archive<owinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
@@ -244,7 +255,17 @@ namespace gb::yadro::util
     struct iwinpipe_stream
     {
         using char_type = char;
-        explicit iwinpipe_stream(HANDLE pipe, DWORD timeout_ms = pipe_io_timeout_ms) : _pipe(pipe), _timeout_ms(timeout_ms) {}
+        // io_event: optional caller-owned event reused across reads (per-connection reuse);
+        // when null the stream creates and owns one for its own lifetime.
+        explicit iwinpipe_stream(HANDLE pipe, DWORD timeout_ms = pipe_io_timeout_ms, HANDLE io_event = nullptr)
+            : _pipe(pipe), _timeout_ms(timeout_ms), _event(io_event)
+        {
+            if (!_event)
+            {
+                _owned_event = create_pipe_event();
+                _event = _owned_event.get();
+            }
+        }
         explicit iwinpipe_stream(HANDLE pipe, auto timeout) : iwinpipe_stream(pipe, pipe_timeout_milliseconds(timeout)) {}
 
         void read(char_type* c, std::streamsize size)
@@ -252,16 +273,15 @@ namespace gb::yadro::util
             if (size <= 0)
                 return;
 
-            auto event = create_pipe_event();
             for (std::streamsize received_bytes = 0; received_bytes < size; gbassert(received_bytes <= size))
             {
                 auto bytes_to_read = static_cast<DWORD>(std::min<std::streamsize>(size - received_bytes, pipe_chunk_size));
 
-                if (!ResetEvent(event.get()))
+                if (!ResetEvent(_event))
                     throw util::exception_t("iwinpipe_stream reset event failed, error: ", GetLastError());
 
                 OVERLAPPED overlapped{};
-                overlapped.hEvent = event.get();
+                overlapped.hEvent = _event;
 
                 DWORD bytes_read{};
                 if (not ReadFile(_pipe, &c[received_bytes], bytes_to_read, nullptr, &overlapped))
@@ -271,11 +291,11 @@ namespace gb::yadro::util
                         throw util::exception_t(std::format("iwinpipe_stream read failed, error: {}, bytes requested: {}, received bytes: {}, bytes to read: {}, bytes read: {}, buffer location: {}",
                             last_error, size, received_bytes, bytes_to_read, bytes_read, (void*)(c)));
 
-                    auto wait_result = WaitForSingleObject(event.get(), _timeout_ms);
+                    auto wait_result = WaitForSingleObject(_event, _timeout_ms);
                     if (wait_result == WAIT_TIMEOUT)
                     {
                         CancelIoEx(_pipe, &overlapped);
-                        WaitForSingleObject(event.get(), INFINITE);
+                        WaitForSingleObject(_event, INFINITE);
                         throw util::exception_t(std::format("iwinpipe_stream read timed out after {} ms, bytes requested: {}, received bytes: {}, bytes to read: {}, buffer location: {}",
                             _timeout_ms, size, received_bytes, bytes_to_read, (void*)(c)));
                     }
@@ -300,6 +320,8 @@ namespace gb::yadro::util
     private:
         HANDLE _pipe = INVALID_HANDLE_VALUE;
         DWORD _timeout_ms = pipe_io_timeout_ms;
+        unique_win_handle _owned_event;
+        HANDLE _event = nullptr;
     };
 
     using iwinpipe_archive = gb::yadro::archive::archive<iwinpipe_stream, gb::yadro::archive::archive_format_t::custom>;
@@ -375,7 +397,8 @@ namespace gb::yadro::util
         {}
 
         winpipe_base_t(winpipe_base_t&& other) noexcept
-            : _pipe(std::move(other._pipe)), _log(std::move(other._log)), _log_send_receive(other._log_send_receive), _timeout_ms(other._timeout_ms) {}
+            : _pipe(std::move(other._pipe)), _log(std::move(other._log)), _log_send_receive(other._log_send_receive),
+            _timeout_ms(other._timeout_ms), _io_event(std::move(other._io_event)) {}
 
         void set_logger(auto&&...args) 
         {
@@ -412,15 +435,13 @@ namespace gb::yadro::util
         template<class T> requires(archive::serializable<owinpipe_archive, std::remove_cvref_t<T>>)
         void send(const T& t) const
         {
-            archive::omem_archive<> a;
-            a(t);
-            const auto& frame = a.get_stream().buffer();
+            const auto& frame = serialize_to_reusable_buffer(t);
             const auto frame_size = static_cast<std::uint64_t>(frame.size());
 
             if (_log_send_receive)
                 log("sending: ", frame_size, " bytes");
 
-            owinpipe_stream stream{ _pipe, _timeout_ms };
+            owinpipe_stream stream{ _pipe, _timeout_ms, io_event() };
             if (frame.size() <= pipe_chunk_size - sizeof(frame_size))
             {
                 thread_local std::array<char, pipe_chunk_size> packet{};
@@ -437,16 +458,64 @@ namespace gb::yadro::util
             }
         }
 
+        // Send several values as consecutive length-prefixed frames in one pipe write. The wire
+        // format is identical to calling send() once per value; coalescing saves the per-write
+        // kernel round trips on multi-frame requests (id + name + params).
+        template<class... Ts> requires(sizeof...(Ts) > 1
+            && (archive::serializable<owinpipe_archive, std::remove_cvref_t<Ts>> && ...))
+        void send_frames(const Ts&... ts) const
+        {
+            thread_local std::vector<char> packet;
+            packet.clear();
+
+            const auto append_frame = [&](const auto& t)
+            {
+                const auto& frame = serialize_to_reusable_buffer(t);
+                const auto frame_size = static_cast<std::uint64_t>(frame.size());
+                const auto* size_bytes = reinterpret_cast<const char*>(&frame_size);
+                packet.insert(packet.end(), size_bytes, size_bytes + sizeof(frame_size));
+                packet.insert(packet.end(), frame.begin(), frame.end());
+            };
+            (append_frame(ts), ...);
+
+            if (_log_send_receive)
+                log("sending: ", packet.size(), " bytes (", sizeof...(Ts), " frames)");
+
+            owinpipe_stream stream{ _pipe, _timeout_ms, io_event() };
+            stream.write(packet.data(), static_cast<std::streamsize>(packet.size()));
+        }
+
         auto get_handle() const { return _pipe.get(); }
-    
+
     protected:
         unique_win_handle _pipe;
         std::shared_ptr<util::logger> _log;
         DWORD _timeout_ms = pipe_io_timeout_ms;
     private:
+        // One overlapped-IO event per connection instead of one per read/write call. All send/
+        // receive paths on a connection are serialized (client request mutex, single server run
+        // loop), so sharing the event is safe.
+        [[nodiscard]] HANDLE io_event() const
+        {
+            if (!_io_event.valid())
+                _io_event = create_pipe_event();
+            return _io_event.get();
+        }
+
+        // Serialize into a thread-local buffer that keeps its capacity across calls, avoiding a
+        // fresh allocation per frame on the hot path.
+        template<class T>
+        [[nodiscard]] static const std::vector<char>& serialize_to_reusable_buffer(const T& t)
+        {
+            thread_local archive::omem_archive<> a;
+            a.reset();
+            a(t);
+            return a.get_stream().buffer();
+        }
+
         std::vector<char> receive_frame() const
         {
-            iwinpipe_stream stream{ _pipe, _timeout_ms };
+            iwinpipe_stream stream{ _pipe, _timeout_ms, io_event() };
             std::uint64_t frame_size{};
             stream.read(reinterpret_cast<char*>(&frame_size), sizeof(frame_size));
 
@@ -463,6 +532,7 @@ namespace gb::yadro::util
         }
 
         bool _log_send_receive = false;
+        mutable unique_win_handle _io_event;
     };
 
     //----------------------------------------------------------------------------------------------
@@ -549,9 +619,8 @@ namespace gb::yadro::util
         {
             std::scoped_lock lock(_mutex);
             log("\"", _client_name, "\": sending request for function: ", name);
-            send(0u);
-            send(name);
-            send(std::tuple{ std::forward<decltype(params)>(params)... });
+            // one coalesced write: call_id(0) + name + params, framed identically to three sends
+            send_frames(0u, name, std::tuple{ std::forward<decltype(params)>(params)... });
             return receive<std::expected<T, std::string>>();
         }
 
@@ -561,8 +630,7 @@ namespace gb::yadro::util
         {
             std::scoped_lock lock(_mutex);
             log("\"", _client_name, "\": sending request");
-            send(fn_id);
-            send(std::tuple{ std::forward<decltype(params)>(params)... });
+            send_frames(fn_id, std::tuple{ std::forward<decltype(params)>(params)... });
             return receive<std::expected<T, std::string>>();
         }
 
