@@ -1017,12 +1017,30 @@ namespace gb::yadro::util
     {
         using namespace std::chrono_literals;
         const auto sleep_duration = 100ms;
-        
+
         for(auto start = std::chrono::high_resolution_clock::now(); !is_server_running(pipename)
             && std::chrono::high_resolution_clock::now() - start < timeout_duration;)
             std::this_thread::sleep_for(sleep_duration);
 
         return is_server_running(pipename);
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Startup guard: a server process acquires this mutex at process start, before any lengthy
+    // initialization (database restoration), and holds it for its lifetime. The pipe mutex in
+    // start_server remains the readiness signal; the guard lets clients distinguish "server is
+    // starting, wait for it" from "no server, launch one" — launching during the initialization
+    // window would spawn a duplicate that dies on the pipe mutex only after loading everything.
+    inline auto pipe_server_startup_mutex_name(const std::wstring& pipename)
+    {
+        return pipe_server_mutex_name(pipename) + L"_startup";
+    }
+
+    inline auto is_server_starting(const std::wstring& pipename)
+    {
+        auto mutex_name = pipe_server_startup_mutex_name(pipename);
+        global_mutex mtx{ mutex_name };
+        return !std::unique_lock(mtx, std::defer_lock).try_lock();
     }
 
     //----------------------------------------------------------------------------------------------
