@@ -31,6 +31,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <latch>
 #include <numeric>
 #include <utility>
 #include <vector>
@@ -304,6 +305,68 @@ namespace
         release.notify_one();
         blocker.get();
         release_guard.release();
+    }
+
+    GB_TEST(async, eventcount_batch_steal_republishes_extras_before_blocking) {
+        for (int round = 0; round < 100; ++round) {
+            threadpool pool{ 4 };
+            std::atomic release_first{ false };
+            std::atomic<int> completed{ 0 };
+            test_scope_exit release_guard{ [&] {
+                release_first.store(true);
+                release_first.notify_all();
+            } };
+
+            auto root = pool.submit([&] {
+                std::vector<Task<void>> children;
+                children.reserve(64);
+                children.push_back(pool.submit([&] {
+                    release_first.wait(false);
+                    completed.fetch_add(1);
+                    }));
+                for (int i = 1; i < 64; ++i) {
+                    children.push_back(pool.submit([&] {
+                        completed.fetch_add(1);
+                        }));
+                }
+                for (const auto& child : children)
+                    child.wait();
+                });
+
+            wait_for([&] { return completed.load() >= 63; });
+            release_first.store(true);
+            release_first.notify_all();
+            root.get();
+            gbassert(completed.load() == 64);
+            release_guard.release();
+        }
+    }
+
+    GB_TEST(async, eventcount_local_nested_wait_and_shutdown_stress) {
+        for (int round = 0; round < 100; ++round) {
+            threadpool pool{ 4 };
+            std::latch published{ 1 };
+            std::atomic<int> completed{ 0 };
+
+            auto root = pool.submit([&] {
+                std::vector<Task<void>> children;
+                children.reserve(32);
+                for (int i = 0; i < 32; ++i) {
+                    children.push_back(pool.submit([&] {
+                        completed.fetch_add(1);
+                        }));
+                }
+                published.count_down();
+                for (const auto& child : children)
+                    child.wait();
+                });
+
+            published.wait();
+            std::jthread shutdown_thread([&] { pool.shutdown(true); });
+            shutdown_thread.join();
+            root.get();
+            gbassert(completed.load() == 32);
+        }
     }
 
     GB_TEST(async, test_idle_fires) 
