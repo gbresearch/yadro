@@ -26,10 +26,13 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
+#define GB_YADRO_THREADPOOL_TESTING 1
+
 #include <chrono>
 #include <thread>
 #include <atomic>
 #include <numeric>
+#include <utility>
 #include <vector>
 #include "../util/gbtest.h"
 #include "../async/async.h"
@@ -221,7 +224,87 @@ namespace
         }
     }
 
+    template <typename F>
+    struct test_scope_exit {
+        F cleanup;
+        bool active{ true };
+        ~test_scope_exit() { if (active) cleanup(); }
+        void release() noexcept { active = false; }
+    };
+    template <typename F> test_scope_exit(F) -> test_scope_exit<F>;
+
     // ── test 1: on_idle fires after all tasks complete ────────────────────────────
+
+    GB_TEST(async, eventcount_empty_pool_parks_without_polling) {
+        threadpool pool{ 4 };
+        wait_for([&] {
+            return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == pool.thread_count();
+            });
+
+        const auto returns = gb::yadro::async::detail::threadpool_test_access::park_returns(pool);
+        std::this_thread::sleep_for(100ms);
+
+        gbassert(gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == pool.thread_count());
+        gbassert(gb::yadro::async::detail::threadpool_test_access::park_returns(pool) == returns
+            && "parked workers returned without a publication");
+    }
+
+    GB_TEST(async, eventcount_external_submission_wakes_parked_worker) {
+        threadpool pool{ 4 };
+        wait_for([&] {
+            return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == pool.thread_count();
+            });
+
+        auto task = pool.submit([] { return 42; });
+        std::future<int> result = task;
+        gbassert(result.wait_for(5s) == std::future_status::ready);
+        gbassert(result.get() == 42);
+    }
+
+    GB_TEST(async, eventcount_local_publication_survives_nested_wait) {
+        threadpool pool{ 2 };
+        wait_for([&] {
+            return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == pool.thread_count();
+            });
+
+        auto outer = pool.submit([&] {
+            auto inner = pool.submit([] { return 42; });
+            return inner.get();
+            });
+        std::future<int> result = outer;
+        gbassert(result.wait_for(5s) == std::future_status::ready);
+        gbassert(result.get() == 42);
+    }
+
+    GB_TEST(async, eventcount_blocked_task_does_not_wake_other_workers) {
+        threadpool pool{ 4 };
+        std::atomic started{ false };
+        std::atomic release{ false };
+
+        auto blocker = pool.submit([&] {
+            started.store(true);
+            started.notify_one();
+            release.wait(false);
+            });
+        test_scope_exit release_guard{ [&] {
+            release.store(true);
+            release.notify_one();
+        } };
+        started.wait(false);
+
+        wait_for([&] {
+            return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == 3;
+            });
+        const auto returns = gb::yadro::async::detail::threadpool_test_access::park_returns(pool);
+        std::this_thread::sleep_for(100ms);
+        gbassert(gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == 3);
+        gbassert(gb::yadro::async::detail::threadpool_test_access::park_returns(pool) == returns);
+
+        release.store(true);
+        release.notify_one();
+        blocker.get();
+        release_guard.release();
+    }
 
     GB_TEST(async, test_idle_fires) 
     {

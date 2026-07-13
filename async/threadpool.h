@@ -110,14 +110,22 @@
  *
  * on_idle_ is suppressed once shutdown() is called (state_ != Running).
  *
- * ── External submission: per-worker inboxes + per-worker CVs ─────────────
- * Each worker has a WorkerCtl (mutex + CV + inbox vector).  External
- * submitters target one inbox via a thread-local sticky hash.  submit()
- * notifies ctls_[target].cv — waking exactly the owning worker.
+ * ── Work publication and worker parking ──────────────────────────────────
+ * Every operation that makes queued work visible increments
+ * work_generation_ and notifies one or more atomic waiters.  This includes
+ * initial inbox/deque insertion and re-publication after inbox migration or
+ * batch stealing.  tasks_in_system_ is not a runnable-work predicate: it
+ * includes executing tasks and remains dedicated to drain/on_idle accounting.
  *
- * A shared work_cv_.notify_one() is WRONG with per-worker inboxes: workers
- * only drain their own inbox, so the wrong worker being woken causes an
- * indefinite hang (task stranded in inbox[target], non-owner spinning).
+ * Before parking, a worker snapshots work_generation_ and conclusively scans
+ * every deque and inbox.  Chase-Lev Abort means contention and forces another
+ * pass.  Only after every source is observed empty does the worker call
+ * work_generation_.wait(snapshot).  Publication before the snapshot is found
+ * by the scan; publication after it changes the value, so wait(snapshot)
+ * cannot strand work.
+ *
+ * WorkerCtl::mutex protects only its inbox.  Workers do not use per-worker
+ * condition variables.
  *
  * ── Why idle_.mutex guards the external fetch_add ─────────────────────────
  * Spurious-idle race (see previous sessions).  idle_.mutex is released BEFORE
@@ -125,7 +133,7 @@
  *
  * ── Lock ordering ─────────────────────────────────────────────────────────
  *   External submit:  idle_.mutex → release → ctls_[i].mutex → release
- *   Worker step 2/4:  ctls_[id].mutex (try or full)
+ *   Worker inbox scan: ctls_[i].mutex (one inbox at a time)
  *   run_task:         idle_.mutex (via notify_idle)
  *   SharedState:      SharedState::mu_ (leaf; never held with any pool lock)
  *   shutdown():       shutdown_mutex_ (leaf)
@@ -150,6 +158,7 @@
 
 #include "chase_lev_deque.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
@@ -170,6 +179,7 @@
 
 namespace gb::yadro::async {
     class threadpool;  // forward declaration — notify() calls pool->fire_continuation()
+    namespace detail { struct threadpool_test_access; }
 
     // ─────────────────────────────────────────────────────────────────────────────
     // Splitmix64 — lightweight RNG for victim selection
@@ -613,8 +623,7 @@ namespace gb::yadro::async {
             }
 
             stop_.store(true, std::memory_order_relaxed);
-            for (auto& ctl : ctls_)
-                ctl->cv.notify_all();
+            signal_all_workers();
             lk.unlock();
 
             for (auto& t : threads_)
@@ -762,12 +771,12 @@ namespace gb::yadro::async {
 
     private:
         friend struct ContinuationHandle;
+        friend struct detail::threadpool_test_access;
         // ── Per-worker control block ──────────────────────────────────────────
 
         struct WorkerCtl {
-            std::mutex               mutex;
-            std::condition_variable  cv;
-            std::vector<TaskBase*>   inbox;
+            std::mutex              mutex;
+            std::vector<TaskBase*>  inbox;
         };
 
         // ── Internal enqueue ──────────────────────────────────────────────────
@@ -775,12 +784,14 @@ namespace gb::yadro::async {
         /**
          * @brief Route a pre-constructed TaskBase* into the right queue.
          *
-         * Worker path (own_deque() != nullptr): push directly into own deque.
+         * Worker path (own_deque() != nullptr): push directly into own deque,
+         *   then advance work_generation_ so a parked thief can discover it.
          *   No idle_.mutex needed — tasks_in_system_ ≥ 1 while the worker's
          *   own current task is alive.
          *
          * External path: hold idle_.mutex during fetch_add (closes spurious-idle
-         *   race), then push to ctls_[target].inbox and wake ctls_[target].cv.
+         *   race), push to ctls_[target].inbox, release the inbox mutex, then
+         *   advance work_generation_.
          *
          * On push failure: rolls back fetch_add and rethrows.
          * Caller (enqueue_with_state) deletes the node on exception.
@@ -793,15 +804,7 @@ namespace gb::yadro::async {
                     tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
                     throw;
                 }
-                // Notify one other worker so it can steal this task if the
-                // submitting worker blocks (e.g. in Task::get() / SharedState::wait).
-                // Without this, the task sits in the deque undiscovered: other
-                // workers sleep on !inbox.empty() which is inbox-only and never
-                // signals deque-only work.  The simplest correct choice is the next
-                // worker in ring order; any sleeping worker will do.
-                const std::size_t n = ctls_.size();
-                if (n > 1)
-                    ctls_[(local_id_ + 1) % n]->cv.notify_one();
+                signal_work();
             }
             else {
                 const std::size_t target = ext_home_raw_ % ctls_.size();
@@ -817,7 +820,7 @@ namespace gb::yadro::async {
                     tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
                     throw;
                 }
-                ctls_[target]->cv.notify_one();
+                signal_work();
             }
         }
 
@@ -859,6 +862,77 @@ namespace gb::yadro::async {
 
         // ── Worker loop ───────────────────────────────────────────────────────
 
+        void signal_work(std::size_t visible_tasks = 1) noexcept {
+            if (visible_tasks == 0)
+                return;
+
+            work_generation_.fetch_add(1);
+            const auto wake_count = std::min(visible_tasks, deques_.size());
+            for (std::size_t i = 0; i < wake_count; ++i)
+                work_generation_.notify_one();
+        }
+
+        void signal_all_workers() noexcept {
+            work_generation_.fetch_add(1);
+            work_generation_.notify_all();
+        }
+
+        void publish_batch(
+            WorkStealingDeque<TaskBase*>& destination,
+            std::vector<TaskBase*>& batch) noexcept {
+            const auto count = batch.size();
+            for (auto* task : batch)
+                destination.push_bottom(task);
+            batch.clear();
+            signal_work(count);
+        }
+
+        enum class InboxProbe { Empty, Contended, Published };
+
+        InboxProbe migrate_inbox(
+            WorkerCtl& source,
+            WorkStealingDeque<TaskBase*>& destination,
+            bool conclusive) noexcept {
+            std::unique_lock lk{ source.mutex, std::defer_lock };
+            if (conclusive) {
+                lk.lock();
+            }
+            else if (!lk.try_lock()) {
+                return InboxProbe::Contended;
+            }
+
+            if (source.inbox.empty())
+                return InboxProbe::Empty;
+
+            std::vector<TaskBase*> batch;
+            std::swap(batch, source.inbox);
+            lk.unlock();
+            publish_batch(destination, batch);
+            return InboxProbe::Published;
+        }
+
+        StealResult steal_batch_and_run(
+            WorkStealingDeque<TaskBase*>& victim,
+            WorkStealingDeque<TaskBase*>& destination) noexcept {
+            auto [status, first] = victim.steal();
+            if (status != StealResult::Success)
+                return status;
+
+            std::vector<TaskBase*> extra;
+            extra.reserve(kStealBatchSize - 1);
+            for (int i = 1; i < kStealBatchSize; ++i) {
+                auto [extra_status, task] = victim.steal();
+                if (extra_status == StealResult::Success)
+                    extra.push_back(task);
+                else
+                    break;
+            }
+
+            publish_batch(destination, extra);
+            run_task(first);
+            return StealResult::Success;
+        }
+
         void worker_loop(std::size_t id) {
             local_id_ = id;
             local_pool_ = this;   // ← mark this thread as belonging to this pool
@@ -878,34 +952,17 @@ namespace gb::yadro::async {
                 }
 
                 // ── Step 2: drain own inbox (fast path, try_lock) ────────────
-                {
-                    std::unique_lock lk{ my_ctl.mutex, std::try_to_lock };
-                    if (lk && !my_ctl.inbox.empty()) {
-                        std::vector<TaskBase*> batch;
-                        std::swap(batch, my_ctl.inbox);
-                        lk.unlock();
-                        for (auto* t : batch)
-                            my_deque.push_bottom(t);
-                        continue;
-                    }
-                }
+                if (migrate_inbox(my_ctl, my_deque, false)
+                    == InboxProbe::Published)
+                    continue;
 
                 // ── Step 3: batch-steal from a random victim ─────────────────
                 if (n > 1) {
                     const std::size_t r = static_cast<std::size_t>(rng() % (n - 1));
                     const std::size_t victim = r + (r >= id ? 1 : 0);
-                    auto& vdeque = *deques_[victim];
-
-                    if (auto [s, first] = vdeque.steal(); s == StealResult::Success) {
-                        for (int extra = 1; extra < kStealBatchSize; ++extra) {
-                            auto [s2, t2] = vdeque.steal();
-                            if (s2 != StealResult::Success) break;
-                            try { my_deque.push_bottom(t2); }
-                            catch (...) { run_task(t2); break; }
-                        }
-                        run_task(first);
+                    if (steal_batch_and_run(*deques_[victim], my_deque)
+                        == StealResult::Success)
                         continue;
-                    }
                 }
 
                 // ── Step 3.5: steal from a random victim's inbox ─────────────
@@ -921,52 +978,52 @@ namespace gb::yadro::async {
                 if (n > 1) {
                     const std::size_t r = static_cast<std::size_t>(rng() % (n - 1));
                     const std::size_t victim = r + (r >= id ? 1 : 0);
-                    auto& vctl = *ctls_[victim];
-                    std::unique_lock lk{ vctl.mutex, std::try_to_lock };
-                    if (lk && !vctl.inbox.empty()) {
-                        std::vector<TaskBase*> batch;
-                        std::swap(batch, vctl.inbox);
-                        lk.unlock();
-                        for (auto* t : batch)
-                            my_deque.push_bottom(t);
+                    if (migrate_inbox(*ctls_[victim], my_deque, false)
+                        == InboxProbe::Published)
                         continue;
+                }
+
+                // ── Step 4: conclusive search, then eventcount park ─────────────
+                // Snapshot before searching.  A publication during or after the
+                // scan changes the generation, so wait(snapshot) cannot block.
+                // Visit every deque and inbox; Abort is contention, not emptiness.
+                const auto observed_generation = work_generation_.load();
+                const auto start = static_cast<std::size_t>(rng() % n);
+                bool retry_search = false;
+                bool work_found = false;
+
+                for (std::size_t offset = 0; offset < n; ++offset) {
+                    const auto victim = (start + offset) % n;
+
+                    if (victim != id) {
+                        const auto steal_status = steal_batch_and_run(
+                            *deques_[victim], my_deque);
+                        if (steal_status == StealResult::Success) {
+                            work_found = true;
+                            break;
+                        }
+                        if (steal_status == StealResult::Abort) {
+                            retry_search = true;
+                            break;
+                        }
+                    }
+
+                    if (migrate_inbox(*ctls_[victim], my_deque, true)
+                        == InboxProbe::Published) {
+                        work_found = true;
+                        break;
                     }
                 }
 
-                // ── Step 4: park until inbox has work, stealable deque work
-                //           exists, or stop is set ─────────────────────────────
-                //
-                // Predicate: stop_ OR !inbox.empty() OR tasks_in_system_ > 0.
-                //
-                // !inbox.empty():        wakes the correct worker on external submit.
-                // tasks_in_system_ > 0:  wakes any worker when a peer has pushed to
-                //                        its own deque and then blocked (e.g. inside
-                //                        Task::get() for a continuation).  Without
-                //                        this clause, the peer's task sits undiscovered
-                //                        and the continuation never fires.
-                //
-                // Spin-guard: wait_for with a 200µs timeout.  If a worker wakes
-                // because tasks_in_system_ > 0 but all work is still in inboxes (not
-                // yet migrated to deques), it finds nothing in step 3 and re-enters
-                // step 4.  The predicate is still true, so plain wait() would return
-                // immediately and the worker would spin.  wait_for ensures it
-                // re-sleeps for the poll period instead.  Inbox arrival still causes
-                // immediate wakeup via notify_one() in the external submit path.
-                //
-                // my_ctl.mutex is never held while any other pool lock is held.
-                {
-                    std::unique_lock lk{ my_ctl.mutex };
-                    my_ctl.cv.wait_for(lk, std::chrono::microseconds{ 200 }, [&] {
-                        return stop_.load(std::memory_order_relaxed)
-                            || !my_ctl.inbox.empty()
-                            || tasks_in_system_.load(std::memory_order_acquire) > 0;
-                        });
-                    std::vector<TaskBase*> batch;
-                    std::swap(batch, my_ctl.inbox);
-                    lk.unlock();
-                    for (auto* t : batch)
-                        my_deque.push_bottom(t);
-                }
+                if (work_found || retry_search)
+                    continue;
+                if (stop_.load(std::memory_order_relaxed))
+                    break;
+
+                parked_workers_.fetch_add(1);
+                work_generation_.wait(observed_generation);
+                parked_workers_.fetch_sub(1);
+                park_returns_.fetch_add(1);
             }
 
             local_id_ = kNoWorker;
@@ -1129,6 +1186,9 @@ namespace gb::yadro::async {
         std::vector<std::thread>                                   threads_;
 
         alignas(kCacheLineSize) std::atomic<std::size_t> tasks_in_system_;
+        alignas(kCacheLineSize) std::atomic<std::uint64_t> work_generation_{ 0 };
+        alignas(kCacheLineSize) std::atomic<std::size_t> parked_workers_{ 0 };
+        alignas(kCacheLineSize) std::atomic<std::uint64_t> park_returns_{ 0 };
 
         struct alignas(kCacheLineSize) IdleBlock {
             IdleCallback on_idle;
@@ -1140,6 +1200,23 @@ namespace gb::yadro::async {
         std::condition_variable drain_cv_;
         std::shared_ptr<LifetimeToken> token_{ std::make_shared<LifetimeToken>(this) };   // constructed with raw this
     };
+
+#ifdef GB_YADRO_THREADPOOL_TESTING
+    namespace detail {
+        struct threadpool_test_access {
+            [[nodiscard]] static std::size_t parked_workers(
+                const threadpool& pool) noexcept {
+                return pool.parked_workers_.load();
+            }
+
+            [[nodiscard]] static std::uint64_t park_returns(
+                const threadpool& pool) noexcept {
+                return pool.park_returns_.load();
+            }
+        };
+    }
+#endif
+
     // Defined here, not inline in the struct, because it calls pool->fire_continuation()
     // which requires the complete threadpool definition.
     inline void ContinuationHandle::notify() {
