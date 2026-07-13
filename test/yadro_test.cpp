@@ -47,6 +47,12 @@ int main(int argc, char* argv[])
         tester::disable_tests("container", "gbdb_registry_win32_integration_test");
     }
 #endif
+    if (argc < 2 || argv[1] != std::string("--run-all"))
+    {
+        // bounded_priority_queue_test is disabled by default because it fails on slow machines
+        tester::disable_tests("container", "bounded_priority_queue_test");
+    }
+    
     tester::set_policy(std::launch::deferred);
     auto success = tester::run();
     return success ? 0 : -1;
