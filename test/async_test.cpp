@@ -369,6 +369,107 @@ namespace
         }
     }
 
+    GB_TEST(async, eventcount_shutdown_wakes_fully_parked_workers) {
+        for (int round = 0; round < 100; ++round) {
+            threadpool pool{ 8 };
+            wait_for([&] {
+                return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == pool.thread_count();
+                });
+            pool.shutdown(true);
+            gbassert(pool.state() == threadpool::PoolState::Stopped);
+        }
+    }
+
+    GB_TEST(async, eventcount_graceful_shutdown_drains_accepted_work) {
+        threadpool pool{ 4 };
+        std::atomic<int> completed{ 0 };
+        std::vector<Task<void>> tasks;
+        for (int i = 0; i < 1000; ++i) {
+            tasks.push_back(pool.submit([&] {
+                completed.fetch_add(1);
+                }));
+        }
+
+        pool.shutdown(true);
+        gbassert(completed.load() == 1000);
+        for (const auto& task : tasks)
+            task.get();
+    }
+
+    GB_TEST(async, eventcount_immediate_shutdown_abandons_pending_work) {
+        threadpool pool{ 1 };
+        std::atomic started{ false };
+        std::atomic release{ false };
+
+        auto running = pool.submit([&] {
+            started.store(true);
+            started.notify_one();
+            release.wait(false);
+            });
+        started.wait(false);
+        auto pending = pool.submit([] { return 42; });
+
+        std::jthread shutdown_thread([&] { pool.shutdown(false); });
+        std::this_thread::sleep_for(10ms);
+        release.store(true);
+        release.notify_one();
+        shutdown_thread.join();
+        running.get();
+
+        try {
+            (void)pending.get();
+            gbassert(false && "pending task should be abandoned");
+        }
+        catch (const std::future_error& error) {
+            gbassert(error.code() == std::make_error_code(std::future_errc::broken_promise));
+        }
+    }
+
+    GB_TEST(async, eventcount_concurrent_submissions_are_not_stranded) {
+        threadpool pool{ 8 };
+        constexpr int submitters = 16;
+        constexpr int tasks_per_submitter = 250;
+        std::atomic<int> executed{ 0 };
+        std::mutex tasks_mutex;
+        std::vector<Task<void>> tasks;
+
+        std::vector<std::jthread> threads;
+        for (int i = 0; i < submitters; ++i) {
+            threads.emplace_back([&] {
+                std::vector<Task<void>> local;
+                local.reserve(tasks_per_submitter);
+                for (int j = 0; j < tasks_per_submitter; ++j) {
+                    local.push_back(pool.submit([&] {
+                        executed.fetch_add(1);
+                        }));
+                }
+                std::lock_guard lock{ tasks_mutex };
+                for (auto& task : local)
+                    tasks.push_back(std::move(task));
+                });
+        }
+        threads.clear();
+        for (const auto& task : tasks)
+            task.get();
+
+        gbassert(executed.load() == submitters * tasks_per_submitter);
+    }
+
+    GB_TEST(async, eventcount_continuation_executes_exactly_once) {
+        threadpool pool{ 4 };
+        std::atomic<int> calls{ 0 };
+        auto left = pool.submit([] { return 6; });
+        auto right = pool.submit([] { return 7; });
+        auto result = pool.then([&](int a, int b) {
+            calls.fetch_add(1);
+            return a * b;
+            }, left, right);
+
+        gbassert(result.get() == 42);
+        gbassert(result.get() == 42);
+        gbassert(calls.load() == 1);
+    }
+
     GB_TEST(async, test_idle_fires) 
     {
         std::atomic<int>  idle_count{ 0 };
