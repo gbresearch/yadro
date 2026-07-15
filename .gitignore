@@ -353,3 +353,5 @@ MigrationBackup/
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
 vs/vs-project-audit-2026-05-16.md
+CLAUDE.md
+.claude/settings.json
