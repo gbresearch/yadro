@@ -425,6 +425,209 @@ namespace
         }
     }
 
+    // A dependency-free continuation queued behind a blocked worker becomes a
+    // real FnTask sitting in an inbox.  Immediate shutdown must abandon it AND
+    // fault its result with broken_promise (exercises FnTask::abandon()), not
+    // leave Task::get() hung.  Synchronises on pool.state() — no sleeps.
+    GB_TEST(async, eventcount_immediate_shutdown_faults_queued_continuation) {
+        threadpool pool{ 1 };
+        std::atomic started{ false };
+        std::atomic release{ false };
+
+        auto running = pool.submit([&] {
+            started.store(true);
+            started.notify_one();
+            release.wait(false);
+            });
+        started.wait(false);   // the single worker is now pinned in `running`
+
+        // No dependencies → fires immediately; called from this (external)
+        // thread it is enqueued as an FnTask into the busy worker's inbox.
+        auto cont = pool.then([] { return 99; });
+
+        std::jthread shutdown_thread([&] { pool.shutdown(false); });
+        // shutdown(false) marks the pool Stopped before it blocks in join(),
+        // so this is a deterministic handshake, not a timed guess.
+        while (pool.state() != threadpool::PoolState::Stopped)
+            std::this_thread::yield();
+        release.store(true);
+        release.notify_one();
+        shutdown_thread.join();
+        running.get();
+
+        try {
+            (void)cont.get();
+            gbassert(false && "queued continuation should be faulted");
+        }
+        catch (const std::future_error& error) {
+            gbassert(error.code() == std::make_error_code(std::future_errc::broken_promise));
+        }
+    }
+
+    // Graceful shutdown must DRAIN a continuation registered before shutdown,
+    // not fault it.  The dependency completes while the pool is Draining; the
+    // continuation must run and yield its value.  Deterministic via pool.state().
+    GB_TEST(async, eventcount_graceful_shutdown_runs_registered_continuation) {
+        threadpool pool{ 1 };
+        std::atomic release{ false };
+
+        auto dep = pool.submit([&] { release.wait(false); return 21; });
+        auto cont = pool.then([](int x) { return x * 2; }, dep);
+
+        std::jthread shutdown_thread([&] { pool.shutdown(true); });
+        // Wait until graceful shutdown has entered Draining; it cannot reach
+        // Stopped until `dep` completes, which we gate below.
+        while (pool.state() == threadpool::PoolState::Running)
+            std::this_thread::yield();
+        release.store(true);
+        release.notify_one();
+        shutdown_thread.join();
+
+        gbassert(cont.get() == 42);   // drained, not broken_promise
+    }
+
+    // Cross-pool: a continuation registered on pool B whose dependency lives on
+    // pool A contributes nothing to B's tasks_in_system_ until A completes the
+    // dep.  Graceful B.shutdown(true) must still DRAIN it (via
+    // pending_continuations_ accounting), not fault it.  Deterministic: the dep
+    // is gated until B is observed Draining, and B cannot leave Draining until
+    // the continuation resolves.
+    GB_TEST(async, eventcount_graceful_shutdown_drains_cross_pool_continuation) {
+        threadpool pool_a{ 1 };
+        threadpool pool_b{ 1 };
+        std::atomic release{ false };
+
+        auto dep = pool_a.submit([&] { release.wait(false); return 21; });
+        auto cont = pool_b.then([](int x) { return x * 2; }, dep);
+
+        std::jthread shutdown_thread([&] { pool_b.shutdown(true); });
+        // B has accepted the continuation, so it must enter Draining and stay
+        // there — it cannot reach Stopped until the cross-pool dep completes.
+        while (pool_b.state() == threadpool::PoolState::Running)
+            std::this_thread::yield();
+        gbassert(pool_b.state() == threadpool::PoolState::Draining);
+
+        release.store(true);   // now let A complete the dependency
+        release.notify_one();
+        shutdown_thread.join();
+
+        gbassert(cont.get() == 42);   // drained on B, not broken_promise
+    }
+
+    // A continuation reservation must be rolled back if setup throws after the
+    // pool accepts the then() call but before waiter registration completes.
+    // Otherwise graceful shutdown waits forever on a phantom continuation.
+    GB_TEST(async, eventcount_then_setup_exception_releases_continuation_reservation) {
+        struct throwing_copy_callable {
+            throwing_copy_callable() = default;
+            throwing_copy_callable(const throwing_copy_callable&) {
+                throw std::runtime_error("copy failed");
+            }
+            int operator()(int value) const noexcept { return value; }
+        } callable;
+
+        threadpool pool{ 1 };
+        auto dep = pool.submit([] { return 7; });
+        dep.wait();
+
+        bool threw = false;
+        try {
+            (void)pool.then(callable, dep);
+        }
+        catch (const std::runtime_error&) {
+            threw = true;
+        }
+
+        const auto pending =
+            gb::yadro::async::detail::threadpool_test_access::pending_continuations(pool);
+        pool.shutdown(false);   // deterministic cleanup even on the broken implementation
+
+        gbassert(threw);
+        gbassert(pending == 0);
+    }
+
+    // Multiple dependency-waiter tasks may be abandoned concurrently during
+    // immediate shutdown.  Exactly one caller may consume the shared failure
+    // callback; all later callers must observe that the failure was claimed.
+    GB_TEST(async, continuation_failure_is_claimed_exactly_once) {
+        threadpool pool{ 1 };
+        auto token = std::make_shared<LifetimeToken>(&pool);
+        constexpr int contenders = 32;
+        std::atomic start{ false };
+        std::atomic failures{ 0 };
+        ContinuationHandle handle{
+            1, {}, [&] { failures.fetch_add(1, std::memory_order_relaxed); },
+            &pool, std::move(token) };
+
+        {
+            std::vector<std::jthread> threads;
+            threads.reserve(contenders);
+            for (int i = 0; i < contenders; ++i) {
+                threads.emplace_back([&] {
+                    start.wait(false);
+                    handle.fail();
+                    });
+            }
+            start.store(true, std::memory_order_release);
+            start.notify_all();
+        }
+
+        gbassert(failures.load(std::memory_order_relaxed) == 1);
+    }
+
+    // A long continuation chain faulted at immediate shutdown must unwind
+    // iteratively — recursion here overflowed the stack (0xC00000FD).  The head
+    // is pending behind a blocked worker; abandoning it faults the whole chain.
+    GB_TEST(async, eventcount_immediate_shutdown_faults_deep_chain_without_overflow) {
+        threadpool pool{ 1 };
+        std::atomic started{ false };
+        std::atomic release{ false };
+
+        auto blocker = pool.submit([&] {
+            started.store(true);
+            started.notify_one();
+            release.wait(false);
+            });
+        started.wait(false);
+
+        auto head = pool.submit([] { return 0; });   // pending behind the blocker
+        Task<int> tail = head;
+        constexpr int chain_length = 100000;
+        for (int i = 0; i < chain_length; ++i)
+            tail = pool.then([](int x) { return x + 1; }, tail);
+
+        std::jthread shutdown_thread([&] { pool.shutdown(false); });
+        while (pool.state() != threadpool::PoolState::Stopped)
+            std::this_thread::yield();
+        release.store(true);
+        release.notify_one();
+        shutdown_thread.join();
+
+        bool broken = false;
+        try { (void)tail.get(); }
+        catch (const std::future_error& error) {
+            broken = (error.code()
+                == std::make_error_code(std::future_errc::broken_promise));
+        }
+        gbassert(broken && "deep chain must fault without overflow");
+    }
+
+    // wait() blocks without extracting the value and never throws (matches
+    // std::future::wait()); only get() surfaces the stored exception.  Covers
+    // both the post-ready fast path and the value-observing get().
+    GB_TEST(async, wait_never_throws_but_get_does) {
+        threadpool pool{ 2 };
+        auto t = pool.submit([]() -> int { throw std::runtime_error("boom"); });
+
+        t.wait();   // blocks until ready; must not throw even on failure
+        t.wait();   // ready-state fast path; must not throw either
+
+        bool threw = false;
+        try { (void)t.get(); }
+        catch (const std::runtime_error&) { threw = true; }
+        gbassert(threw);
+    }
+
     GB_TEST(async, eventcount_concurrent_submissions_are_not_stranded) {
         threadpool pool{ 8 };
         constexpr int submitters = 16;

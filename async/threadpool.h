@@ -71,16 +71,24 @@
  * the waiters list and sets ready_ = true.  These two critical sections are
  * mutually exclusive, so a notification can never be lost.
  *
- * tasks_in_system_ and the continuation path
- * ──────────────────────────────────────────
- * tasks_in_system_ is incremented inside enqueue(), which is reached only
- * when the last dep fires and submit_fn() runs.  At that point at least one
- * worker is still active (it is completing that last dep), so
- * tasks_in_system_ ≥ 1 before the increment — no spurious on_idle is
- * possible.  The existing idle_.mutex guard in the external path still
- * applies for continuations triggered by external-thread futures (e.g., a
- * Task converted to std::future and fulfilled externally, which is unusual
- * but handled correctly).
+ * tasks_in_system_, pending_continuations_ and the continuation path
+ * ──────────────────────────────────────────────────────────────────
+ * tasks_in_system_ counts runnable/executing work.  A continuation that is
+ * registered but not yet runnable (its dependency is still pending) is NOT in
+ * tasks_in_system_; it is counted in pending_continuations_ instead, from
+ * registration in then() until it resolves (runs or is faulted) in
+ * fire_continuation().  This matters for cross-pool dependencies: a
+ * continuation on pool B whose dependency lives on pool A completes on an A
+ * worker, so B has no active worker to keep tasks_in_system_ ≥ 1.  Without
+ * pending_continuations_, B's graceful shutdown would drain to zero and fault
+ * accepted work before A ever fires the dependency.  Graceful shutdown()
+ * therefore waits on BOTH counters; on_idle remains keyed on tasks_in_system_
+ * alone (a pool idling on a foreign dependency has genuinely idle workers).
+ * The dispatch inside fire_continuation() increments tasks_in_system_ before
+ * pending_continuations_ is released, so the accepted-work total never dips to
+ * zero while work remains.  The idle_.mutex guard in the external path still
+ * applies for continuations triggered by external-thread futures (e.g., a Task
+ * converted to std::future and fulfilled externally).
  *
  * Chained continuations
  * ─────────────────────
@@ -218,21 +226,64 @@ namespace gb::yadro::async {
     // Memory order on notify(): acq_rel — the release half ensures all work done
     // by the completing dep is visible to the thread that eventually runs the
     // continuation (which loads the completed futures' values via .get()).
+    // ContinuationReservation is activated only after all throwing setup has
+    // completed.  Its atomic state makes release idempotent across registration
+    // rollback, dispatch/fault handoff, and destruction fallback.
     // ─────────────────────────────────────────────────────────────────────────────
+
+    struct ContinuationReservation {
+        explicit ContinuationReservation(threadpool* pool,
+            std::shared_ptr<LifetimeToken> token) noexcept
+            : pool_raw_{ pool }, token_{ std::move(token) } {
+        }
+
+        ContinuationReservation(const ContinuationReservation&) = delete;
+        ContinuationReservation& operator=(const ContinuationReservation&) = delete;
+
+        ~ContinuationReservation() noexcept;
+
+        void activate() noexcept {
+            active_.store(true, std::memory_order_release);
+        }
+
+        void release(threadpool& pool) noexcept;
+
+        [[nodiscard]] const std::shared_ptr<LifetimeToken>& token() const noexcept {
+            return token_;
+        }
+
+    private:
+        threadpool*                    pool_raw_;
+        std::shared_ptr<LifetimeToken> token_;
+        std::atomic<bool>              active_{ false };
+    };
 
     struct ContinuationHandle {
         std::atomic<int>                   dep_count;
         std::function<void()>              execute_fn;
+        std::function<void()>              fail_fn;    // faults the continuation's
+        // out_state with broken_promise when it is discarded instead of run
+        std::atomic_flag                    failure_claimed_{};
         threadpool* pool_raw_;  // unguarded — only used on
         // worker threads (safe)
-        std::shared_ptr<LifetimeToken>     token_;     // guards external-thread path
+        ContinuationReservation            reservation_;
 
-        ContinuationHandle(int n, std::function<void()> fn, threadpool* p, std::shared_ptr<LifetimeToken> tok)
+        ContinuationHandle(int n, std::function<void()> fn, std::function<void()> ff,
+            threadpool* p, std::shared_ptr<LifetimeToken> tok)
             : dep_count{ n }
             , execute_fn{ std::move(fn) }
+            , fail_fn{ std::move(ff) }
             , pool_raw_{ p }
-            , token_{ std::move(tok) } {
+            , reservation_{ p, std::move(tok) } {
         }
+
+    private:
+        [[nodiscard]] bool try_claim_failure() noexcept {
+            return !failure_claimed_.test_and_set(std::memory_order_acq_rel);
+        }
+
+    public:
+        void fail() noexcept;
 
         void notify();   // defined after threadpool — needs fire_continuation()
     };
@@ -249,6 +300,35 @@ namespace gb::yadro::async {
         template <typename T> struct ConstRef { using type = const T&; };
         template <>           struct ConstRef<void> { using type = void; };
         template <typename T> using  ConstRef_t = typename ConstRef<T>::type;
+
+        // ── Fault trampoline ──────────────────────────────────────────────
+        // A continuation chain faulted at shutdown propagates broken_promise
+        // link by link: fault → notify → fire_continuation → fail → fault …
+        // Done recursively that is one stack frame per link and overflows on
+        // long chains (a 100k chain hit Windows 0xC00000FD).  run_fault() runs
+        // the first fault directly and funnels every *nested* fault into an
+        // explicit worklist drained in a loop, so the chain unwinds in O(1)
+        // stack regardless of length.  The sink is a per-thread pointer: a
+        // fault cascade is synchronous on the thread that started it, so no
+        // cross-thread coordination is needed.
+        inline thread_local std::vector<std::function<void()>>* fault_sink = nullptr;
+
+        inline void run_fault(std::function<void()> fail) {
+            if (!fail) return;
+            if (fault_sink) {                     // nested — hand off to the driver
+                fault_sink->push_back(std::move(fail));
+                return;
+            }
+            std::vector<std::function<void()>> work;
+            fault_sink = &work;
+            struct sink_reset { ~sink_reset() { fault_sink = nullptr; } } reset;
+            fail();                               // may push nested faults into work
+            while (!work.empty()) {
+                auto next = std::move(work.back());
+                work.pop_back();
+                next();
+            }
+        }
     } // namespace detail
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -277,14 +357,27 @@ namespace gb::yadro::async {
             fire([&] { result_.template emplace<2>(std::move(ep)); });
         }
 
+        // Fault a still-pending state with broken_promise so blocked
+        // .get()/.wait() callers and registered continuations unblock instead
+        // of hanging.  Idempotent: a no-op if the state was already fulfilled,
+        // so it is safe to call from multiple discard paths for the same state.
+        void fault_broken_promise() noexcept {
+            try {
+                fire_if_pending([&] {
+                    result_.template emplace<2>(std::make_exception_ptr(
+                        std::future_error(std::future_errc::broken_promise)));
+                });
+            }
+            catch (...) {}
+        }
+
         // ── Observation ──────────────────────────────────────────────────────
 
+        // Blocks until ready; never throws (matches std::future::wait()).
+        // The stored exception, if any, is surfaced only by get()/get_ready().
         void wait() const {
-            if (ready_.load(std::memory_order_acquire)) {  // fast path: no lock needed
-                if (result_.index() == 2)
-                    std::rethrow_exception(std::get<2>(result_));
+            if (ready_.load(std::memory_order_acquire))  // fast path: no lock needed
                 return;
-            }
             wait_count_.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock lk{ mu_ };
             cv_.wait(lk, [this] { return ready_.load(std::memory_order_relaxed); });
@@ -334,14 +427,18 @@ namespace gb::yadro::async {
         }
 
     private:
+        // Fulfil the state if still pending; returns false if it was already
+        // fulfilled (double-fire) and leaves it unchanged.  Notifications run
+        // outside the lock: notify() may call fire_continuation() which acquires
+        // pool-internal locks — never held simultaneously with SharedState::mu_.
         template <typename SetFn>
-        void fire(SetFn&& set_fn) {
+        bool fire_if_pending(SetFn&& set_fn) {
             std::shared_ptr<ContinuationHandle> sw;
             std::vector<std::shared_ptr<ContinuationHandle>> ew;
             {
                 std::lock_guard lk{ mu_ };
-                assert(!ready_.load(std::memory_order_relaxed)
-                    && "SharedState fulfilled twice");
+                if (ready_.load(std::memory_order_relaxed))
+                    return false;
                 set_fn();
                 ready_.store(true, std::memory_order_release);
                 if (wait_count_.load(std::memory_order_relaxed))
@@ -349,11 +446,16 @@ namespace gb::yadro::async {
                 sw = std::move(single_waiter_);
                 ew = std::move(extra_waiters_);
             }
-            // Notify continuations outside the lock: notify() may call
-            // fire_continuation() which acquires pool-internal locks —
-            // never held simultaneously with SharedState::mu_.
             if (sw) sw->notify();
             for (auto& h : ew) h->notify();
+            return true;
+        }
+
+        template <typename SetFn>
+        void fire(SetFn&& set_fn) {
+            const bool fired = fire_if_pending(std::forward<SetFn>(set_fn));
+            assert(fired && "SharedState fulfilled twice");
+            (void)fired;
         }
 
         mutable std::mutex              mu_;
@@ -414,7 +516,9 @@ namespace gb::yadro::async {
                         catch (...) {}
                     }
                 },
-                pool_, pool_token_);   // ← pool_ passed here; was missing before
+                std::function<void()>{},   // no explicit fail: ~promise delivers
+                                           // broken_promise if this never runs
+                pool_, pool_token_);   // reservation remains inactive
             if (!state_->register_waiter(h))
                 h->notify();
             return fut;
@@ -477,14 +581,9 @@ namespace gb::yadro::async {
 
         void abandon() noexcept override {
             // Fault the result so waiters on this Task<R> unblock rather than
-            // hang forever.  set_exception locks the SharedState mutex, which in
-            // a teardown path could in principle throw; swallow it so we still
-            // release the node correctly below.
-            try {
-                SharedState<R>::set_exception(std::make_exception_ptr(
-                    std::future_error(std::future_errc::broken_promise)));
-            }
-            catch (...) {}
+            // hang forever.  fault_broken_promise() is idempotent and swallows
+            // any teardown-path exception internally.
+            SharedState<R>::fault_broken_promise();
             self_.reset();   // may delete *this — keep last
         }
     };
@@ -616,8 +715,17 @@ namespace gb::yadro::async {
                 std::memory_order_release);
 
             if (wait_for_completion) {
+                // Graceful drain waits for BOTH runnable/executing work
+                // (tasks_in_system_) AND continuations that are registered but
+                // not yet runnable because a dependency is still pending
+                // (pending_continuations_).  The latter is essential for
+                // cross-pool continuations: a continuation on this pool whose
+                // dependency lives on another pool contributes nothing to
+                // tasks_in_system_ until that dependency completes, so without
+                // this term the pool could reach Stopped and fault accepted work.
                 drain_cv_.wait(lk, [this] {
-                    return tasks_in_system_.load(std::memory_order_acquire) == 0;
+                    return tasks_in_system_.load(std::memory_order_acquire) == 0
+                        && pending_continuations_.load(std::memory_order_acquire) == 0;
                     });
                 state_.store(PoolState::Stopped, std::memory_order_release);
             }
@@ -702,6 +810,12 @@ namespace gb::yadro::async {
 
             auto out = std::make_shared<SharedState<R>>();
 
+            // Faults out with broken_promise if the continuation is discarded
+            // instead of run (pool stopped, task abandoned on shutdown, enqueue
+            // failure, or pool destroyed).  Holds out alive until then, and is
+            // idempotent so multiple discard paths may call it safely.
+            auto fail = [out]() noexcept { out->fault_broken_promise(); };
+
             // Builds the execute_fn: calls fn with dep values, fulfils out_state.
             // This lambda is passed directly to ContinuationHandle — it IS the work,
             // not a wrapper that re-enqueues.  fire_continuation() runs it either
@@ -727,17 +841,32 @@ namespace gb::yadro::async {
                 };
 
             if constexpr (sizeof...(Futures) == 0) {
-                // No dependencies: fire immediately via the normal dispatch path.
+                // No dependencies: immediately runnable — dispatched as ordinary
+                // work, so tasks_in_system_ (not pending_continuations_) accounts
+                // for it; no continuation reservation is activated.
                 auto execute = make_execute(std::forward<F>(task));
-                fire_continuation(execute);
+                fire_continuation(std::move(execute), fail);
             }
             else {
+                // Registered but not yet runnable: count it as accepted work so a
+                // graceful shutdown drains it even when its dependency lives on
+                // another pool.  fire_continuation() releases this exactly once
+                // when the continuation resolves (runs or is faulted).
+                // Construct every potentially-throwing part before activating the
+                // reservation.  Once active, its RAII fallback and the explicit
+                // dispatch handoff guarantee an exactly-once release.
                 auto execute = make_execute(std::forward<F>(task), futures...);
                 auto cont = std::make_shared<ContinuationHandle>(
                     static_cast<int>(sizeof...(Futures)),
                     std::move(execute),
+                    fail,        // faults out if the continuation is discarded
                     this,        // raw pointer — safe on worker path
                     token_);     // shared lifetime guard — used on external path
+
+                // Activate BEFORE registering waiters, since an already-ready
+                // dependency can fire the continuation synchronously below.
+                pending_continuations_.fetch_add(1, std::memory_order_acq_rel);
+                cont->reservation_.activate();
 
                 auto register_one = [&](auto& dep) {
                     if constexpr (requires { dep.state(); }) {
@@ -747,12 +876,24 @@ namespace gb::yadro::async {
                     }
                     else {
                         // std::shared_future or similar: no push mechanism.
-                        // Occupy one worker thread for the wait duration.
+                        // Occupy one worker thread for the wait duration.  If this
+                        // waiter task is abandoned it never notifies, so fault the
+                        // continuation directly so out doesn't hang.
                         enqueue_continuation(
-                            [dep, c = cont]() mutable { dep.get(); c->notify(); });
+                            [dep, c = cont]() mutable { dep.get(); c->notify(); },
+                            [c = cont]() noexcept { c->fail(); });
                     }
                     };
-                (register_one(futures), ...);
+                try {
+                    (register_one(futures), ...);
+                }
+                catch (...) {
+                    // Some waiters may already retain cont, so its destructor is
+                    // not necessarily prompt.  Roll the reservation back now;
+                    // atomic release makes later notifications harmless.
+                    cont->reservation_.release(*this);
+                    throw;
+                }
             }
 
             return Task<R>{std::move(out), this, token_};
@@ -771,6 +912,7 @@ namespace gb::yadro::async {
 
     private:
         friend struct ContinuationHandle;
+        friend struct ContinuationReservation;
         friend struct detail::threadpool_test_access;
         // ── Per-worker control block ──────────────────────────────────────────
 
@@ -827,9 +969,9 @@ namespace gb::yadro::async {
         /**
          * @brief Construct a TaskNode<F,R> and enqueue it.
          *
-         * On enqueue failure: delete node (whose destructor sets broken_promise
-         * on @p out via ~TaskNode).  Does NOT rethrow — failure is surfaced via
-         * Task<R>::get().
+         * On enqueue failure: abandon the node, which faults its SharedState<R>
+         * with broken_promise so Task<R>::get()/wait() unblocks.  Does NOT
+         * rethrow — failure is surfaced via Task<R>::get().
          */
         template <typename R, typename F>
         [[nodiscard]] Task<R> make_and_enqueue(F callable) {
@@ -851,10 +993,11 @@ namespace gb::yadro::async {
                 enqueue(node.get());
             }
             catch (...) {
-                // enqueue rolled back tasks_in_system_.
-                // Clear self_ so the refcount drops and ~TaskNode fires
-                // broken_promise on state_ptr via SharedState<R>::set_exception.
-                node->self_.reset();
+                // enqueue rolled back tasks_in_system_.  Fault the SharedState<R>
+                // with broken_promise and drop self_.  (~TaskNode does NOT fault
+                // the state, and node/state_ptr still hold references here, so a
+                // bare self_.reset() would leave the returned Task pending.)
+                node->abandon();
             }
 
             return Task<R>{std::move(state_ptr), this, token_};
@@ -1054,25 +1197,14 @@ namespace gb::yadro::async {
                 on_system_idle();
         }
 
-        // Signal the drain predicate when the system has just gone fully idle.
-        //
-        // shutdown_mutex_ is acquired (and immediately released) *before*
-        // notifying drain_cv_.  This is mandatory, not an optimisation:
-        // tasks_in_system_ is decremented WITHOUT shutdown_mutex_, while
-        // shutdown()'s drain_cv_.wait() evaluates `tasks_in_system_ == 0` under
-        // that mutex.  A bare notify_all() can therefore land in the window
-        // between the waiter's predicate check (sees 1, decides to block) and
-        // its registration on drain_cv_, and be lost — leaving shutdown()
-        // parked forever even though tasks_in_system_ is already 0.  Briefly
-        // serialising on shutdown_mutex_ closes that window: shutdown() either
-        // observes 0 on its next predicate evaluation, or is already registered
-        // and receives the wake.  (Only worker threads reach here, and workers
-        // never call shutdown(), so this can never self-deadlock.)
+        // Signal the drain predicate when the system may have gone fully idle.
         void on_system_idle() noexcept {
-            {
-                std::lock_guard<std::mutex> lk{ shutdown_mutex_ };
-            }
-            drain_cv_.notify_all();
+            notify_drain();
+            // on_idle is keyed on tasks_in_system_ only: a pool whose sole
+            // outstanding work is a continuation awaiting a foreign-pool
+            // dependency has genuinely idle workers, so on_idle may fire even
+            // while pending_continuations_ > 0.  Graceful drain, which must wait
+            // for that continuation, uses the stricter predicate in shutdown().
             if (idle_.on_idle
                 && state_.load(std::memory_order_acquire) == PoolState::Running)
                 notify_idle();
@@ -1092,26 +1224,86 @@ namespace gb::yadro::async {
 
         // Called from ContinuationHandle::notify().
         // local_id_ and kNoWorker are accessible here — private members of this class.
-        void fire_continuation(std::function<void()> work) {
-            if (state_.load(std::memory_order_acquire) != PoolState::Running) {
-                // Pool is shutting down — set broken_promise on out_state
-                // so callers waiting on .get() unblock rather than hang.
-                // work() captures out_state; calling it fulfils the SharedState
-                // with whatever the callable produces — but we cannot safely run
-                // user code here. Instead: the SharedState stays pending and
-                // Task::get() will block. Document this as a precondition
-                // violation (then() must not be called after shutdown).
-                return;
+        // @p reservation owns the pending_continuations_ increment for a
+        // dependency-tracked continuation.  The scope guard releases it exactly once,
+        // AFTER dispatch, so the accepted-work total (tasks_in_system_ +
+        // pending_continuations_) never momentarily drops to zero while the
+        // continuation still has to run — which would let a graceful drain
+        // finish early.
+        struct continuation_release_guard {
+            threadpool& pool;
+            ContinuationReservation* reservation;
+
+            ~continuation_release_guard() noexcept {
+                if (reservation)
+                    reservation->release(pool);
             }
-            if (local_pool_ == this) {         // worker of THIS pool — safe to run inline
+        };
+
+        void fire_continuation(std::function<void()> work, std::function<void()> fail,
+            ContinuationReservation* reservation = nullptr) noexcept {
+            continuation_release_guard release_reservation{ *this, reservation };
+
+            if (state_.load(std::memory_order_acquire) == PoolState::Stopped) {
+                // Pool has stopped — workers are gone or going, so we cannot run
+                // user code.  Fault the continuation's out_state with
+                // broken_promise instead of leaving it pending (which would hang
+                // Task::get()/wait()).  Route through the trampoline so a long
+                // faulted chain does not overflow the stack.  (A graceful drain
+                // never reaches here for an accounted continuation: the pending
+                // count above holds it open until the continuation resolves.)
+                try { detail::run_fault(std::move(fail)); }
+                catch (...) {}
+            }
+            // Running or Draining: run the continuation.  During graceful drain
+            // (Draining) accepted continuations must complete, not be discarded.
+            else if (local_pool_ == this) {    // worker of THIS pool — safe to run inline
                 if (executing_task_)
-                    run_inline_nested(work);
+                    run_inline_nested(work, std::move(fail));
                 else
-                    run_inline(work);
+                    run_inline(work);          // runs synchronously; always fulfils out
             }
             else {
-                enqueue_continuation(std::move(work));   // external or wrong-pool thread
+                // external or wrong-pool thread
+                enqueue_continuation(std::move(work), std::move(fail));
             }
+
+        }
+
+        void fail_continuation(std::function<void()> fail,
+            ContinuationReservation* reservation) noexcept {
+            continuation_release_guard release_reservation{ *this, reservation };
+            try { detail::run_fault(std::move(fail)); }
+            catch (...) {}
+        }
+
+        // Release one registered-continuation count.  When the last one clears,
+        // a graceful drain may now be satisfied, so poke drain_cv_ (the predicate
+        // re-checks both counters).  The tasks_in_system_ increment performed by
+        // dispatch above happens-before this decrement, so the drain can never
+        // observe both counters at zero while work remains.
+        void release_pending_continuation() noexcept {
+            if (pending_continuations_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                notify_drain();
+        }
+
+        // Wake a graceful shutdown() that may now satisfy its drain predicate.
+        //
+        // shutdown_mutex_ is acquired (and immediately released) *before*
+        // notifying drain_cv_.  This is mandatory, not an optimisation: the
+        // drained counters are decremented WITHOUT shutdown_mutex_, while
+        // shutdown()'s drain_cv_.wait() evaluates the predicate under that mutex.
+        // A bare notify_all() can otherwise land in the window between the
+        // waiter's predicate check (sees non-zero, decides to block) and its
+        // registration on drain_cv_, and be lost — leaving shutdown() parked
+        // forever even though the counters are already zero.  Briefly serialising
+        // on shutdown_mutex_ closes that window.  The caller (a worker of this
+        // pool finishing a task, or any thread releasing a pending continuation —
+        // possibly a worker of another pool) never holds shutdown_mutex_ and
+        // never calls this pool's shutdown(), so this cannot self-deadlock.
+        void notify_drain() noexcept {
+            { std::lock_guard<std::mutex> lk{ shutdown_mutex_ }; }
+            drain_cv_.notify_all();
         }
         // Called only when executing_task_ == true.
         // tasks_in_system_ is already ≥ 1 (the outer run_task holds it).
@@ -1119,12 +1311,12 @@ namespace gb::yadro::async {
         // the outer run_task's fetch_sub handles the final transition to zero.
         // work() catching its own exceptions and storing them in the continuation's
         // SharedState means this call is genuinely noexcept at this level.
-        void run_inline_nested(std::function<void()>& work) noexcept {
+        void run_inline_nested(std::function<void()>& work, std::function<void()> fail) noexcept {
             if (inline_depth_ >= kMaxInlineDepth) {
                 // Unwind: enqueue as a normal task so this stack frame can return.
                 // The continuation will be picked up by this worker in the next
                 // iteration of worker_loop after the current chain unwinds.
-                enqueue_continuation(work);
+                enqueue_continuation(work, std::move(fail));
                 return;
             }
             struct depth_guard {
@@ -1147,19 +1339,40 @@ namespace gb::yadro::async {
 
         // Wrap work in a minimal TaskBase and enqueue via the normal inbox path.
         // Used when fire_continuation() is called from a non-worker thread.
-        void enqueue_continuation(std::function<void()> work) {
+        void enqueue_continuation(std::function<void()> work,
+            std::function<void()> fail = {}) noexcept {
             struct FnTask final : TaskBase {
                 std::function<void()> fn;
-                explicit FnTask(std::function<void()> f) : fn{ std::move(f) } {}
+                std::function<void()> fail_fn;   // faults the continuation's
+                // out_state if this node is discarded instead of executed
+                FnTask(std::function<void()> f, std::function<void()> ff) noexcept
+                    : fn{ std::move(f) }, fail_fn{ std::move(ff) } {}
                 void execute() noexcept override { fn(); }
+                void abandon() noexcept override {
+                    // Unlike the default abandon(), fault the continuation so a
+                    // task discarded on shutdown does not leave Task::get() hung.
+                    // Trampoline the fault so a long faulted chain rooted here
+                    // does not overflow the stack.
+                    try { detail::run_fault(std::move(fail_fn)); } catch (...) {}
+                    self_.reset();   // may delete *this — keep last
+                }
             };
-            auto node = std::make_shared<FnTask>(std::move(work));
+            std::shared_ptr<FnTask> node;
+            try {
+                node = std::make_shared<FnTask>(std::move(work), std::move(fail));
+            }
+            catch (...) {
+                // Allocation failed before FnTask could take ownership of fail.
+                // Fault the result rather than leaving its Task pending.
+                try { detail::run_fault(std::move(fail)); } catch (...) {}
+                return;
+            }
             node->self_ = node;   // keep alive while raw TaskBase* is in the deque
             try {
                 enqueue(node.get());
             }
             catch (...) {
-                node->self_.reset();   // triggers set_exception via ~FnTask if needed
+                node->abandon();   // faults out_state (if any) and drops self_
             }
         }
 
@@ -1186,6 +1399,10 @@ namespace gb::yadro::async {
         std::vector<std::thread>                                   threads_;
 
         alignas(kCacheLineSize) std::atomic<std::size_t> tasks_in_system_;
+        // Continuations that are registered but not yet runnable (a dependency is
+        // still pending).  Counted as accepted work so graceful shutdown drains
+        // them; see shutdown()'s drain predicate and release_pending_continuation().
+        alignas(kCacheLineSize) std::atomic<std::size_t> pending_continuations_{ 0 };
         alignas(kCacheLineSize) std::atomic<std::uint64_t> work_generation_{ 0 };
         alignas(kCacheLineSize) std::atomic<std::size_t> parked_workers_{ 0 };
         alignas(kCacheLineSize) std::atomic<std::uint64_t> park_returns_{ 0 };
@@ -1213,12 +1430,79 @@ namespace gb::yadro::async {
                 const threadpool& pool) noexcept {
                 return pool.park_returns_.load();
             }
+
+            [[nodiscard]] static std::size_t pending_continuations(
+                const threadpool& pool) noexcept {
+                return pool.pending_continuations_.load();
+            }
         };
     }
 #endif
 
-    // Defined here, not inline in the struct, because it calls pool->fire_continuation()
-    // which requires the complete threadpool definition.
+    // Defined here, not inline in the structs, because these operations require
+    // the complete threadpool definition.
+    inline void ContinuationReservation::release(threadpool& pool) noexcept {
+        if (active_.exchange(false, std::memory_order_acq_rel))
+            pool.release_pending_continuation();
+    }
+
+    inline ContinuationReservation::~ContinuationReservation() noexcept {
+        try {
+            if (!active_.load(std::memory_order_acquire))
+                return;
+
+            // A live worker proves the pool is alive and avoids taking the lifetime
+            // token lock on the common fallback path.
+            if (threadpool::local_pool_ == pool_raw_) {
+                release(*pool_raw_);
+                return;
+            }
+
+            const auto& token = token_;
+            if (!token) {
+                active_.store(false, std::memory_order_release);
+                return;
+            }
+
+            std::shared_lock lk{ token->mu };
+            if (token->pool)
+                release(*token->pool);
+            else
+                active_.store(false, std::memory_order_release);
+        }
+        catch (...) {
+            // Best-effort fallback only: every normal setup, dispatch, and fault
+            // path releases explicitly.  A token-lock failure cannot safely use
+            // pool_raw_, but must not escape a noexcept destructor and terminate.
+        }
+    }
+
+    inline void ContinuationHandle::fail() noexcept {
+        // Several non-Task dependency waiters can be abandoned concurrently.
+        // Only the winner may consume fail_fn; moving the same std::function from
+        // multiple threads is a data race even though the fault and reservation
+        // primitives invoked by the callback are independently idempotent.
+        if (!try_claim_failure())
+            return;
+
+        if (threadpool::local_pool_ == pool_raw_) {
+            pool_raw_->fail_continuation(std::move(fail_fn), &reservation_);
+            return;
+        }
+
+        try {
+            const auto& token = reservation_.token();
+            std::shared_lock lk{ token->mu };
+            if (token->pool) {
+                token->pool->fail_continuation(std::move(fail_fn), &reservation_);
+                return;
+            }
+            lk.unlock();
+        }
+        catch (...) {}
+        try { detail::run_fault(std::move(fail_fn)); } catch (...) {}
+    }
+
     inline void ContinuationHandle::notify() {
         if (dep_count.fetch_sub(1, std::memory_order_acq_rel) != 1)
             return;
@@ -1228,7 +1512,8 @@ namespace gb::yadro::async {
         // definition: shutdown() joins all workers before ~threadpool sets
         // the token to null.  No lock needed.
         if (threadpool::local_pool_ == pool_raw_) {
-            pool_raw_->fire_continuation(execute_fn);
+            pool_raw_->fire_continuation(
+                std::move(execute_fn), std::move(fail_fn), &reservation_);
             return;
         }
 
@@ -1236,12 +1521,20 @@ namespace gb::yadro::async {
         // shared_lock allows concurrent external notify() calls.
         // unique_lock in ~threadpool waits for all of these to finish
         // before nulling the pointer and freeing pool memory.
-        std::shared_lock lk{ token_->mu };
-        if (token_->pool)
-            token_->pool->fire_continuation(execute_fn);
-        // If token_->pool is null the pool is gone; SharedState stays
-        // pending.  Task::get() will block indefinitely — same contract
-        // as calling submit() on a destroyed pool (precondition violation).
+        const auto& token = reservation_.token();
+        std::shared_lock lk{ token->mu };
+        if (token->pool) {
+            token->pool->fire_continuation(
+                std::move(execute_fn), std::move(fail_fn), &reservation_);
+            return;
+        }
+        // The pool is gone (its pending_continuations_ counter with it), so there
+        // is nothing to release.  out_state is independent of the pool: fault it
+        // with broken_promise (outside the token lock) instead of leaving
+        // Task::get() to block forever.  Trampoline so a long faulted chain
+        // does not overflow the stack.
+        lk.unlock();
+        detail::run_fault(std::move(fail_fn));
     }
 
     inline thread_local std::size_t threadpool::local_id_ = threadpool::kNoWorker;
