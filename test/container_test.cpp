@@ -2267,6 +2267,50 @@ namespace
         }
     }
 
+    GB_TEST(container, gbdb_json_read_bare_row_arrays_names_columns_by_position_test)
+    {
+        json_read_options options;
+        options.table_mode = json_table_mode::infer_tables;
+
+        if constexpr (gbdb_json_axe_enabled) {
+            // An array of arrays with no columns sibling: the rows are still rectangular, so the
+            // columns are named by position.
+            auto db = read_json(
+                R"({"parameter_ranges":{"period_sets":{"values":[[9,26,52,26],[7,22,44,22],[12,34,68,34]]}}})",
+                options);
+            auto ref = std::get<json_db::table_ref>(
+                *db.get({ "parameter_ranges", "period_sets", "values" }));
+            auto values = db.table(ref);
+
+            gbassert(values.row_count() == 3);
+            gbassert(values.column_count() == 4);
+            gbassert(values.column_name(0) == "0");
+            gbassert(values.column_name(3) == "3");
+            gbassert(values.uint64_column(0)[0] == 9);
+            gbassert(values.uint64_column(2)[2] == 68);
+
+            // An explicit columns array still wins over the positional fallback.
+            auto named = read_json(R"({"columns":["a","b"],"data":[[1,2],[3,4]]})", options);
+            auto named_ref = std::get<json_db::table_ref>(*named.get({ "data" }));
+            gbassert(named.table(named_ref).column_name(0) == "a");
+
+            // A ragged array is not a table in either shape.
+            must_throw<std::logic_error>([&] {
+                [[maybe_unused]] auto ragged = read_json(
+                    R"({"values":[[1,2],[3]]})", options); });
+
+            // Neither are zero-width rows, which would name no columns at all.
+            must_throw<std::logic_error>([&] {
+                [[maybe_unused]] auto empty_rows = read_json(
+                    R"({"values":[[],[]]})", options); });
+        }
+        else {
+            must_throw<std::logic_error>([&] {
+                [[maybe_unused]] auto db = read_json(
+                    R"({"values":[[1,2],[3,4]]})", options); });
+        }
+    }
+
     GB_TEST(container, gbdb_json_read_serialized_object_is_opt_in_test)
     {
         json_db db;

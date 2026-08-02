@@ -934,7 +934,7 @@ namespace gb::yadro::container
         {
             std::vector<string_type> names = columns_for_data_path();
             if (names.empty())
-                throw std::logic_error("JSON data table requires a columns array");
+                names = positional_column_names();
 
             std::vector<std::vector<db_type::table_cell>> columns(names.size());
             for (auto& row : _array->row_arrays) {
@@ -945,6 +945,23 @@ namespace gb::yadro::container
             }
 
             set_table(path, names, columns);
+        }
+
+        // A bare array of arrays -- one that is not the "data" half of a columns/data pair -- names
+        // no columns, but rectangular rows are still a table. Name the columns by position ("0",
+        // "1", ...) so the shape survives the round trip; the row-width check in
+        // set_row_arrays_table still rejects a ragged array. Zero-width rows carry no table at all,
+        // so they are rejected here rather than becoming a degenerate zero-column table.
+        [[nodiscard]] std::vector<string_type> positional_column_names() const
+        {
+            if (_array->row_arrays.empty() || _array->row_arrays.front().empty())
+                throw std::logic_error("JSON nested row arrays must contain nonempty rows");
+
+            std::vector<string_type> names;
+            names.reserve(_array->row_arrays.front().size());
+            for (std::size_t column{}; column < _array->row_arrays.front().size(); ++column)
+                names.push_back(std::to_string(column));
+            return names;
         }
 
         [[nodiscard]] std::vector<string_type> columns_for_data_path() const
