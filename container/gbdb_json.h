@@ -75,10 +75,17 @@ namespace gb::yadro::container
         infer_tables
     };
 
+    // How a json_db table is rendered on write. Only row_arrays is symmetric with the
+    // infer_tables reader for positionally named columns ("0", "1", ...): columns_data emits a
+    // {"columns":...,"data":...} object whose table is rebuilt one level deeper, under "data",
+    // and object_rows emits objects whose keys are the column names. row_arrays drops the column
+    // names, so it is lossless only when they are positional -- which is exactly the bare
+    // array-of-arrays shape the reader infers.
     enum class json_table_write_format
     {
         columns_data,
-        object_rows
+        object_rows,
+        row_arrays
     };
 
     enum class json_blob_mode
@@ -206,6 +213,7 @@ namespace gb::yadro::container
             switch (value) {
             case json_table_write_format::columns_data: return "columns_data";
             case json_table_write_format::object_rows: return "object_rows";
+            case json_table_write_format::row_arrays: return "row_arrays";
             }
             return "columns_data";
         }
@@ -281,6 +289,8 @@ namespace gb::yadro::container
                 return json_table_write_format::columns_data;
             if (value == "object_rows")
                 return json_table_write_format::object_rows;
+            if (value == "row_arrays")
+                return json_table_write_format::row_arrays;
             throw std::logic_error("Unknown json_table_write_format value");
         }
 
@@ -1633,6 +1643,10 @@ namespace gb::yadro::container
                 auto table = _db.table(ref);
                 if (_options.table_format == json_table_write_format::object_rows) {
                     write_table_object_rows(table);
+                    return;
+                }
+                if (_options.table_format == json_table_write_format::row_arrays) {
+                    write_table_row_arrays(table);
                     return;
                 }
                 write_table_columns_data(table);

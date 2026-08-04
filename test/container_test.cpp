@@ -2226,6 +2226,51 @@ namespace
         options.table_format = json_table_write_format::object_rows;
         text = write_json(db, options);
         gbassert(text == R"({"market":[{"timestamp":1716249600,"open":150.25,"volume":1542000},{"timestamp":1716336000,"open":154.19999999999999,"volume":1285000}]})");
+
+        // row_arrays drops the column names, which is what makes it the inverse of the bare
+        // array-of-arrays the reader infers.
+        options.table_format = json_table_write_format::row_arrays;
+        text = write_json(db, options);
+        gbassert(text == R"({"market":[[1716249600,150.25,1542000],[1716336000,154.19999999999999,1285000]]})");
+    }
+
+    GB_TEST(container, gbdb_json_row_arrays_format_round_trips_positional_tables_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            json_read_options read_options;
+            read_options.table_mode = json_table_mode::infer_tables;
+
+            // The shape genetic tuple domains persist: an array of integer arrays with no
+            // columns sibling, so the reader names the columns by position.
+            const std::string original =
+                R"({"parameter_ranges":{"period_sets":{"values":[[9,26,52,26],[7,22,44,22],[12,34,68,34]]}}})";
+
+            auto db = read_json(original, read_options);
+
+            // The default write format is not an inverse of the reader: the table comes back one
+            // level deeper, under "data", leaving "values" a plain object.
+            auto columns_data = write_json(db, json_write_options{ .pretty = false });
+            auto reparsed_columns_data = read_json(columns_data, read_options);
+            gbassert(std::get_if<json_db::table_ref>(
+                reparsed_columns_data.get({ "parameter_ranges", "period_sets", "values" }))
+                == nullptr);
+
+            // row_arrays is, and reproduces the original text exactly.
+            auto row_arrays = write_json(db, json_write_options{ .pretty = false,
+                .table_format = json_table_write_format::row_arrays });
+            gbassert(row_arrays == original);
+
+            auto reparsed = read_json(row_arrays, read_options);
+            auto ref = std::get<json_db::table_ref>(
+                *reparsed.get({ "parameter_ranges", "period_sets", "values" }));
+            auto values = reparsed.table(ref);
+            gbassert(values.row_count() == 3);
+            gbassert(values.column_count() == 4);
+            gbassert(values.column_name(0) == "0");
+            gbassert(values.column_name(3) == "3");
+            gbassert(values.uint64_column(0)[0] == 9);
+            gbassert(values.uint64_column(2)[2] == 68);
+        }
     }
 
     GB_TEST(container, gbdb_json_read_table_is_opt_in_test)
