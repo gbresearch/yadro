@@ -103,6 +103,74 @@ namespace
         gbassert(!oss.str().empty());
     }
 
+    // Verifies several genetic_optimization review fixes:
+    //   • ga_config validation rejects out-of-range knobs (finding 1)
+    //   • memo_capacity == 0 disables memoization instead of throwing (finding 3)
+    //   • discrete_value_range local creep clamps in the signed domain (finding 2)
+    //   • discrete mutation-parameter validation rejects bad values
+    GB_TEST(algorithm, genetic_optimization_review_fixes, std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        auto make = [] {
+            return conv::genetic_optimization_t(
+                [](int x, double y) { return static_cast<double>(x) * x + y * y; },
+                std::less<double>{},
+                min_max_value_range<int>{ -10, 10 },
+                min_max_value_range<double>{ -10.0, 10.0 });
+        };
+
+        // ── Config validation (finding 1) ────────────────────────────────────
+        must_throw<std::invalid_argument>([&] {
+            auto opt = make();
+            opt.config.elitism_fraction = 1.5;      // > 1 would corrupt elite_count
+            opt.optimize(1ms, 20);
+            });
+        must_throw<std::invalid_argument>([&] {
+            auto opt = make();
+            opt.config.mutation_rate = 2.0;
+            opt.optimize(1ms, 20);
+            });
+        must_throw<std::invalid_argument>([&] {
+            auto opt = make();
+            opt.config.memo_capacity = 100;         // not a power of two
+            opt.optimize(1ms, 20);
+            });
+
+        // ── memo_capacity == 0 disables memoization (finding 3) ──────────────
+        {
+            auto opt = make();
+            opt.config.memo_capacity = 0;           // pre-fix: threw on first eval
+            auto [stats, history] = opt.optimize(5ms, 30, 5);
+            gbassert(stats.total_evaluations > 0);
+            gbassert(stats.cache_hits == 0);        // no memo => never a cache hit
+            gbassert(!history.empty());
+        }
+
+        // ── discrete local creep clamps in signed domain (finding 2) ─────────
+        {
+            std::vector<int> vals(100);
+            for (int i = 0; i < 100; ++i) vals[i] = i;   // sorted 0..99
+            discrete_value_range<int> dr(vals);
+            dr.set_mutation_parameters(/*prob=*/1.0, /*radius=*/2); // always local creep
+            std::mt19937_64 rng{ 999 };
+            for (int trial = 0; trial < 1000; ++trial) {
+                int r = dr.mutate(/*value=*/0, rng);     // step from the low end
+                // Must stay within [0, radius]; pre-fix a negative index wrapped to 99.
+                gbassert(r >= 0 && r <= 2);
+            }
+        }
+
+        // ── discrete mutation-parameter validation ───────────────────────────
+        must_throw<std::invalid_argument>([] {
+            discrete_value_range<int>({ 1, 2, 3 }).set_mutation_parameters(1.5, 2);
+            });
+        must_throw<std::invalid_argument>([] {
+            discrete_value_range<int>({ 1, 2, 3 }).set_mutation_parameters(0.5, -1);
+            });
+    }
+
     GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::deferred)
     {
         using namespace std::chrono_literals;

@@ -295,11 +295,13 @@
 //   ├──────────────────────┼──────────────┼──────────────────────────────────────────┤
 //   │ memo_capacity        │ 1 048 576    │ Maximum number of entries in the         │
 //   │                      │              │ chromosome→fitness cache.  Set to 0 to   │
-//   │                      │              │ disable memoization.  Larger values       │
-//   │                      │              │ benefit expensive fitness functions with  │
-//   │                      │              │ many repeated chromosomes.  Each entry    │
-//   │                      │              │ uses approximately sizeof(chromosome) +   │
-//   │                      │              │ sizeof(fitness) + 16 bytes overhead.     │
+//   │                      │              │ disable memoization (the fitness function │
+//   │                      │              │ is then called for every evaluation).     │
+//   │                      │              │ Any NON-zero value must be a power of two │
+//   │                      │              │ and at least the shard count (128);       │
+//   │                      │              │ other values throw std::invalid_argument. │
+//   │                      │              │ Larger values benefit expensive fitness   │
+//   │                      │              │ functions with many repeated chromosomes. │
 //   └──────────────────────┴──────────────┴──────────────────────────────────────────┘
 //
 // ============================================================================
@@ -321,12 +323,15 @@
 //   ┌──────────────────────────────┬────────────┬───────────────────────────────────┐
 //   │ Field                        │ Default    │ Meaning                           │
 //   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
-//   │ stagnation_fraction          │ 0.25       │ The stagnation limit is computed   │
-//   │                              │            │ as max(floor, fraction × max_tries)│
-//   │                              │            │ This means the search is allowed   │
-//   │                              │            │ to stagnate for up to 25% of its  │
-//   │                              │            │ total evaluation budget before     │
-//   │                              │            │ stopping.                          │
+//   │ stagnation_fraction          │ 0.25       │ The stagnation limit (in GENERATIONS)│
+//   │                              │            │ is max(floor, fraction × max_tries)│
+//   │                              │            │ where max_tries is an EVALUATION    │
+//   │                              │            │ budget.  Because a generation costs │
+//   │                              │            │ ~population_size evaluations, this  │
+//   │                              │            │ term is large and the absolute floor│
+//   │                              │            │ usually dominates in practice.  If  │
+//   │                              │            │ you need stagnation to bite sooner, │
+//   │                              │            │ set stagnation_absolute_floor.      │
 //   ├──────────────────────────────┼────────────┼───────────────────────────────────┤
 //   │ stagnation_absolute_floor    │ 100        │ Minimum stagnation limit in        │
 //   │                              │            │ generations, regardless of         │
@@ -489,7 +494,8 @@
 //
 //  External budget checks (loop condition):
 //    - deadline: clock::now() >= deadline
-//    - max_tries: total_eval_requests >= max_tries
+//    - max_tries: actual fitness calls (cache misses only) >= max_tries
+//      (cache hits do not consume the budget)
 //
 //  Non-terminal stop_reason values (search continues after these):
 //    - stop_reason::cataclysm          — diversity recovery triggered
@@ -865,7 +871,8 @@ namespace gb::yadro::algorithm::conv {
                 self.max_value,
                 self.mutation_sigma_frac,
                 self.eta,
-                self.diversity_epsilon
+                self.diversity_epsilon,
+                self.random_reset_prob
             );
 
             if (gb::yadro::archive::iarchive_like<decltype(archive)>)
@@ -923,6 +930,7 @@ namespace gb::yadro::algorithm::conv {
         }
 
         auto& set_mutation_parameters(double local_mutation_prob, int local_mutation_radius) {
+            validate_mutation_parameters(local_mutation_prob, local_mutation_radius);
             this->local_mutation_prob = local_mutation_prob;
             this->local_mutation_radius = local_mutation_radius;
             return *this;
@@ -947,11 +955,16 @@ namespace gb::yadro::algorithm::conv {
             std::bernoulli_distribution creep(local_mutation_prob);
             if (creep(rng)) {   // 70% local creep, 30% random reset
                 auto it = std::ranges::lower_bound(allowed_values, value);
-                auto idx = std::distance(allowed_values.begin(), it);
-                auto  offset = std::uniform_int_distribution<std::ptrdiff_t>{ -local_mutation_radius, local_mutation_radius }(rng);
-                auto  ni = std::clamp(static_cast<std::size_t>(static_cast<std::ptrdiff_t>(idx) + offset),
-                    std::size_t{ 0 }, allowed_values.size() - 1);
-                return allowed_values[ni];
+                const std::ptrdiff_t idx = std::distance(allowed_values.begin(), it);
+                const std::ptrdiff_t offset =
+                    std::uniform_int_distribution<std::ptrdiff_t>{ -local_mutation_radius, local_mutation_radius }(rng);
+                // Clamp in the SIGNED domain first.  Casting (idx + offset) to
+                // size_t before clamping turns any negative index into a huge
+                // value that then clamps to the last element, so a local step
+                // from the low end would jump to the top of the list.
+                const std::ptrdiff_t last = static_cast<std::ptrdiff_t>(allowed_values.size()) - 1;
+                const std::ptrdiff_t ni = std::clamp<std::ptrdiff_t>(idx + offset, 0, last);
+                return allowed_values[static_cast<std::size_t>(ni)];
             }
             return random_value(rng);
         }
@@ -968,14 +981,26 @@ namespace gb::yadro::algorithm::conv {
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
-                self.allowed_values
+                self.allowed_values,
+                self.local_mutation_prob,
+                self.local_mutation_radius
             );
+
+            if (gb::yadro::archive::iarchive_like<decltype(archive)>)
+                self.validate_mutation_parameters(self.local_mutation_prob, self.local_mutation_radius);
         }
 
     private:
         std::vector<T> allowed_values; // sorted, unique, non-empty
         double local_mutation_prob = 0.70; // probability of local creep vs random reset
         int local_mutation_radius = 2; // max index distance for local creep
+
+        static void validate_mutation_parameters(double prob, int radius) {
+            if (prob < 0.0 || prob > 1.0)
+                throw std::invalid_argument("local_mutation_prob must be in the range [0, 1]");
+            if (radius < 0)
+                throw std::invalid_argument("local_mutation_radius must be non-negative");
+        }
 
         void normalize() {
             if (allowed_values.empty())
@@ -1120,6 +1145,26 @@ namespace gb::yadro::algorithm::conv {
         double elitism_fraction = 0.05;
         size_t memo_capacity = 1u << 20;
 
+        // Validate the tuning knobs.  Called at the start of every optimize()
+        // so that a misconfigured elitism_fraction (>1) can no longer drive
+        // elite_count past the population size and corrupt sort_population /
+        // breed_next_generation.
+        void validate() const {
+            if (mutation_rate < 0.0 || mutation_rate > 1.0)
+                throw std::invalid_argument("ga_config: mutation_rate must be in [0, 1]");
+            if (crossover_rate < 0.0 || crossover_rate > 1.0)
+                throw std::invalid_argument("ga_config: crossover_rate must be in [0, 1]");
+            if (tournament_size == 0)
+                throw std::invalid_argument("ga_config: tournament_size must be > 0");
+            if (elitism_fraction < 0.0 || elitism_fraction > 1.0)
+                throw std::invalid_argument("ga_config: elitism_fraction must be in [0, 1]");
+            // memo_capacity == 0 disables memoization; any non-zero value must be
+            // a power of two (and, per the sharded table, at least the shard count).
+            // The precise shard-count check lives in the memo table constructor.
+            if (memo_capacity != 0 && (memo_capacity & (memo_capacity - 1)) != 0)
+                throw std::invalid_argument("ga_config: memo_capacity must be 0 or a power of two");
+        }
+
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
@@ -1252,6 +1297,23 @@ namespace gb::yadro::algorithm::conv {
         /// Default 1: one second chance; set to 0 to restore the original
         /// immediate-stop behaviour; set to max() for unlimited retries.
         size_t max_elite_perturbation_count = 1;
+
+        // Validate the fraction-typed knobs.  These feed size computations
+        // (survivor counts, elite group sizes) that assume a value in [0, 1].
+        void validate() const {
+            if (stagnation_fraction < 0.0)
+                throw std::invalid_argument("stopping_criteria: stagnation_fraction must be >= 0");
+            if (diversity_threshold < 0.0 || diversity_threshold > 1.0)
+                throw std::invalid_argument("stopping_criteria: diversity_threshold must be in [0, 1]");
+            if (cataclysm_survival_fraction < 0.0 || cataclysm_survival_fraction > 1.0)
+                throw std::invalid_argument("stopping_criteria: cataclysm_survival_fraction must be in [0, 1]");
+            if (elite_convergence_fraction < 0.0 || elite_convergence_fraction > 1.0)
+                throw std::invalid_argument("stopping_criteria: elite_convergence_fraction must be in [0, 1]");
+            if (elite_convergence_epsilon < 0.0)
+                throw std::invalid_argument("stopping_criteria: elite_convergence_epsilon must be >= 0");
+            if (elite_convergence_guard <= 0.0)
+                throw std::invalid_argument("stopping_criteria: elite_convergence_guard must be > 0");
+        }
 
         auto serialize(this auto&& self, auto&& archive)
         {
@@ -1828,8 +1890,8 @@ namespace gb::yadro::algorithm::conv {
         {
             if (population_size == 0)
                 throw std::invalid_argument("optimize: population_size must be > 0");
-            if (config.tournament_size == 0)
-                throw std::invalid_argument("tournament_size must be > 0");
+            config.validate();
+            stop_criteria.validate();
 
             using clock = std::chrono::steady_clock;
             const auto t0 = clock::now();
@@ -1890,8 +1952,8 @@ namespace gb::yadro::algorithm::conv {
         {
             if (population_size == 0)
                 throw std::invalid_argument("optimize: population_size must be > 0");
-            if (config.tournament_size == 0)
-                throw std::invalid_argument("tournament_size must be > 0");
+            config.validate();
+            stop_criteria.validate();
 
             using clock = std::chrono::steady_clock;
             const auto t0 = clock::now();
@@ -2074,8 +2136,12 @@ namespace gb::yadro::algorithm::conv {
                 }
 
                 // ── Run phase ─────────────────────────────────────────────────
-                const auto phase_dur = duration_cast<nanoseconds>(
-                    total_ns * fracs[phase]);
+                // Floor each slice at 1ns so a tiny total budget with front-loaded
+                // fractions cannot hand a later phase a zero-length deadline (which
+                // would make its optimize() loop exit before a single generation).
+                const auto phase_dur = std::max(
+                    duration_cast<nanoseconds>(total_ns * fracs[phase]),
+                    nanoseconds{ 1 });
 
                 result = optimize_fn(phase_dur, current_pop_size,
                     max_history, max_tries);
@@ -2267,6 +2333,9 @@ namespace gb::yadro::algorithm::conv {
         // -------------------------------------------------------------------------
         void inject_chromosome(const chromosome_t& chrom) {
             population_.push_back({ chrom, std::nullopt });
+            // Keep the size that report() reads in sync; init_population() will
+            // reconcile it against the requested population_size on the next run.
+            current_pop_size_.store(population_.size(), std::memory_order_relaxed);
         }
 
         // -------------------------------------------------------------------------
@@ -2583,6 +2652,33 @@ namespace gb::yadro::algorithm::conv {
         // =========================================================================
         using individual_t = std::pair<chromosome_t, std::optional<target_t>>;
         using memo_fn_t = std::function<target_t(typename Wrapper::value_type...)>;
+        using memo_table_t = sharded_lockfree_memo_table<
+            xxhash128, memo_fn_t, target_t, /*NumShards=*/128>;
+
+        // The memoization table is populated lazily by a lambda that captures the
+        // owning optimizer's `this`.  The optimizer is move-constructible (see the
+        // static_assert in least_squares_optimizer), so a naive default move would
+        // carry that stale-`this` lambda into the moved-to object.  Wrapping the
+        // memo state in a holder whose move operations DISCARD the table (rather
+        // than transfer it) makes the class's implicit move safe: the destination
+        // simply rebuilds the table lazily, binding to its own `this`.  This is
+        // consistent with the memo being non-serialized / lazily reconstructed.
+        struct memo_holder {
+            std::optional<memo_table_t> table;
+            util::movable_atomic<bool>  ready{ false };
+            util::mutexer<std::mutex>   init_mutex;
+
+            memo_holder() = default;
+            memo_holder(const memo_holder&) = delete;
+            memo_holder& operator=(const memo_holder&) = delete;
+            // Start fresh on move — do not adopt a lambda bound to another object.
+            memo_holder(memo_holder&&) noexcept {}
+            memo_holder& operator=(memo_holder&&) noexcept {
+                table.reset();
+                ready.store(false, std::memory_order_relaxed);
+                return *this;
+            }
+        };
 
         // =========================================================================
         // Stopping criteria implementation
@@ -2760,8 +2856,13 @@ namespace gb::yadro::algorithm::conv {
             // distinguishes a true optimum (no improvement follows) from a plateau
             // (improvement resumes). Only after the perturbation budget is exhausted
             // is the signal treated as terminal.
+            // Suppressed while a target is set but not yet reached: stopping on a
+            // convergence plateau before the known optimum would contradict the
+            // documented contract (criterion 3 pending takes precedence).  The
+            // target check above already returned if the target had been met.
             if constexpr (std::is_arithmetic_v<target_t>) {
-                if (compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon) {
+                if (!target_fitness.has_value()
+                    && compute_elite_convergence_gap() < stop_criteria.elite_convergence_epsilon) {
                     size_t perturbation_count;
                     {
                         std::lock_guard lk(stats_mutex_);
@@ -2816,33 +2917,35 @@ namespace gb::yadro::algorithm::conv {
         // =========================================================================
         // Memo table
         // =========================================================================
-        mutable std::optional<
-            sharded_lockfree_memo_table<xxhash128, memo_fn_t, target_t, /*NumShards=*/128>
-        > memo_table_;
-        mutable util::movable_atomic<bool> memo_ready_{ false };  // replaces once_flag
-        mutable util::mutexer<std::mutex> memo_init_mutex_; // guards initialization only
+        mutable memo_holder memo_;
 
         void ensure_memo_table() const {
             // Fast path: already initialized, no lock needed
-            if (memo_ready_.load(std::memory_order_acquire)) return;
+            if (memo_.ready.load(std::memory_order_acquire)) return;
 
             // Slow path: first call or after reset — take lock and re-check
-            std::lock_guard lk(memo_init_mutex_);
-            if (!memo_table_.has_value()) {
+            std::lock_guard lk(memo_.init_mutex);
+            if (memo_.ready.load(std::memory_order_acquire)) return;
+
+            // memo_capacity == 0 disables memoization: leave the table empty and
+            // let evaluate_chromosome() call the fitness function directly.  A
+            // non-zero capacity must be a power of two >= shard count; the table
+            // constructor enforces that (config.validate() pre-checks the power-of-two).
+            if (config.memo_capacity != 0) {
                 memo_fn_t counting_fn =
                     [this](typename Wrapper::value_type... args) -> target_t {
                     fn_call_count_.fetch_add(1, std::memory_order_relaxed);
                     return target_fn_(args...);
                     };
-                memo_table_.emplace(config.memo_capacity, std::move(counting_fn));
-                memo_ready_.store(true, std::memory_order_release);
+                memo_.table.emplace(config.memo_capacity, std::move(counting_fn));
             }
+            memo_.ready.store(true, std::memory_order_release);
         }
 
         void reset_memo_table() {
-            std::lock_guard lk(memo_init_mutex_);
-            memo_ready_.store(false, std::memory_order_relaxed);
-            memo_table_.reset();
+            std::lock_guard lk(memo_.init_mutex);
+            memo_.ready.store(false, std::memory_order_relaxed);
+            memo_.table.reset();
         }
 
         // NOTE: This function is only ever called from evaluate_all_single()
@@ -2853,10 +2956,17 @@ namespace gb::yadro::algorithm::conv {
 
         [[nodiscard]] target_t evaluate_chromosome(const chromosome_t& chrom) const {
             ensure_memo_table();
-            assert(memo_table_.has_value() && "memo_table_ must be initialized after ensure_memo_table()");
             total_eval_requests_.fetch_add(1, std::memory_order_relaxed);
+            if (memo_.table.has_value()) {
+                return std::apply([&](const auto&... args) {
+                    return memo_.table->get_or_compute(args...);
+                    }, chrom);
+            }
+            // Memoization disabled (memo_capacity == 0): call the fitness directly,
+            // counting the call ourselves since the counting wrapper is bypassed.
+            fn_call_count_.fetch_add(1, std::memory_order_relaxed);
             return std::apply([&](const auto&... args) {
-                return memo_table_->get_or_compute(args...);
+                return target_fn_(args...);
                 }, chrom);
         }
 
@@ -2899,9 +3009,13 @@ namespace gb::yadro::algorithm::conv {
             eval_futures_.clear();
             for (size_t i = 0; i < population_.size(); ++i) {
                 if (population_[i].second) continue;
-                chromosome_t chrom = population_[i].first;
-                auto fut = tp([this, chrom]() mutable -> target_t {
-                    return evaluate_chromosome(chrom);
+                // population_ is not resized or reordered between here and the
+                // drain loop below, and each task reads only population_[i].first
+                // (a distinct sub-object from the .second we write on drain), so
+                // capturing the index and reading by const reference is safe and
+                // avoids copying every chromosome (costly for container genes).
+                auto fut = tp([this, i]() -> target_t {
+                    return evaluate_chromosome(population_[i].first);
                     });
                 eval_futures_.emplace_back(i, std::move(fut));
             }
@@ -2954,8 +3068,15 @@ namespace gb::yadro::algorithm::conv {
         }
 
         [[nodiscard]] size_t elite_count(size_t pop_size) const {
-            return std::max(size_t{ 1 },
-                static_cast<size_t>(pop_size * config.elitism_fraction));
+            if (pop_size == 0) return 0;
+            // Clamp to [1, pop_size].  Without the upper clamp an elitism_fraction
+            // >= 1 would make elite_n exceed the population, driving sort_population's
+            // nth iterator past end (UB) and underflowing num_offspring in the
+            // parallel breeder.  config.validate() also rejects fraction > 1, so this
+            // is defence in depth.
+            return std::clamp<size_t>(
+                static_cast<size_t>(pop_size * config.elitism_fraction),
+                size_t{ 1 }, pop_size);
         }
 
         // The max_tries budget counts actual fitness-function evaluations
@@ -3033,14 +3154,23 @@ namespace gb::yadro::algorithm::conv {
             for (size_t i = 0; i < elite_n && i < population_.size(); ++i)
                 next[i] = population_[i];
 
-            const size_t num_offspring = pop_size - elite_n;
+            // elite_count() clamps elite_n <= pop_size, but guard the subtraction
+            // anyway so a future change can never underflow into a huge chunk count.
+            const size_t num_offspring = (pop_size > elite_n) ? pop_size - elite_n : 0;
             if (num_offspring == 0) return next;
 
-            // Divide offspring into roughly hardware_concurrency chunks so that
-            // per-task overhead stays low.
+            // Divide offspring into roughly one chunk per pool worker so that
+            // per-task overhead stays low and every worker has work.  Prefer the
+            // pool's own thread_count() when it exposes one; fall back to the
+            // hardware concurrency for pools that do not.
+            const size_t worker_count = [&]() -> size_t {
+                if constexpr (requires { tp.thread_count(); })
+                    return static_cast<size_t>(tp.thread_count());
+                else
+                    return static_cast<size_t>(std::thread::hardware_concurrency());
+            }();
             const size_t num_chunks = std::max(size_t{ 1 },
-                std::min(num_offspring,
-                    static_cast<size_t>(std::thread::hardware_concurrency())));
+                std::min(num_offspring, std::max(size_t{ 1 }, worker_count)));
             const size_t chunk_size =
                 (num_offspring + num_chunks - 1) / num_chunks;
 
