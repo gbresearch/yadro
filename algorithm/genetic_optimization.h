@@ -871,8 +871,7 @@ namespace gb::yadro::algorithm::conv {
                 self.max_value,
                 self.mutation_sigma_frac,
                 self.eta,
-                self.diversity_epsilon,
-                self.random_reset_prob
+                self.diversity_epsilon
             );
 
             if (gb::yadro::archive::iarchive_like<decltype(archive)>)
@@ -981,13 +980,8 @@ namespace gb::yadro::algorithm::conv {
         auto serialize(this auto&& self, auto&& archive)
         {
             std::invoke(std::forward<decltype(archive)>(archive),
-                self.allowed_values,
-                self.local_mutation_prob,
-                self.local_mutation_radius
+                self.allowed_values
             );
-
-            if (gb::yadro::archive::iarchive_like<decltype(archive)>)
-                self.validate_mutation_parameters(self.local_mutation_prob, self.local_mutation_radius);
         }
 
     private:
