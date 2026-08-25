@@ -196,30 +196,30 @@ namespace gb::yadro::util
         }
 
         // Lock the mutex, blocking until it is available
-        void lock() 
+        void lock()
         {
-            if (WaitForSingleObject(h_mutex, INFINITE) != WAIT_OBJECT_0)
+            if (!acquired(WaitForSingleObject(h_mutex, INFINITE)))
                 throw_error(to_string("Failed to lock mutex: ", _name, ", error: ", GetLastError()));
         }
 
         // Unlock the mutex
-        void unlock() 
+        void unlock()
         {
             if (!ReleaseMutex(h_mutex))
                 throw_error(to_string("Failed to unlock mutex: ", _name, ", error: ", GetLastError()));
         }
 
         // Try to lock the mutex, returning immediately
-        bool try_lock() 
+        bool try_lock()
         {
-            return WaitForSingleObject(h_mutex, 0) == WAIT_OBJECT_0;
+            return acquired(WaitForSingleObject(h_mutex, 0));
         }
 
         template< class Rep, class Period >
         bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration)
         {
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(timeout_duration);
-            return WaitForSingleObject(h_mutex, (DWORD)ms.count()) == WAIT_OBJECT_0;
+            return acquired(WaitForSingleObject(h_mutex, (DWORD)ms.count()));
         }
         
         template< class Clock, class Duration >
@@ -236,6 +236,16 @@ namespace gb::yadro::util
         global_mutex& operator=(const global_mutex&) = delete;
 
     private:
+        // Both results mean this thread now OWNS the mutex and must release it. WAIT_ABANDONED
+        // only adds that the previous owner died without releasing, which is precisely the case
+        // callers need to recover from -- a crashed process must not strand a machine-wide lock.
+        // Treating it as failure is doubly wrong: the caller reports "busy" while silently holding
+        // the mutex its unique_lock will never unlock, so the abandonment simply repeats.
+        [[nodiscard]] static bool acquired(DWORD wait_result) noexcept
+        {
+            return wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED;
+        }
+
         HANDLE h_mutex; // Handle to the mutex
         std::string _name;
     };

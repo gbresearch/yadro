@@ -742,6 +742,105 @@ unset multiplot)*";
 #endif
     }
 
+#if defined(GBWINDOWS)
+    // Runs this test executable in its `--abandon-global-mutex` child mode, which locks the named
+    // mutex and exits without releasing it, leaving the mutex abandoned. Returns once the child has
+    // both signalled that it holds the lock and actually exited.
+    //
+    // The CALLER must already hold an open handle on `name` before calling this. A named kernel
+    // object lives only while some handle is open, so if the child were the last holder its death
+    // would destroy the object outright and the next open would create a fresh, unowned mutex --
+    // the abandoned state under test would never be observable.
+    [[nodiscard]] inline bool abandon_global_mutex_in_child(const std::string& name)
+    {
+        using namespace gb::yadro::util;
+        constexpr DWORD wait_limit_ms = 30'000;
+
+        const auto event_name = "yadro_abandon_ready_" + get_uuid_string();
+        unique_win_handle ready{ CreateEventA(nullptr, TRUE, FALSE, event_name.c_str()) };
+        if (!ready.valid())
+            return false;
+
+        wchar_t exe_path[MAX_PATH]{};
+        if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) == 0)
+            return false;
+
+        auto command = L'"' + std::wstring{ exe_path } + L"\" --abandon-global-mutex "
+            + std::wstring{ name.begin(), name.end() } + L' '
+            + std::wstring{ event_name.begin(), event_name.end() };
+
+        STARTUPINFOW startup{ .cb = sizeof(STARTUPINFOW) };
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(exe_path, command.data(), nullptr, nullptr, FALSE,
+            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+        {
+            return false;
+        }
+        unique_win_handle child_thread{ process.hThread };
+        unique_win_handle child{ process.hProcess };
+
+        // Every wait is bounded, and a child that never reports is killed rather than left to
+        // wedge the suite.
+        const auto signalled = WaitForSingleObject(ready.get(), wait_limit_ms) == WAIT_OBJECT_0;
+        const auto exited = signalled
+            && WaitForSingleObject(child.get(), wait_limit_ms) == WAIT_OBJECT_0;
+        if (!exited)
+            TerminateProcess(child.get(), 1);
+        return exited;
+    }
+#endif
+
+    GB_TEST(util, global_mutex_abandoned_lock_acquires_and_releases)
+    {
+#if defined(GBWINDOWS)
+        const auto name = "yadro_abandoned_lock_" + get_uuid_string();
+        global_mutex mutex{ name };   // keeps the named object alive past the child's death
+        gbassert(abandon_global_mutex_in_child(name));
+
+        // Windows grants ownership on WAIT_ABANDONED just as it does on WAIT_OBJECT_0; the only
+        // difference is the warning that the previous owner died. Reporting it as a failure both
+        // strands the mutex and hands this thread an ownership it will never release.
+        mutex.lock();
+        mutex.unlock();
+#endif
+    }
+
+    GB_TEST(util, global_mutex_abandoned_try_lock_acquires_and_releases)
+    {
+#if defined(GBWINDOWS)
+        const auto name = "yadro_abandoned_try_lock_" + get_uuid_string();
+        global_mutex mutex{ name };
+        gbassert(abandon_global_mutex_in_child(name));
+
+        gbassert(mutex.try_lock());
+        mutex.unlock();
+#endif
+    }
+
+    GB_TEST(util, global_mutex_abandoned_try_lock_for_acquires_and_releases)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono_literals;
+        const auto name = "yadro_abandoned_try_lock_for_" + get_uuid_string();
+        global_mutex mutex{ name };
+        gbassert(abandon_global_mutex_in_child(name));
+
+        gbassert(mutex.try_lock_for(5s));
+        mutex.unlock();
+
+        // The recovered mutex must behave normally afterwards: a fresh waiter acquires it now that
+        // this thread has released it, so recovery clears the abandoned state rather than leaving
+        // every later acquisition to inherit it.
+        auto reacquired = std::async(std::launch::async, [&]
+            {
+                global_mutex other{ name };
+                if (other.try_lock_for(5s)) { other.unlock(); return true; }
+                return false;
+            });
+        gbassert(reacquired.get());
+#endif
+    }
+
     GB_TEST(util, global_mutex_test)
     {
 #if defined(GBWINDOWS)

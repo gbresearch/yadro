@@ -35,6 +35,29 @@
 int main(int argc, char* argv[])
 {
     using namespace gb::yadro::util;
+
+#if defined(GBWINDOWS)
+    // Child mode for the abandoned-mutex tests, dispatched before any test setup because it must
+    // die while still owning the mutex. A mutex is only abandoned when its owner exits WITHOUT
+    // releasing it, which no ordinary test can produce: unwinding a global_mutex releases it. So
+    // the child locks, signals its parent, and calls ExitProcess so that no destructor runs.
+    if (argc == 4 && argv[1] == std::string("--abandon-global-mutex"))
+    {
+        global_mutex mutex{ std::string{ argv[2] } };
+        mutex.lock();
+        if (unique_win_handle ready{ OpenEventA(EVENT_MODIFY_STATE, FALSE, argv[3]) };
+            ready.valid())
+        {
+            SetEvent(ready.get());
+        }
+        else
+        {
+            return -1;
+        }
+        ExitProcess(0);
+    }
+#endif
+
     tester::set_verbose(true);
     tester::set_logger("yadro-test.log", std::cout);
 #ifndef GBWINDOWS
