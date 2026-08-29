@@ -901,86 +901,127 @@ namespace gb::yadro::util
         return std::apply([&](auto&... fn) { return server.run(fn...); }, functions);
     }
 
-    inline std::optional<unique_win_handle> connect_pipe_instance(const std::wstring& pipename, HANDLE shutdown_event, std::shared_ptr<util::logger> log)
+    template<class OnPipeCreated>
+        requires std::invocable<OnPipeCreated&, HANDLE>
+    inline std::optional<unique_win_handle> connect_pipe_instance_impl(
+        const std::wstring& pipename,
+        HANDLE shutdown_event,
+        std::shared_ptr<util::logger> log,
+        OnPipeCreated&& on_pipe_created)
     {
+        const auto cancellation_requested = [shutdown_event]
+            {
+                return shutdown_event != nullptr
+                    && WaitForSingleObject(shutdown_event, 0) == WAIT_OBJECT_0;
+            };
         auto log_pipe = [&](HANDLE pipe, auto&&... args)
             {
                 if (log)
                     log->writeln(util::time_stamp(), ':', pipe, ':', std::forward<decltype(args)>(args)...);
             };
 
-        const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
-        unique_win_handle pipe{ CreateNamedPipe(
-            pipename.c_str(),             // pipe name
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            pipe_mode,                    // byte type, byte-read mode, blocking mode
-            PIPE_UNLIMITED_INSTANCES,     // max. instances (255)
-            buf_size,                     // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
-            buf_size,                     // input buffer size
-            NMPWAIT_WAIT_FOREVER,         // client time-out in ms
-            nullptr) };                   // default security attribute
-
-        if (!pipe.valid())
+        while (true)
         {
-            auto str_name = pipe_name_for_error(pipename);
-            log_pipe(pipe.get(), "failed to create pipe: ", str_name, ": ", GetLastError());
-            throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
-        }
+            const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
+            unique_win_handle pipe{ CreateNamedPipe(
+                pipename.c_str(),             // pipe name
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                pipe_mode,                    // byte type, byte-read mode, blocking mode
+                PIPE_UNLIMITED_INSTANCES,     // max. instances (255)
+                buf_size,                     // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
+                buf_size,                     // input buffer size
+                NMPWAIT_WAIT_FOREVER,         // client time-out in ms
+                nullptr) };                   // default security attribute
 
-        log_pipe(pipe.get(), "server created a pipe");
-
-        auto event = create_pipe_event();
-        OVERLAPPED overlapped{};
-        overlapped.hEvent = event.get();
-
-        const auto connected = ConnectNamedPipe(pipe.get(), &overlapped);
-        if (connected)
-        {
-            log_pipe(pipe.get(), "server connected client");
-            return std::move(pipe);
-        }
-
-        auto last_error = GetLastError();
-        if (last_error == ERROR_PIPE_CONNECTED)
-        {
-            log_pipe(pipe.get(), "server connected client");
-            return std::move(pipe);
-        }
-
-        if (last_error != ERROR_IO_PENDING)
-        {
-            log_pipe(pipe.get(), "failed to connect to pipe: ", last_error);
-            throw util::exception_t("failed to connect to pipe: ", last_error);
-        }
-
-        HANDLE events[] = { event.get(), shutdown_event };
-        const auto event_count = shutdown_event != nullptr ? 2u : 1u;
-        const auto wait_result = WaitForMultipleObjects(event_count, events, FALSE, INFINITE);
-
-        if (wait_result == WAIT_OBJECT_0)
-        {
-            DWORD ignored{};
-            if (!GetOverlappedResult(pipe.get(), &overlapped, &ignored, FALSE))
+            if (!pipe.valid())
             {
-                last_error = GetLastError();
-                log_pipe(pipe.get(), "failed to complete pipe connection: ", last_error);
-                throw util::exception_t("failed to complete pipe connection: ", last_error);
+                auto str_name = pipe_name_for_error(pipename);
+                log_pipe(pipe.get(), "failed to create pipe: ", str_name, ": ", GetLastError());
+                throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
             }
 
-            log_pipe(pipe.get(), "server connected client");
-            return std::move(pipe);
-        }
+            log_pipe(pipe.get(), "server created a pipe");
+            std::invoke(on_pipe_created, pipe.get());
 
-        if (event_count == 2u && wait_result == WAIT_OBJECT_0 + 1)
-        {
-            CancelIoEx(pipe.get(), &overlapped);
-            WaitForSingleObject(event.get(), INFINITE);
-            return std::nullopt;
-        }
+            auto event = create_pipe_event();
+            OVERLAPPED overlapped{};
+            overlapped.hEvent = event.get();
 
-        last_error = GetLastError();
-        log_pipe(pipe.get(), "failed waiting for pipe connection: ", last_error);
-        throw util::exception_t("failed waiting for pipe connection: ", last_error);
+            const auto connected = ConnectNamedPipe(pipe.get(), &overlapped);
+            if (connected)
+            {
+                log_pipe(pipe.get(), "server connected client");
+                return std::move(pipe);
+            }
+
+            auto last_error = GetLastError();
+            if (last_error == ERROR_PIPE_CONNECTED)
+            {
+                log_pipe(pipe.get(), "server connected client");
+                return std::move(pipe);
+            }
+
+            // A client may open and close its handle between CreateNamedPipe and
+            // ConnectNamedPipe. Windows reports that ordinary disconnect as
+            // ERROR_NO_DATA. Close that dead instance and publish another one. This
+            // retry is required for both the multi-instance accept loop and the
+            // blocking single-instance server constructor.
+            if (last_error == ERROR_NO_DATA)
+            {
+                if (cancellation_requested())
+                    return std::nullopt;
+                log_pipe(pipe.get(), "client disconnected before server accept");
+                continue;
+            }
+
+            if (last_error != ERROR_IO_PENDING)
+            {
+                if (cancellation_requested())
+                    return std::nullopt;
+                log_pipe(pipe.get(), "failed to connect to pipe: ", last_error);
+                throw util::exception_t("failed to connect to pipe: ", last_error);
+            }
+
+            HANDLE events[] = { event.get(), shutdown_event };
+            const auto event_count = shutdown_event != nullptr ? 2u : 1u;
+            const auto wait_result = WaitForMultipleObjects(event_count, events, FALSE, INFINITE);
+
+            if (wait_result == WAIT_OBJECT_0)
+            {
+                DWORD ignored{};
+                if (!GetOverlappedResult(pipe.get(), &overlapped, &ignored, FALSE))
+                {
+                    last_error = GetLastError();
+                    if (cancellation_requested())
+                        return std::nullopt;
+                    log_pipe(pipe.get(), "failed to complete pipe connection: ", last_error);
+                    throw util::exception_t("failed to complete pipe connection: ", last_error);
+                }
+
+                log_pipe(pipe.get(), "server connected client");
+                return std::move(pipe);
+            }
+
+            if (event_count == 2u && wait_result == WAIT_OBJECT_0 + 1)
+            {
+                CancelIoEx(pipe.get(), &overlapped);
+                WaitForSingleObject(event.get(), INFINITE);
+                return std::nullopt;
+            }
+
+            last_error = GetLastError();
+            log_pipe(pipe.get(), "failed waiting for pipe connection: ", last_error);
+            throw util::exception_t("failed waiting for pipe connection: ", last_error);
+        }
+    }
+
+    inline std::optional<unique_win_handle> connect_pipe_instance(
+        const std::wstring& pipename,
+        HANDLE shutdown_event,
+        std::shared_ptr<util::logger> log)
+    {
+        return connect_pipe_instance_impl(pipename, shutdown_event,
+            std::move(log), [](HANDLE) {});
     }
 
     //----------------------------------------------------------------------------------------------

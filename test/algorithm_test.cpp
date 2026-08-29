@@ -171,6 +171,37 @@ namespace
             });
     }
 
+    GB_TEST(algorithm, genetic_optimization_keeps_initial_results_when_budget_expires,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_optimizer = [] {
+            return genetic_optimization_t(
+                [](int value) { return value * value; },
+                std::less<int>{},
+                discrete_value_range<int>({ -2, -1, 0, 1, 2 }));
+            };
+
+        {
+            auto optimizer = make_optimizer();
+            const auto [stats, history] = optimizer.optimize(0ms, 5, 5);
+
+            gbassert(stats.total_evaluations > 0);
+            gbassert(!history.empty());
+        }
+
+        {
+            auto optimizer = make_optimizer();
+            gb::yadro::async::threadpool thread_pool(2);
+            const auto [stats, history] = optimizer.optimize(thread_pool, 0ms, 5, 5);
+
+            gbassert(stats.total_evaluations > 0);
+            gbassert(!history.empty());
+        }
+    }
+
     GB_TEST(algorithm, genetic_optimization_test_conv, std::launch::deferred)
     {
         using namespace std::chrono_literals;

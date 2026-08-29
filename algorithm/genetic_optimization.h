@@ -1899,6 +1899,7 @@ namespace gb::yadro::algorithm::conv {
 
             init_population(population_size, rng);
             evaluate_all_single();
+            feed_history_from_population();
 
             const size_t elite_n = elite_count(population_size);
             const size_t stagnation_limit = compute_stagnation_limit(max_tries);
@@ -1961,6 +1962,7 @@ namespace gb::yadro::algorithm::conv {
 
             init_population(population_size, rng);
             evaluate_all_parallel(tp);
+            feed_history_from_population();
 
             const size_t elite_n = elite_count(population_size);
             const size_t stagnation_limit = compute_stagnation_limit(max_tries);

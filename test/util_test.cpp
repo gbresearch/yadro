@@ -1446,6 +1446,137 @@ unset multiplot)*";
 #endif
     }
 
+    GB_TEST(util, win_pipe_retries_disconnect_before_accept,
+        std::launch::deferred)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono_literals;
+        const auto pipename = L"\\\\.\\pipe\\yadro\\retry_before_accept_"
+            + std::to_wstring(GetCurrentProcessId());
+        unique_win_handle first_created{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        unique_win_handle release_first{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        unique_win_handle retry_created{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        unique_win_handle release_retry{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        std::atomic_uint attempts{};
+
+        auto accepted = std::async(std::launch::async, [&]
+            {
+                return connect_pipe_instance_impl(pipename, shutdown_event.get(), nullptr,
+                    [&](HANDLE)
+                    {
+                        const auto attempt = ++attempts;
+                        if (attempt == 1)
+                        {
+                            SetEvent(first_created.get());
+                            WaitForSingleObject(release_first.get(), 5'000);
+                        }
+                        else if (attempt == 2)
+                        {
+                            SetEvent(retry_created.get());
+                            WaitForSingleObject(release_retry.get(), 5'000);
+                        }
+                    });
+            });
+
+        const auto first_published =
+            WaitForSingleObject(first_created.get(), 5'000) == WAIT_OBJECT_0;
+        unique_win_handle disconnected_client;
+        if (first_published)
+        {
+            disconnected_client = CreateFileW(pipename.c_str(),
+                GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED, nullptr);
+            disconnected_client.reset();
+        }
+        SetEvent(release_first.get());
+
+        const auto retry_published =
+            WaitForSingleObject(retry_created.get(), 5'000) == WAIT_OBJECT_0;
+        unique_win_handle connected_client;
+        if (retry_published)
+        {
+            connected_client = CreateFileW(pipename.c_str(),
+                GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED, nullptr);
+        }
+        SetEvent(release_retry.get());
+
+        auto completed = accepted.wait_for(5s) == std::future_status::ready;
+        if (!completed)
+        {
+            SetEvent(shutdown_event.get());
+            SetEvent(release_first.get());
+            SetEvent(release_retry.get());
+            completed = accepted.wait_for(5s) == std::future_status::ready;
+        }
+        std::optional<unique_win_handle> result;
+        if (completed)
+            result = accepted.get();
+
+        gbassert(first_published);
+        gbassert(retry_published);
+        gbassert(connected_client.valid());
+        gbassert(completed);
+        gbassert(result && result->valid());
+        gbassert(attempts == 2);
+#endif
+    }
+
+    GB_TEST(util, win_pipe_disconnect_retry_honors_accept_cancellation,
+        std::launch::deferred)
+    {
+#if defined(GBWINDOWS)
+        using namespace std::chrono_literals;
+        const auto pipename = L"\\\\.\\pipe\\yadro\\cancel_retry_"
+            + std::to_wstring(GetCurrentProcessId());
+        unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        unique_win_handle pipe_created{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        unique_win_handle release_connect{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        std::atomic_uint attempts{};
+
+        auto accepted = std::async(std::launch::async, [&]
+            {
+                return connect_pipe_instance_impl(pipename, shutdown_event.get(), nullptr,
+                    [&](HANDLE)
+                    {
+                        ++attempts;
+                        SetEvent(pipe_created.get());
+                        WaitForSingleObject(release_connect.get(), 5'000);
+                    });
+            });
+
+        const auto pipe_published =
+            WaitForSingleObject(pipe_created.get(), 5'000) == WAIT_OBJECT_0;
+        unique_win_handle disconnected_client;
+        if (pipe_published)
+        {
+            disconnected_client = CreateFileW(pipename.c_str(),
+                GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED, nullptr);
+            disconnected_client.reset();
+        }
+        SetEvent(shutdown_event.get());
+        SetEvent(release_connect.get());
+
+        auto completed = accepted.wait_for(5s) == std::future_status::ready;
+        if (!completed)
+        {
+            SetEvent(shutdown_event.get());
+            SetEvent(release_connect.get());
+            completed = accepted.wait_for(5s) == std::future_status::ready;
+        }
+        std::optional<unique_win_handle> result;
+        if (completed)
+            result = accepted.get();
+
+        gbassert(pipe_published);
+        gbassert(completed);
+        gbassert(!result);
+        gbassert(attempts == 1);
+#endif
+    }
+
     GB_TEST(util, win_pipe_read_times_out_with_idle_peer)
     {
 #if defined(GBWINDOWS)
