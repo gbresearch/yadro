@@ -364,8 +364,10 @@ A conclusively empty slot returns `std::nullopt`, and exhausting `max_probe_`
 throws the table's existing probe-limit error. Although a valid optimizer
 boundary has no outstanding memo computations, defining the concurrent case
 keeps the container API correct on its own. Exception reset must publish
-`State::empty` before notifying atomic waiters so a lookup cannot miss the reset
-notification.
+`State::empty`, then reset `h_lo` to zero with release ordering, and only then
+call `state.notify_all()`. Publishing only `State::empty` before notification is
+insufficient: a waiter could still observe the matching `h_lo`, wait on the
+empty state, and miss the later unnotified `h_lo` reset.
 
 Parallel target evaluation must not make memo occupancy depend on completion
 order. Add corresponding `insert_ready_with_hash(h_lo, h_hi, value)` operations
@@ -383,8 +385,22 @@ Value insert_ready_with_hash(
 Deterministic GA code invokes target functions without writing the memo from
 worker tasks, drains their results, and calls `insert_ready_with_hash` on the
 controller in ascending representative index. Memo occupancy and probe-limit
-success or failure are therefore deterministic. The existing `get_or_compute`
-APIs and their legacy concurrency behavior do not change.
+success or failure are therefore deterministic. The deterministic path must not
+call `evaluate_chromosome()`: that helper routes through `get_or_compute`, which
+would let worker completion order determine memo insertion order.
+
+The value-returning table's reset reordering is an intentional fix to a
+pre-existing `get_or_compute` lost-wakeup defect and therefore changes legacy
+concurrency behavior from potentially hanging to making progress. Its existing
+success, value, collision, and exception contracts remain unchanged. The `void`
+specialization has the same notification-before-reset defect, but it is not used
+by the GA and is explicitly outside this change; repairing it requires separate
+coverage for its configurable fire-and-forget and wait-for-completion behavior.
+
+The concrete GA memo type that consumes the new sharded forwarding operations
+is `sharded_lockfree_memo_table<xxhash128, memo_fn_t, target_t,
+/*NumShards=*/128>` in `algorithm/genetic_optimization.h`. Both the plain
+value-returning table and this sharded wrapper must expose the required API.
 
 Tests for these container APIs belong in `test/container_test.cpp` and cover
 ready hit, miss, normalized all-zero key, collision probing, matching computing
@@ -573,8 +589,11 @@ self-contained relative to its starting optimizer state.
 
 ## Compatibility
 
-- Existing `optimize()` signatures, overload resolution, defaults, and runtime
-  behavior remain unchanged.
+- Existing `optimize()` signatures, overload resolution, defaults, and
+  successful nonexception runtime behavior remain unchanged.
+- The value-returning memo table intentionally fixes exception-reset wakeup
+  ordering for existing `get_or_compute` callers; the `void` specialization is
+  unchanged and outside scope.
 - `ga_config`, `adaptive_phase_config`, wrapper, and optimizer serialization
   field order remain unchanged.
 - Existing stop-reason numeric values remain unchanged; new values are appended.
@@ -660,6 +679,10 @@ spaces and short, fixed budgets. Timing is used only in timeout-specific tests.
 - Evaluation and cache-hit counters match across varied completion orders.
 - Ready lookup and controller-ordered insertion keep memo occupancy and
   probe-limit outcomes independent of worker completion order.
+- A value-returning `get_or_compute` waiter wakes and retries after the computing
+  thread throws; the test pins reset-state, reset-key, then notify ordering.
+- Deterministic evaluation does not call `evaluate_chromosome()` and worker
+  tasks do not mutate the memo table.
 - Results are applied by representative population index rather than completion
   order.
 - Multiple evaluation failures rethrow the lowest-index exception after all
@@ -727,6 +750,10 @@ The change is complete when:
   evaluation budgets, and a positive failure timeout;
 - no deterministic random decision depends on physical thread identity or task
   scheduling;
+- deterministic worker tasks never call `evaluate_chromosome()` or mutate the
+  memo table;
+- value-returning memo exception reset clears state and key before notifying
+  waiters, while the `void` specialization remains unchanged;
 - successful deterministic calls use only discrete budgets and deterministic
   stop criteria to select their final state;
 - equivalent-fitness ranking and history order are specified and tested;
