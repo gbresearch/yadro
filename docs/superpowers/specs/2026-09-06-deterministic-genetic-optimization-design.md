@@ -4,8 +4,11 @@
 
 This change adds an opt-in deterministic execution mode to
 `gb::yadro::algorithm::conv::genetic_optimization_t` and its single-threaded,
-thread-pool, and adaptive multi-phase optimization paths. Existing `optimize()`
-overloads retain their current time-driven, nondeterministically seeded behavior.
+thread-pool, and adaptive multi-phase optimization paths. It also adds the
+lookup-only and ready-value insertion operations required by deterministic
+evaluation planning to `lockfree_memo_table` and
+`sharded_lockfree_memo_table`. Existing `optimize()` overloads retain their
+current time-driven, nondeterministically seeded behavior.
 
 Deterministic mode guarantees identical completed optimization results for the
 same:
@@ -57,6 +60,7 @@ field is added or reordered as part of this work.
 - Persisting deterministic continuation state in existing binary archives.
 - Replacing `std::mt19937_64` or rewriting every wrapper's sampling algorithms.
 - Guaranteeing identical results when the logical thread count changes.
+- Correcting the existing memo table's 128-bit key-collision semantics.
 
 ## Confirmed Baseline
 
@@ -130,7 +134,23 @@ struct deterministic_ga_options {
     std::size_t evaluation_budget;
     std::chrono::nanoseconds failure_timeout;
 
+    constexpr deterministic_ga_options(
+        std::uint64_t seed,
+        std::size_t generation_budget,
+        std::size_t evaluation_budget,
+        std::chrono::nanoseconds failure_timeout) noexcept;
+
     auto operator<=>(const deterministic_ga_options&) const = default;
+};
+
+class genetic_optimization_timeout : public std::runtime_error {
+public:
+    genetic_optimization_timeout(
+        std::chrono::nanoseconds timeout,
+        std::chrono::nanoseconds elapsed);
+
+    [[nodiscard]] std::chrono::nanoseconds timeout() const noexcept;
+    [[nodiscard]] std::chrono::nanoseconds elapsed() const noexcept;
 };
 ```
 
@@ -139,6 +159,17 @@ may be committed during one public call. Initial-population completion is not a
 generation. `evaluation_budget` is the maximum number of target-function
 invocations started during that call; memo hits do not consume it.
 `failure_timeout` is required, must be positive, and is not a search budget.
+The options type intentionally has no default constructor or default member
+initializers: selecting deterministic mode requires the caller to supply every
+part of its execution contract. Semantic validation still occurs at optimize
+call entry so invalid options cannot mutate an optimizer.
+
+`genetic_optimization_timeout` is declared in
+`algorithm/genetic_optimization.h`, derives publicly from
+`std::runtime_error`, and carries the configured timeout and observed elapsed
+duration. Its `what()` text identifies deterministic genetic optimization and
+formats both durations. The payload lets callers handle the failure without
+parsing text.
 
 Add deterministic overloads corresponding to each existing public shape:
 
@@ -147,6 +178,7 @@ auto optimize(const deterministic_ga_options& run,
     std::size_t population_size,
     std::size_t max_history = std::numeric_limits<std::size_t>::max());
 
+template<detail::DeterministicThreadPool ThreadPool>
 auto optimize(ThreadPool& tp,
     const deterministic_ga_options& run,
     std::size_t population_size,
@@ -157,6 +189,7 @@ auto optimize(std::size_t num_phases,
     std::size_t initial_population_size,
     std::size_t max_history = std::numeric_limits<std::size_t>::max());
 
+template<detail::DeterministicThreadPool ThreadPool>
 auto optimize(ThreadPool& tp,
     std::size_t num_phases,
     const deterministic_ga_options& run,
@@ -169,6 +202,13 @@ The exact return type remains
 accept the legacy duration or `max_tries`; accepting both policy families in one
 call would create competing stop semantics.
 
+The internal exposition-only `detail::DeterministicThreadPool` concept requires
+that `tp.thread_count()` be convertible to `std::size_t`. Normal template
+instantiation continues to verify that the pool accepts the evaluation and
+breeding callables. The explicit count constraint both states the deterministic
+contract and prevents an lvalue `std::size_t` from matching a deterministic
+thread-pool overload where the phase-count overload is intended.
+
 The single-threaded overload has one logical breeding stream. Deterministic
 thread-pool overloads require `tp.thread_count()` to produce a positive integral
 value and capture it once at call entry. That value is the logical thread count
@@ -179,9 +219,9 @@ overloads.
 `deterministic_ga_options` is a transient execution policy. It is deliberately
 not a member of `ga_config`, is not part of `genetic_optimization_t::serialize`,
 and is not included in reports that describe persistent optimizer state. The
-report may identify the last call as deterministic and print its seed and
-budgets only if that metadata can remain nonserialized without changing the
-existing archive layout; such reporting is optional for this change.
+report prints the resulting budget stop reason through existing statistics but
+does not retain or print the last deterministic seed, budgets, or timeout. The
+caller owns that transient run policy.
 
 ## Validation
 
@@ -229,28 +269,39 @@ The initial-population, normal-breeding, cataclysm, and elite-perturbation
 domains are distinct. Random draws added to one operation cannot shift another
 operation's stream.
 
-For normal parallel breeding, `logical_stream` ranges from zero to the captured
-logical thread count minus one. Offspring slots are assigned by a fixed
-contiguous partition computed solely from offspring count and logical stream
-count. Each logical task owns one engine and writes only its assigned output
-indices. The thread pool may execute any logical task on any physical worker.
-The mapping and output are unchanged by stealing or scheduling.
+For normal parallel breeding, the active logical stream count is
+`min(num_offspring, logical_thread_count)`. `logical_stream` ranges from zero to
+that active count minus one. Offspring slots are assigned by the same fixed
+ceiling-division contiguous partition shape used by the legacy breeder,
+computed solely from offspring count and active logical stream count. Each
+logical task owns one engine and writes only its assigned output indices. The
+thread pool may execute any logical task on any physical worker. The mapping and
+output are unchanged by stealing or scheduling. Thread counts at least as large
+as `num_offspring` therefore produce the same stream partition.
 
 Control-path operations use logical stream zero in their own operation domain.
 The single-threaded path uses the same partition and stream derivation with a
 logical thread count of one rather than consuming `detail::thread_rng()`.
 
 The adaptive path uses zero-based phase indices in stream keys. Within a phase,
-generation is the phase-local committed-generation index. Re-entering a public
-deterministic call starts phase and generation numbering from zero; the
-equivalent initial optimizer state is part of the reproducibility key.
+generation is the phase-local committed-generation index. A direct public
+deterministic call uses phase zero. Each new public call starts its call-local
+phase and generation numbering from zero; the equivalent initial optimizer
+state is part of the reproducibility key.
 
 Legacy paths continue to use `detail::thread_rng()` and retain their current
 behavior.
 
 ## Deterministic Population Order and Ties
 
-The deterministic population vector is the canonical logical order:
+Before its first rank, a fresh deterministic population is in initial-generation
+index order, including injected chromosomes followed by newly generated slots.
+The existing initial `feed_history_from_population()` occurs once in that
+unsorted canonical order. After deterministic ranking, the entire population is
+fitness ordered, with ties stable in their pre-rank order.
+
+Each post-breed deterministic population is constructed in this canonical
+logical order:
 
 1. retained elites in deterministic rank order;
 2. offspring in ascending logical offspring index.
@@ -265,25 +316,94 @@ Tournament selection retains the first sampled candidate when fitness values
 are equivalent. It never replaces an incumbent merely because the challenger
 is equivalent.
 
-History observation processes the canonical population from lowest to highest
-logical index. Existing chromosome duplicate rejection remains in force.
-Deterministic history updates use a stable merge: existing history entries
-precede newly observed entries at equivalent fitness, and newly observed entries
-retain ascending canonical population index. This policy requires no persisted
-tie-break field because the resulting vector order is itself serialized. Tests
-pin the exact order so a future container or algorithm substitution cannot
-silently change it.
+History observation processes the current canonical population from lowest to
+highest logical index and reuses `optimization_history::try_insert` unchanged.
+That method uses `lower_bound`, so each newly accepted observation is inserted
+before all existing entries with equivalent fitness. Within one population
+scan, later observed tied entries consequently precede earlier observed tied
+entries. If history is already at capacity, its existing reject-before-insert
+rule still applies. Existing chromosome-key duplicate rejection also remains in
+force. This polarity is deterministic given the fixed observation order and
+preserves legacy history behavior and serialized vector meaning. Tests pin the
+exact resulting order.
 
 These tie rules require only the existing fitness comparator; chromosome value
 types do not gain a new ordering requirement.
 
+The full deterministic rank also defines cataclysm survivors. A cataclysm keeps
+the fitness-ranked prefix `[0, survivor_count)`, including positions beyond
+`elite_n` when `cataclysm_survival_fraction` exceeds `elitism_fraction`. This is
+an intentional deterministic-mode difference from the legacy partial
+`nth_element` ordering.
+
+## Memo-Table Prerequisites
+
+Deterministic budget admission needs to distinguish a ready memo hit from a
+missing key without invoking the stored function or claiming a slot. Add
+lookup-only operations to the value-returning plain and sharded memo tables:
+
+```cpp
+std::optional<Value> try_get(Args&&... args) const;
+std::optional<Value> try_get_with_hash(
+    std::uint64_t h_lo, std::uint64_t h_hi) const;
+```
+
+The public sharded `try_get` computes the key once and chooses
+`mix64(h_hi) & ShardMask`, exactly like `get_or_compute`, before delegating to
+the selected plain table. The all-zero-key normalization and linear probe
+sequence are also identical to `get_or_compute_with_hash`.
+
+The lookup never claims an empty slot and never invokes `func_`. A matching
+`State::ready` returns a copy of the stored value. A matching
+`State::computing` waits for that state to become ready or for the slot to be
+reset; it then returns the ready value or resumes the probe respectively. A
+matching `h_lo` whose state is still `State::empty` is treated as the existing
+key-publication window: lookup waits for `h_hi` and state publication or observes
+a reset rather than reporting a false miss. A different key continues probing.
+A conclusively empty slot returns `std::nullopt`, and exhausting `max_probe_`
+throws the table's existing probe-limit error. Although a valid optimizer
+boundary has no outstanding memo computations, defining the concurrent case
+keeps the container API correct on its own. Exception reset must publish
+`State::empty` before notifying atomic waiters so a lookup cannot miss the reset
+notification.
+
+Parallel target evaluation must not make memo occupancy depend on completion
+order. Add corresponding `insert_ready_with_hash(h_lo, h_hi, value)` operations
+to the value-returning plain and sharded tables. They insert a precomputed value
+without invoking `func_`; the sharded form uses the identical shard mapping. A
+matching ready key preserves and returns the table's existing value. A matching
+computing key waits under the same rule as `try_get`. New distinct keys claim
+slots using the existing probe rules.
+
+```cpp
+Value insert_ready_with_hash(
+    std::uint64_t h_lo, std::uint64_t h_hi, Value value) const;
+```
+
+Deterministic GA code invokes target functions without writing the memo from
+worker tasks, drains their results, and calls `insert_ready_with_hash` on the
+controller in ascending representative index. Memo occupancy and probe-limit
+success or failure are therefore deterministic. The existing `get_or_compute`
+APIs and their legacy concurrency behavior do not change.
+
+Tests for these container APIs belong in `test/container_test.cpp` and cover
+ready hit, miss, normalized all-zero key, collision probing, matching computing
+wait/reset, sharded routing, stable ready insertion, and probe exhaustion.
+
 ## Deterministic Evaluation
 
 Before invoking the fitness function, deterministic mode builds an evaluation
-plan in ascending canonical population index. The plan groups equal
-chromosomes using full chromosome equality through the memo table's key
-semantics, not a truncated hash alone. Each group has a representative at its
-lowest population index.
+plan in ascending canonical population index. When memoization is enabled, it
+computes the memo table's normalized 128-bit key for every unevaluated
+chromosome and groups equal keys. Each group has a representative at its lowest
+population index. This deliberately inherits the memo table's existing
+collision semantics: distinct chromosomes with the same 128-bit key share one
+cached value, with the lowest population index selecting the deterministic
+representative.
+
+When `config.memo_capacity == 0`, memoization is disabled and the plan does not
+group entries. Every unevaluated population entry is its own representative and
+consumes one target invocation if admitted.
 
 The plan then resolves groups already present in the memo and identifies the
 remaining target invocations. Budget admission occurs against that stable list
@@ -291,13 +411,25 @@ before any invocation for the population begins. Admitted representatives may
 be evaluated in parallel, but results are drained and applied in ascending
 representative index. Every duplicate receives its representative's result.
 
-The deterministic planning layer prevents two equal, previously uncached
-chromosomes from racing to invoke the target independently. Consequently
-`total_evaluations` and `cache_hits` do not depend on worker scheduling. Cache
-hits retain the existing meaning of evaluation requests that do not call the
-target. The planner accounts one evaluation request for every previously
-unevaluated population entry, one target invocation for each admitted uncached
-equality-group representative, and a cache hit for every remaining request.
+For memo-enabled runs, the planner calls `try_get_with_hash` for each key group
+in representative-index order. Ready groups use the cached value. Missing group
+representatives are the stable list used for budget admission and parallel
+target invocation. Results are drained in representative order, inserted into
+the memo in that same order, and then copied to every member of the group. The
+planner uses the value returned by `insert_ready_with_hash`, which is the
+already-cached value if a matching ready key appeared concurrently.
+
+The deterministic planning layer prevents equal memo keys from racing to invoke
+the target independently. Consequently `total_evaluations` and `cache_hits` do
+not depend on worker scheduling. Cache hits retain the existing meaning of
+evaluation requests that do not call the target. The planner increments
+`total_eval_requests_` once for every previously unevaluated population entry
+and `fn_call_count_` once for each target invocation it starts. In a
+memo-enabled run, every request other than an admitted uncached representative
+is a cache hit; in a memo-disabled run every request is a target invocation.
+Plan construction and lookup are counter-neutral. Request counters advance only
+after the complete plan passes budget admission, so a discarded candidate does
+not affect cumulative statistics.
 
 If multiple tasks throw, all submitted tasks are drained and deterministic mode
 rethrows the exception belonging to the lowest representative population index.
@@ -340,6 +472,8 @@ Add terminal `stop_reason` values `generation_budget` and
 remain unchanged. Existing `deadline` and `max_tries` meanings remain unchanged
 for legacy calls. The new values participate in reporting and serialization
 through the existing integer stop-reason field without changing field layout.
+`stop_reason_name`, `stop_reason_description`, and every exhaustive report switch
+gain explicit cases for both values.
 
 Target, stagnation, diversity, and elite-convergence criteria remain active in
 deterministic mode because their decisions derive from deterministic committed
@@ -397,12 +531,30 @@ new generation.
 The single shared failure deadline covers the complete adaptive call; it is not
 partitioned by phase.
 
+The deterministic adaptive overload does not delegate each phase back through a
+public deterministic overload. Instead, direct and adaptive entry points are
+thin wrappers over a private phase-aware routine that receives the actual
+zero-based `phase_index`, that phase's generation allocation, the shared
+remaining evaluation budget, and the shared steady-clock deadline. This keeps
+the phase component of every stream key intact and prevents per-phase budget or
+timeout resets.
+
+The existing `num_phases == 1` short-circuit is preserved semantically and
+bit-for-bit: it calls the same private routine as direct deterministic optimize
+with phase zero, the full generation and evaluation budgets, and the same
+deadline. A one-phase adaptive call and a direct deterministic call from
+equivalent state therefore produce identical completed results.
+
 ## State, Reset, and Warm Restart
 
 A deterministic call may start from a fresh optimizer, an injected population,
 or a warm in-memory population. The complete starting population, history,
-statistics, memo contents, recovery baselines, and public configuration are part
-of the initial state for the reproducibility contract.
+statistics, memo key/value contents and slot occupancy, recovery baselines, and
+public configuration are part of the initial state for the reproducibility
+contract. Two optimizers whose memo tables were populated in different legacy
+concurrent orders are not equivalent merely because their visible populations
+and histories match. Fresh optimizers and optimizers advanced through the same
+deterministic call sequence acquire the same memo insertion order.
 
 Calling deterministic `optimize()` twice with the same seed on two equivalent
 optimizer instances is reproducible. Calling it twice successively on one
@@ -435,19 +587,25 @@ self-contained relative to its starting optimizer state.
 
 ## Test Strategy
 
-Tests belong in `test/algorithm_test.cpp` and use small discrete search spaces
-and short, fixed budgets. Timing is used only in timeout-specific tests.
+GA tests belong in `test/algorithm_test.cpp`; memo-table prerequisite tests
+belong in `test/container_test.cpp`. GA coverage uses small discrete search
+spaces and short, fixed budgets. Timing is used only in timeout-specific tests.
 
 ### API and compatibility
 
 - Existing optimize calls compile unchanged and continue to accept durations
   and `max_tries`.
+- `deterministic_ga_options` requires all four constructor arguments and has no
+  value-initialized default state.
 - Deterministic overloads reject zero population, budgets, timeout, or logical
   thread count.
 - A pool lacking `thread_count()` is rejected only by deterministic parallel
   overload resolution.
+- An lvalue `std::size_t` phase count cannot bind as a deterministic thread pool.
 - Existing binary archive fixtures load unchanged.
 - A deterministic run followed by archive save/load does not add archive fields.
+- `genetic_optimization_timeout` derives from `std::runtime_error` and exposes
+  its timeout and elapsed payload without parsing `what()`.
 
 ### Repeated-run reproducibility
 
@@ -476,21 +634,32 @@ and short, fixed budgets. Timing is used only in timeout-specific tests.
   streams for a later key.
 - Results for different logical thread counts are allowed to differ; each count
   is independently reproducible.
+- When `logical_thread_count >= num_offspring`, increasing the count further
+  leaves the active stream partition and result unchanged.
 
 ### Tie handling
 
 - A constant-fitness target produces a pinned elite order across repeated runs.
 - Tournament selection retains the first sampled candidate on equivalent
   fitness.
-- Ordered history for tied fitness is identical across scheduling variations.
+- The initial unsorted history feed and later ranked feeds produce the pinned
+  lower-bound insertion polarity for tied fitness across scheduling variations.
 - An all-ties population never depends on `nth_element` partition choices.
+- Cataclysm retains the deterministic full-sort survivor prefix when its
+  survivor count exceeds the elite count.
 
 ### Evaluation and memoization
 
-- Duplicate uncached chromosomes produce exactly one target invocation per
-  equality group in both single-threaded and parallel deterministic modes.
+- Duplicate uncached memo keys produce exactly one target invocation per key
+  group in both single-threaded and parallel deterministic modes.
+- Forced 128-bit key collisions choose the lowest-index representative and
+  inherit the existing memo collision value semantics deterministically.
+- With `memo_capacity == 0`, equal chromosomes remain separate requests and
+  each admitted entry invokes the target.
 - Pre-existing memo entries consume no evaluation budget.
 - Evaluation and cache-hit counters match across varied completion orders.
+- Ready lookup and controller-ordered insertion keep memo occupancy and
+  probe-limit outcomes independent of worker completion order.
 - Results are applied by representative population index rather than completion
   order.
 - Multiple evaluation failures rethrow the lowest-index exception after all
@@ -503,7 +672,8 @@ and short, fixed budgets. Timing is used only in timeout-specific tests.
 - Exactly the configured number of generations is committed when no
   deterministic stopping criterion or evaluation ceiling ends the run earlier.
 - A candidate generation that cannot fit the remaining evaluation budget is
-  discarded without partial state or a generation increment.
+  discarded without partial population state, request counters, or a generation
+  increment.
 - Target, stagnation, diversity, cataclysm, and elite-perturbation paths remain
   reproducible at their budget boundaries.
 - Generation and evaluation budgets reset per public call while returned
@@ -511,6 +681,8 @@ and short, fixed budgets. Timing is used only in timeout-specific tests.
 - Adaptive generation allocations sum exactly to the global generation budget,
   tie remainders by phase index, and roll unused shares forward
   deterministically; evaluation admission uses the global remaining budget.
+- A one-phase adaptive deterministic call is bit-identical to the corresponding
+  direct deterministic call.
 
 ### Failure ceiling
 
