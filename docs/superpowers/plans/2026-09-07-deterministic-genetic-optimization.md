@@ -272,17 +272,18 @@ git commit -m "feat: add deterministic memo table operations"
 - Produces: `detail::DeterministicThreadPool`.
 - Produces: appended `stop_reason::generation_budget` and `stop_reason::evaluation_budget`.
 
-- [ ] **Step 1: Add compile-time and runtime API tests**
+- [x] **Step 1: Add compile-time and runtime API tests**
 
 Add these assertions near the existing GA value-type test:
 
 ```cpp
 using namespace gb::yadro::algorithm::conv;
 using namespace std::chrono_literals;
+namespace cdetail = gb::yadro::algorithm::conv::detail;
 
 static_assert(!std::default_initializable<deterministic_ga_options>);
-static_assert(detail::DeterministicThreadPool<gb::yadro::async::threadpool>);
-static_assert(!detail::DeterministicThreadPool<std::size_t>);
+static_assert(cdetail::DeterministicThreadPool<gb::yadro::async::threadpool>);
+static_assert(!cdetail::DeterministicThreadPool<std::size_t>);
 static_assert(static_cast<std::uint8_t>(stop_reason::elite_perturbation) == 8);
 static_assert(static_cast<std::uint8_t>(stop_reason::generation_budget) == 9);
 static_assert(static_cast<std::uint8_t>(stop_reason::evaluation_budget) == 10);
@@ -299,13 +300,13 @@ gbassert(timeout.elapsed() == 1500ms);
 gbassert(std::string_view{ timeout.what() }.contains("deterministic genetic optimization"));
 ```
 
-- [ ] **Step 2: Build Debug and confirm the public contracts are absent**
+- [x] **Step 2: Build Debug and confirm the public contracts are absent**
 
 Run the Debug build command from Task 1.
 
 Expected: compile errors for the missing options, exception, concept, and stop reasons.
 
-- [ ] **Step 3: Add the public types, concept, and stop reasons**
+- [x] **Step 3: Add the public types, concept, and stop reasons**
 
 Implement `deterministic_ga_options` exactly as the spec, with a four-argument `constexpr noexcept` constructor. Add `<format>`, then implement `genetic_optimization_timeout` in the same header with two `std::chrono::nanoseconds` members and this base message:
 
@@ -328,7 +329,7 @@ namespace detail {
 
 Append the two enum values after `elite_perturbation`; add explicit cases to `stop_reason_name` and `stop_reason_description`. Do not change `is_terminal`, whose exclusion-based implementation already makes the appended values terminal.
 
-- [ ] **Step 4: Add an archive-layout regression using the legacy field sequence**
+- [x] **Step 4: Add an archive-layout regression using the legacy field sequence**
 
 Construct an empty optimizer and a memory archive manually from the current positional fields, then load it through `genetic_optimization_t::serialize`:
 
@@ -365,7 +366,7 @@ This test fails if deterministic policy fields are inserted into the positional 
 
 Set `stats.last_stop_reason` to each appended budget value in separate archive round trips and assert the integer-backed field restores exactly. This pins append-only enum serialization without adding a field.
 
-- [ ] **Step 5: Run Debug and Release, then commit Task 2**
+- [x] **Step 5: Run Debug and Release, then commit Task 2**
 
 Run both build commands from Task 1 Step 8.
 
