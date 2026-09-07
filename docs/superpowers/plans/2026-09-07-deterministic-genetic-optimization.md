@@ -101,18 +101,16 @@ GB_TEST(container, lockfree_memo_exception_reset_wakes_waiter)
 & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' `
   'vs\yadro.sln' /m /t:Build /p:Configuration=Debug /p:Platform=x64 `
   /p:RunPostBuildEvent=Never /v:minimal
-$testProcess = Start-Process -FilePath '.\vs\exe\yadro_test\x64\Debug\yadro_test.exe' `
+$testProcess = Start-Process -FilePath '.\exe\x64\Debug\yadro_test.exe' `
   -PassThru -NoNewWindow
-if (-not $testProcess.WaitForExit(15000)) {
-    Stop-Process -Id $testProcess.Id -Force
-    throw 'Expected RED: value-table waiter hung after exception reset'
+if ($testProcess.WaitForExit(15000)) {
+    throw "RED was not reproduced; test exited with code $($testProcess.ExitCode). The race may not have materialized on this run."
 }
-if ($testProcess.ExitCode -eq 0) {
-    throw 'Expected the exception-reset regression to fail before the fix'
-}
+Stop-Process -Id $testProcess.Id -Force
+Write-Host 'RED confirmed: value-table waiter remained blocked after exception reset'
 ```
 
-Expected: the new regression fails or the bounded process run detects the lost wakeup. It must not be allowed to hang the implementation session indefinitely.
+Expected RED: the test process remains blocked until the 15-second outer ceiling kills it. A normal exit, including exit code zero, does not confirm this defect; it means the lost-wakeup race did not materialize on that run (or a different failure occurred and must be inspected). Retry the bounded run or strengthen the waiter synchronization rather than treating a pass as evidence that the bug is absent. The test must not be allowed to hang the implementation session indefinitely.
 
 - [ ] **Step 3: Fix the value-returning exception reset order only**
 
@@ -393,29 +391,17 @@ git commit -m "feat: define deterministic GA contracts"
 
 - [ ] **Step 1: Add seed-material and partition tests**
 
-Pin this exact key and material:
+Start with behavioral RED tests that do not assume a golden vector from code that has not been implemented. Create two engines for every domain and assert their first eight outputs agree for identical keys. Assert that changing each key component independently—seed, phase, generation, domain, and logical stream—changes the observed sequence. Capture a later-key normal-breeding sequence, exhaust a cataclysm and an elite-perturbation engine, then recreate the later-key normal engine and assert its sequence is unchanged; recovery draws must not shift normal-breeding streams.
+
+Pin the independently derivable partition shape:
 
 ```cpp
-constexpr auto material = detail::deterministic_seed_material(
-    0x0123456789abcdefULL,
-    2,
-    7,
-    detail::deterministic_rng_domain::normal_breeding,
-    3);
-static_assert(material == std::array<std::uint32_t, 16>{
-    0x739cd088U, 0xb7d9ab74U, 0xf5c06ebaU, 0x114cefd2U,
-    0x6d7c2359U, 0x1a2a3647U, 0x27d18387U, 0xe681427bU,
-    0x93521029U, 0x0cee4d77U, 0x69e28142U, 0x1379bc46U,
-    0x23b71f49U, 0x0402ca23U, 0xd202bfc0U, 0x08eb8139U });
-
 static_assert(detail::logical_chunk_count(0, 8) == 0);
 static_assert(detail::logical_chunk_count(7, 4) == 4);
 static_assert(detail::logical_chunk_count(7, 16) == 7);
 static_assert(detail::logical_chunk_bounds(7, 4, 0) == std::pair{ 0uz, 2uz });
 static_assert(detail::logical_chunk_bounds(7, 4, 3) == std::pair{ 6uz, 7uz });
 ```
-
-Also create two engines for every domain and assert their first eight outputs match for identical keys and differ for a changed phase, generation, domain, or stream. Capture a later-key normal-breeding sequence, exhaust a cataclysm and an elite-perturbation engine, then recreate the later-key normal engine and assert its sequence is unchanged; recovery draws must not shift normal-breeding streams.
 
 - [ ] **Step 2: Build Debug and confirm RED on missing deterministic stream helpers**
 
@@ -450,7 +436,25 @@ Use canonical SplitMix64:
 
 Build the 16-word material by first applying `splitmix64(seed)`, then for each of `phase`, `generation`, `std::to_underlying(domain)`, and `logical_stream` assigning `state = splitmix64(state ^ splitmix64(component))`. For word pairs zero through seven, assign `state = splitmix64(state + pair_index)`, then emit low and high 32-bit halves. Construct `std::seed_seq` from the material and seed `std::mt19937_64` from that sequence.
 
-- [ ] **Step 4: Implement and test stable ranking**
+- [ ] **Step 4: Compute, inspect, and pin the implemented seed material**
+
+After implementing Step 3, add a temporary nonasserting diagnostic that calls `detail::deterministic_seed_material` for `(seed=0x0123456789abcdef, phase=2, generation=7, domain=normal_breeding, stream=3)` and prints all 16 words in fixed-width hexadecimal. Build Debug with `/p:RunPostBuildEvent=Never`, then run `& '.\exe\x64\Debug\yadro_test.exe'`. Inspect the complete output and independently walk the Step 3 SplitMix64 state transitions to confirm the value source. Do not obtain the vector by copying a compiler assertion failure. Remove the diagnostic, then add this regression lock using the deliberately recorded output:
+
+```cpp
+constexpr auto material = detail::deterministic_seed_material(
+    0x0123456789abcdefULL,
+    2,
+    7,
+    detail::deterministic_rng_domain::normal_breeding,
+    3);
+static_assert(material == std::array<std::uint32_t, 16>{
+    0x739cd088U, 0xb7d9ab74U, 0xf5c06ebaU, 0x114cefd2U,
+    0x6d7c2359U, 0x1a2a3647U, 0x27d18387U, 0xe681427bU,
+    0x93521029U, 0x0cee4d77U, 0x69e28142U, 0x1379bc46U,
+    0x23b71f49U, 0x0402ca23U, 0xd202bfc0U, 0x08eb8139U });
+```
+
+- [ ] **Step 5: Implement and test stable ranking**
 
 Add a deterministic-only sorter:
 
@@ -469,7 +473,7 @@ Do not change legacy `sort_population(size_t)`. Add a constant-fitness test with
 
 Pin tournament tie behavior by creating two identical deterministic engines. Use the first engine and `std::uniform_int_distribution<size_t>{0, fitnesses.size() - 1}` to capture the first sampled index. Pass the second engine, an all-equal fitness vector, and `k > 1` to `detail::tournament_select`; assert it returns that first sampled index.
 
-- [ ] **Step 5: Implement deterministic initialization and breeding helpers**
+- [ ] **Step 6: Implement deterministic initialization and breeding helpers**
 
 Initialization copies the current population into a candidate, stably ranks before truncating, and fills missing indices from the `initial_population` stream keyed by `(seed, phase, 0, domain, 0)`. It does not mutate `population_` until Task 4 admits and evaluates the candidate.
 
@@ -483,13 +487,13 @@ const size_t stream_count = detail::logical_chunk_count(
 
 Copy elites in rank order. Each logical stream owns the exact contiguous range from `logical_chunk_bounds`, creates one `normal_breeding` engine keyed by phase, phase-local generation, and logical stream, and fills `next[elite_n + offspring_index]`. The serial helper calls the same implementation with logical thread count one. The parallel helper submits one task per active logical stream and drains futures in logical-stream order. Neither helper reads `detail::thread_rng()`.
 
-- [ ] **Step 6: Run stream and breeding reproducibility tests**
+- [ ] **Step 7: Run stream and breeding reproducibility tests**
 
 Add a test that calls deterministic breeding twice with the same fixed evaluated population and compares every chromosome. Submit unrelated tasks to a four-thread pool between calls and confirm the result stays identical. For seven offspring, compare the results from eight- and sixteen-thread pools and confirm they match because both use seven active logical streams.
 
 Run Debug and Release builds. Expected: all tests pass; legacy GA tests remain unchanged.
 
-- [ ] **Step 7: Commit Task 3**
+- [ ] **Step 8: Commit Task 3**
 
 ```powershell
 git add -- algorithm/genetic_optimization.h test/algorithm_test.cpp
@@ -628,7 +632,7 @@ struct deterministic_phase_outcome {
 };
 ```
 
-Use `std::map<hash128_t, size_t>` while scanning candidate indices so grouping and representatives are canonical. Normalize raw key `(0, 0)` to `(1, 0)` before grouping, matching the memo table. If memoization is disabled, append one nonmemo group per unevaluated index.
+Scan candidate indices in ascending order and append each first-seen group directly to the plan vector. Use `std::map<hash128_t, size_t>` only as a key-to-plan-position lookup side table; never iterate the map to construct or reorder the plan. This preserves ascending representative-index order for lookup, submission, future draining, memo insertion, and lowest-index exception selection. Normalize raw key `(0, 0)` to `(1, 0)` before grouping, matching the memo table. If memoization is disabled, append one nonmemo group per unevaluated index.
 
 - [ ] **Step 4: Implement counter-neutral planning and admission**
 
@@ -709,6 +713,10 @@ while (true) {
     const stop_reason reason = should_stop_or_cataclysm(
         compute_stagnation_limit(run.options.evaluation_budget),
         elite_count(population_size), decision_rng);
+    if (reason == stop_reason::cataclysm
+        || reason == stop_reason::elite_perturbation)
+        throw std::logic_error(
+            "deterministic recovery requires Task 6 transactional handling");
     if (is_terminal(reason))
         return deterministic_phase_outcome{
             reason, phase_generations,
@@ -732,6 +740,8 @@ while (true) {
     ++stats_.generations;
 }
 ```
+
+The temporary `logic_error` prevents the Task 4 checkpoint from returning a nominally deterministic result after the legacy helper has taken an in-place recovery path. Task 6 removes this guard when it replaces the legacy call with decision-only, domain-separated, transactional recovery.
 
 - [ ] **Step 7: Add the public serial wrapper and timeout checks**
 
@@ -898,7 +908,7 @@ For constant fitness and injected `0..7`, stop at the target check after the ini
 
 - [ ] **Step 3: Split deterministic stopping decisions from mutation**
 
-Keep target, diversity, elite convergence, and stagnation precedence identical. Add a deterministic decision helper that updates deterministic observations but returns `cataclysm` or `elite_perturbation` without mutating `population_` or incrementing recovery counters. Legacy code continues to call `should_stop_or_cataclysm` unchanged.
+Keep target, diversity, elite convergence, and stagnation precedence identical. Add a deterministic decision helper that updates deterministic observations but returns `cataclysm` or `elite_perturbation` without mutating `population_` or incrementing recovery counters. Replace the Task 4 legacy-helper call and remove its temporary recovery `logic_error`; legacy code continues to call `should_stop_or_cataclysm` unchanged.
 
 ```cpp
 struct deterministic_stop_decision {
@@ -1114,7 +1124,7 @@ Expected: both rebuilds exit 0; the complete test executable reports zero failur
 
 ```powershell
 1..3 | ForEach-Object {
-    & '.\vs\exe\yadro_test\x64\Release\yadro_test.exe'
+    & '.\exe\x64\Release\yadro_test.exe'
     if ($LASTEXITCODE -ne 0) { throw "Release reproducibility run $_ failed" }
 }
 ```
