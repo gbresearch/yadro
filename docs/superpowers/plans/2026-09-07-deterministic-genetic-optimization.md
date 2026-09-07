@@ -35,7 +35,7 @@
 - Modify `test/algorithm_test.cpp`: API, archive, stream, tie, budget, memo, scheduling, recovery, timeout, and adaptive reproducibility tests.
 - Do not modify `vs/yadro.vcxproj`, `vs/yadro_test.vcxproj`, or downstream repositories.
 
-The test executable has no per-test filter and is invoked by the Visual Studio project's post-build event. Use `/p:RunPostBuildEvent=Never` only for compile-only RED steps; every GREEN build runs the complete Yadro test executable.
+The test executable has no per-test filter and is invoked by the Visual Studio project's post-build event. Use `/p:PostBuildEventUseInBuild=false` only for compile-only RED steps; every GREEN build runs the complete Yadro test executable.
 
 ### Task 1: Add deterministic memo-table primitives and fix value-table exception wakeup
 
@@ -50,7 +50,7 @@ The test executable has no per-test filter and is invoked by the Visual Studio p
 - Produces: identical forwarding operations on `sharded_lockfree_memo_table<Hasher, Function, Value, NumShards>`.
 - Preserves: all `void`-specialization code and behavior.
 
-- [ ] **Step 1: Add the value-table exception waiter regression**
+- [x] **Step 1: Add the value-table exception waiter regression**
 
 Add `<future>` to `test/container_test.cpp`, then add this test beside `lockfree_memo_test`:
 
@@ -95,12 +95,12 @@ GB_TEST(container, lockfree_memo_exception_reset_wakes_waiter)
 }
 ```
 
-- [ ] **Step 2: Build without the post-build event, then run the old code under a process ceiling to confirm RED**
+- [x] **Step 2: Build without the post-build event, then run the old code under a process ceiling to confirm RED**
 
 ```powershell
 & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' `
   'vs\yadro.sln' /m /t:Build /p:Configuration=Debug /p:Platform=x64 `
-  /p:RunPostBuildEvent=Never /v:minimal
+  /p:PostBuildEventUseInBuild=false /v:minimal
 $testProcess = Start-Process -FilePath '.\exe\x64\Debug\yadro_test.exe' `
   -PassThru -NoNewWindow
 if ($testProcess.WaitForExit(15000)) {
@@ -112,7 +112,7 @@ Write-Host 'RED confirmed: value-table waiter remained blocked after exception r
 
 Expected RED: the test process remains blocked until the 15-second outer ceiling kills it. A normal exit, including exit code zero, does not confirm this defect; it means the lost-wakeup race did not materialize on that run (or a different failure occurred and must be inspected). Retry the bounded run or strengthen the waiter synchronization rather than treating a pass as evidence that the bug is absent. The test must not be allowed to hang the implementation session indefinitely.
 
-- [ ] **Step 3: Fix the value-returning exception reset order only**
+- [x] **Step 3: Fix the value-returning exception reset order only**
 
 Replace the value-returning catch block's notify-before-reset sequence with:
 
@@ -127,7 +127,7 @@ catch (...) {
 
 Do not make the analogous edit in `lockfree_memo_table<Hasher, Function, void>`.
 
-- [ ] **Step 4: Run the Debug build and confirm the waiter regression is GREEN**
+- [x] **Step 4: Run the Debug build and confirm the waiter regression is GREEN**
 
 ```powershell
 & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' `
@@ -136,7 +136,7 @@ Do not make the analogous edit in `lockfree_memo_table<Hasher, Function, void>`.
 
 Expected: exit code 0, the new exception-reset test passes, and the full Debug x64 suite reports zero failures.
 
-- [ ] **Step 5: Add failing plain and sharded lookup/insertion tests**
+- [x] **Step 5: Add failing plain and sharded lookup/insertion tests**
 
 Add tests that exercise miss-without-compute, hit, ready insertion, normalized zero key, collision semantics, and sharded forwarding:
 
@@ -177,13 +177,13 @@ GB_TEST(container, sharded_lockfree_memo_lookup_and_ready_insert)
 
 Also extend the blocked-computation setup from Step 1 so `try_get(21)` waits and returns the second computation after reset. Add a forced-key test using `try_get_with_hash(1, 1)` and `insert_ready_with_hash(1, 2, value)` to pin linear probing and probe exhaustion.
 
-- [ ] **Step 6: Compile and confirm the new APIs are missing**
+- [x] **Step 6: Compile and confirm the new APIs are missing**
 
 Run the Debug build command from Step 4.
 
 Expected: compile errors naming missing `try_get`, `try_get_with_hash`, and `insert_ready_with_hash` members.
 
-- [ ] **Step 7: Implement the value-returning plain-table APIs**
+- [x] **Step 7: Implement the value-returning plain-table APIs**
 
 Add `<optional>`. Reuse the existing zero-key normalization and probe sequence. The lookup implementation follows this state machine:
 
@@ -234,7 +234,7 @@ std::optional<Value> try_get_with_hash(uint64_t h_lo, uint64_t h_hi) const
 
 Implement `try_get(Args&&...)` by hashing once and forwarding. Implement `insert_ready_with_hash` with the same loop, but on a successful empty-slot claim store `h_hi`, move the value into `e.value`, publish `State::ready` with release ordering, notify waiters, and return `e.value`. A matching ready key returns its existing value; a matching computing key waits or resumes after reset. After a failed CAS, re-read the same slot rather than blindly advancing.
 
-- [ ] **Step 8: Implement sharded forwarding and run Debug and Release**
+- [x] **Step 8: Implement sharded forwarding and run Debug and Release**
 
 The sharded methods compute or accept the same `(h_lo, h_hi)`, select:
 
@@ -253,7 +253,7 @@ and forward to the selected plain value table. Do not add methods to the `void` 
 
 Expected: both commands exit 0; all container tests and the complete suites pass.
 
-- [ ] **Step 9: Commit Task 1**
+- [x] **Step 9: Commit Task 1**
 
 ```powershell
 git add -- container/lockfree_memo_table.h test/container_test.cpp
@@ -438,7 +438,7 @@ Build the 16-word material by first applying `splitmix64(seed)`, then for each o
 
 - [ ] **Step 4: Compute, inspect, and pin the implemented seed material**
 
-After implementing Step 3, add a temporary nonasserting diagnostic that calls `detail::deterministic_seed_material` for `(seed=0x0123456789abcdef, phase=2, generation=7, domain=normal_breeding, stream=3)` and prints all 16 words in fixed-width hexadecimal. Build Debug with `/p:RunPostBuildEvent=Never`, then run `& '.\exe\x64\Debug\yadro_test.exe'`. Inspect the complete output and independently walk the Step 3 SplitMix64 state transitions to confirm the value source. Do not obtain the vector by copying a compiler assertion failure. Remove the diagnostic, then add this regression lock using the deliberately recorded output:
+After implementing Step 3, add a temporary nonasserting diagnostic that calls `detail::deterministic_seed_material` for `(seed=0x0123456789abcdef, phase=2, generation=7, domain=normal_breeding, stream=3)` and prints all 16 words in fixed-width hexadecimal. Build Debug with `/p:PostBuildEventUseInBuild=false`, then run `& '.\exe\x64\Debug\yadro_test.exe'`. Inspect the complete output and independently walk the Step 3 SplitMix64 state transitions to confirm the value source. Do not obtain the vector by copying a compiler assertion failure. Remove the diagnostic, then add this regression lock using the deliberately recorded output:
 
 ```cpp
 constexpr auto material = detail::deterministic_seed_material(
