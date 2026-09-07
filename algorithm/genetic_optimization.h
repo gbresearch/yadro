@@ -41,6 +41,7 @@
 #include <utility>
 #include <optional>
 #include <filesystem>
+#include <format>
 #include <limits>
 #include <stdexcept>
 #include <concepts>
@@ -1132,6 +1133,55 @@ namespace gb::yadro::algorithm::conv {
     // SECTION 4 — Configuration, Stats, Stop Reason
     // =============================================================================
 
+    struct deterministic_ga_options {
+        std::uint64_t seed;
+        std::size_t generation_budget;
+        std::size_t evaluation_budget;
+        std::chrono::nanoseconds failure_timeout;
+
+        constexpr deterministic_ga_options(
+            std::uint64_t seed,
+            std::size_t generation_budget,
+            std::size_t evaluation_budget,
+            std::chrono::nanoseconds failure_timeout) noexcept
+            : seed(seed)
+            , generation_budget(generation_budget)
+            , evaluation_budget(evaluation_budget)
+            , failure_timeout(failure_timeout)
+        {
+        }
+
+        auto operator<=>(const deterministic_ga_options&) const = default;
+    };
+
+    class genetic_optimization_timeout : public std::runtime_error {
+    public:
+        genetic_optimization_timeout(
+            std::chrono::nanoseconds timeout,
+            std::chrono::nanoseconds elapsed)
+            : std::runtime_error(std::format(
+                "deterministic genetic optimization exceeded failure timeout "
+                "(limit={}ns, elapsed={}ns)", timeout.count(), elapsed.count()))
+            , timeout_(timeout)
+            , elapsed_(elapsed)
+        {
+        }
+
+        [[nodiscard]] std::chrono::nanoseconds timeout() const noexcept
+        {
+            return timeout_;
+        }
+
+        [[nodiscard]] std::chrono::nanoseconds elapsed() const noexcept
+        {
+            return elapsed_;
+        }
+
+    private:
+        std::chrono::nanoseconds timeout_;
+        std::chrono::nanoseconds elapsed_;
+    };
+
     struct ga_config {
         double mutation_rate = 0.15;
         double crossover_rate = 0.80;
@@ -1338,6 +1388,8 @@ namespace gb::yadro::algorithm::conv {
         elite_converged, ///< Criterion 4: elite mean within epsilon of single best
         cataclysm,        ///< Criterion 2 fired cataclysm — NOT terminal, execution continues
         elite_perturbation,  // non-terminal, like cataclysm for elites
+        generation_budget,   ///< Deterministic generation budget exhausted
+        evaluation_budget,   ///< Deterministic target-function call budget exhausted
     };
 
     [[nodiscard]] constexpr bool is_terminal(stop_reason r) noexcept {
@@ -1464,6 +1516,11 @@ namespace gb::yadro::algorithm::conv {
     // SECTION 6 — Internal Helpers (detail namespace)
     // =============================================================================
     namespace detail {
+
+        template<typename ThreadPool>
+        concept DeterministicThreadPool = requires(ThreadPool& tp) {
+            { tp.thread_count() } -> std::convertible_to<std::size_t>;
+        };
 
         inline std::mt19937_64& thread_rng() {
             thread_local std::mt19937_64 rng{
@@ -1647,6 +1704,8 @@ namespace gb::yadro::algorithm::conv {
             case stop_reason::elite_converged: return "elite_converged";
             case stop_reason::cataclysm:       return "cataclysm (non-terminal)";
             case stop_reason::elite_perturbation:  return "elite_perturbation (non-terminal)";
+            case stop_reason::generation_budget: return "generation_budget";
+            case stop_reason::evaluation_budget: return "evaluation_budget";
             default:                           return "unknown";
             }
         }
@@ -1688,6 +1747,12 @@ namespace gb::yadro::algorithm::conv {
                     "was replaced with random chromosomes to escape a potential local "
                     "basin. The search continues. Becomes terminal once "
                     "max_elite_perturbation_count is reached.";
+            case stop_reason::generation_budget:
+                return "The deterministic generation budget was exhausted after all "
+                    "committed generations were fully evaluated.";
+            case stop_reason::evaluation_budget:
+                return "The deterministic target-function evaluation budget could not "
+                    "admit another complete generation.";
             default:
                 return "Unknown stop reason.";
             }

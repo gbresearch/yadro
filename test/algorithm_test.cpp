@@ -54,6 +54,76 @@ namespace
         static_assert(std::three_way_comparable<optimization_stats>);
     }
 
+    GB_TEST(algorithm, deterministic_genetic_optimization_public_contracts,
+        std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+        using namespace std::chrono_literals;
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        static_assert(!std::default_initializable<deterministic_ga_options>);
+        static_assert(cdetail::DeterministicThreadPool<gb::yadro::async::threadpool>);
+        static_assert(!cdetail::DeterministicThreadPool<std::size_t>);
+        static_assert(static_cast<std::uint8_t>(stop_reason::elite_perturbation) == 8);
+        static_assert(static_cast<std::uint8_t>(stop_reason::generation_budget) == 9);
+        static_assert(static_cast<std::uint8_t>(stop_reason::evaluation_budget) == 10);
+
+        const deterministic_ga_options options{ 17, 4, 100, 2s };
+        gbassert(options.seed == 17);
+        gbassert(options.generation_budget == 4);
+        gbassert(options.evaluation_budget == 100);
+        gbassert(options.failure_timeout == 2s);
+
+        const genetic_optimization_timeout timeout{ 1s, 1500ms };
+        gbassert(timeout.timeout() == 1s);
+        gbassert(timeout.elapsed() == 1500ms);
+        gbassert(std::string_view{ timeout.what() }.contains(
+            "deterministic genetic optimization"));
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_preserves_archive_layout,
+        std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto verify_legacy_round_trip = [](stop_reason reason) {
+            auto optimizer = genetic_optimization_t(
+                [](int value) { return value * value; },
+                std::less<int>{},
+                discrete_value_range<int>({ -1, 0, 1 }));
+
+            ga_config config;
+            adaptive_phase_config adaptive;
+            stopping_criteria stopping;
+            optimization_stats stats;
+            stats.last_stop_reason = reason;
+            using chromosome_t = std::tuple<int>;
+            using history_t = optimization_history<
+                chromosome_t, int, std::less<int>>;
+            history_t history{
+                std::numeric_limits<std::size_t>::max(), std::less<int>{} };
+            std::vector<std::pair<chromosome_t, std::optional<int>>> population;
+            std::optional<int> target;
+            std::optional<int> previous_best;
+            std::size_t function_calls = 0;
+            std::size_t requests = 0;
+
+            gb::yadro::archive::omem_archive<> legacy;
+            legacy(config, adaptive, stopping, stats, history, population, target,
+                previous_best, function_calls, requests);
+            gb::yadro::archive::imem_archive<> input{ legacy };
+            input(optimizer);
+
+            gbassert(optimizer.config == config);
+            gbassert(optimizer.stats() == stats);
+            gbassert(optimizer.stats().last_stop_reason == reason);
+            gbassert(optimizer.pop_size() == 0);
+        };
+
+        verify_legacy_round_trip(stop_reason::generation_budget);
+        verify_legacy_round_trip(stop_reason::evaluation_budget);
+    }
+
     // Detection trait the optimizer uses to recognise container wrappers; must
     // key on the public tag, not a private member (finding 6.A).
     template<class W>
