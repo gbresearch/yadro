@@ -41,6 +41,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <random>
 #include <thread>
 #include <barrier>
@@ -607,6 +608,151 @@ namespace
 
             gbassert(table.get_or_compute(999) == 0); // always returns the first value
         }
+    }
+
+    GB_TEST(container, lockfree_memo_exception_reset_wakes_waiter)
+    {
+        using namespace std::chrono_literals;
+        using hasher = gb::yadro::util::xxhash128;
+
+        std::atomic<int> calls{ 0 };
+        std::atomic<bool> leader_entered{ false };
+        std::atomic<bool> release_leader{ false };
+        std::atomic<bool> waiter_started{ false };
+
+        lockfree_memo_table table(16,
+            [&](int value) -> int {
+                const int call = calls.fetch_add(1, std::memory_order_relaxed);
+                if (call == 0) {
+                    leader_entered.store(true, std::memory_order_release);
+                    leader_entered.notify_all();
+                    release_leader.wait(false, std::memory_order_acquire);
+                    throw std::runtime_error("leader failure");
+                }
+                return value * 2;
+            }, hasher{}, 8);
+
+        auto leader = std::async(std::launch::async, [&] {
+            return table.get_or_compute(21);
+        });
+        leader_entered.wait(false, std::memory_order_acquire);
+
+        auto waiter = std::async(std::launch::async, [&] {
+            waiter_started.store(true, std::memory_order_release);
+            waiter_started.notify_all();
+            return table.get_or_compute(21);
+        });
+        waiter_started.wait(false, std::memory_order_acquire);
+        std::this_thread::sleep_for(20ms);
+
+        release_leader.store(true, std::memory_order_release);
+        release_leader.notify_all();
+
+        must_throw<std::runtime_error>([&] { (void)leader.get(); });
+        gbassert(waiter.wait_for(1s) == std::future_status::ready);
+        gbassert(waiter.get() == 42);
+        gbassert(calls.load(std::memory_order_relaxed) == 2);
+    }
+
+    GB_TEST(container, lockfree_memo_lookup_and_ready_insert)
+    {
+        using hasher = gb::yadro::util::xxhash128;
+        std::atomic<int> calls{ 0 };
+        lockfree_memo_table table(16,
+            [&](int value) {
+                calls.fetch_add(1, std::memory_order_relaxed);
+                return value * 10;
+            }, hasher{}, 8);
+
+        gbassert(!table.try_get(4));
+        gbassert(calls.load(std::memory_order_relaxed) == 0);
+
+        auto [h_lo, h_hi] = hasher{}(4);
+        gbassert(table.insert_ready_with_hash(h_lo, h_hi, 41) == 41);
+        gbassert(table.try_get(4) == 41);
+        gbassert(table.get_or_compute(4) == 41);
+        gbassert(calls.load(std::memory_order_relaxed) == 0);
+
+        gbassert(table.insert_ready_with_hash(0, 0, 7) == 7);
+        gbassert(table.try_get_with_hash(0, 0) == 7);
+    }
+
+    GB_TEST(container, lockfree_memo_try_get_waits_for_computing_reset)
+    {
+        using namespace std::chrono_literals;
+        using hasher = gb::yadro::util::xxhash128;
+
+        std::atomic<int> calls{ 0 };
+        std::atomic<bool> leader_entered{ false };
+        std::atomic<bool> release_leader{ false };
+        lockfree_memo_table table(16,
+            [&](int value) -> int {
+                const int call = calls.fetch_add(1, std::memory_order_relaxed);
+                if (call == 0) {
+                    leader_entered.store(true, std::memory_order_release);
+                    leader_entered.notify_all();
+                    release_leader.wait(false, std::memory_order_acquire);
+                    throw std::runtime_error("leader failure");
+                }
+                return value * 2;
+            }, hasher{}, 8);
+
+        auto leader = std::async(std::launch::async, [&] {
+            return table.get_or_compute(21);
+        });
+        leader_entered.wait(false, std::memory_order_acquire);
+
+        auto lookup = std::async(std::launch::async, [&] {
+            return table.try_get(21);
+        });
+        const bool lookup_waited =
+            lookup.wait_for(20ms) == std::future_status::timeout;
+
+        release_leader.store(true, std::memory_order_release);
+        release_leader.notify_all();
+        must_throw<std::runtime_error>([&] { (void)leader.get(); });
+
+        gbassert(lookup_waited);
+        gbassert(lookup.wait_for(1s) == std::future_status::ready);
+        gbassert(!lookup.get());
+        gbassert(calls.load(std::memory_order_relaxed) == 1);
+        gbassert(table.get_or_compute(21) == 42);
+        gbassert(calls.load(std::memory_order_relaxed) == 2);
+    }
+
+    GB_TEST(container, lockfree_memo_ready_insert_preserves_collision_probing)
+    {
+        using hasher = gb::yadro::util::xxhash128;
+        auto fn = [](int value) { return value; };
+
+        lockfree_memo_table table(8, fn, hasher{}, 2);
+        gbassert(table.insert_ready_with_hash(1, 1, 11) == 11);
+        gbassert(table.insert_ready_with_hash(1, 2, 12) == 12);
+        gbassert(table.try_get_with_hash(1, 1) == 11);
+        gbassert(table.try_get_with_hash(1, 2) == 12);
+
+        lockfree_memo_table limited(8, fn, hasher{}, 1);
+        gbassert(limited.insert_ready_with_hash(1, 1, 21) == 21);
+        must_throw<std::runtime_error>([&] {
+            (void)limited.insert_ready_with_hash(1, 2, 22);
+        });
+        must_throw<std::runtime_error>([&] {
+            (void)limited.try_get_with_hash(1, 2);
+        });
+    }
+
+    GB_TEST(container, sharded_lockfree_memo_lookup_and_ready_insert)
+    {
+        using hasher = gb::yadro::util::xxhash128;
+        auto fn = [](int value) { return value * 2; };
+        sharded_lockfree_memo_table<hasher, decltype(fn), int, 8>
+            table(64, fn, hasher{}, 8);
+
+        gbassert(!table.try_get(9));
+        auto [h_lo, h_hi] = table.get_hasher()(9);
+        gbassert(table.insert_ready_with_hash(h_lo, h_hi, 99) == 99);
+        gbassert(table.try_get(9) == 99);
+        gbassert(table.get_or_compute(9) == 99);
     }
 
     GB_TEST(container, sharded_lockfree_memo_test)

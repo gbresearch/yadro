@@ -32,6 +32,7 @@
 #include <cassert>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <concepts>
@@ -129,6 +130,137 @@ namespace gb::yadro::container
 
         const Hasher& get_hasher() const { return hasher_; }
 
+        // Lookup-only variant. It neither claims a slot nor invokes func_.
+        template<typename... Args>
+            requires HashFunctor<Hasher, std::remove_cvref_t<Args>...>
+        std::optional<Value> try_get(Args&&... args) const
+        {
+            auto [h_lo, h_hi] = std::invoke(hasher_, args...);
+            return try_get_with_hash(h_lo, h_hi);
+        }
+
+        std::optional<Value> try_get_with_hash(uint64_t h_lo, uint64_t h_hi) const
+        {
+            if ((h_lo | h_hi) == 0) {
+                h_lo = 1;
+            }
+
+            size_t idx = mix64(h_lo) & mask_;
+            for (size_t probe = 0; probe < max_probe_; ++probe) {
+                Entry& e = table_[idx];
+                const uint64_t existing = e.h_lo.load(std::memory_order_acquire);
+
+                if (existing == 0) {
+                    return std::nullopt;
+                }
+                if (existing != h_lo) {
+                    idx = (idx + 1) & mask_;
+                    continue;
+                }
+
+                State current_state = e.state.load(std::memory_order_acquire);
+                while (current_state == State::empty) {
+                    if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                        goto next_lookup_probe;
+                    }
+                    e.state.wait(State::empty, std::memory_order_acquire);
+                    current_state = e.state.load(std::memory_order_acquire);
+                }
+
+                if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
+                    goto next_lookup_probe;
+                }
+
+                while (current_state == State::computing) {
+                    e.state.wait(State::computing, std::memory_order_acquire);
+                    current_state = e.state.load(std::memory_order_acquire);
+                    if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                        goto next_lookup_probe;
+                    }
+                }
+
+                if (current_state == State::ready
+                    && e.h_lo.load(std::memory_order_acquire) == h_lo
+                    && e.h_hi.load(std::memory_order_acquire) == h_hi) {
+                    return e.value;
+                }
+
+            next_lookup_probe:
+                idx = (idx + 1) & mask_;
+            }
+
+            throw std::runtime_error("hash table probe limit exceeded");
+        }
+
+        // Inserts a pre-computed ready value without invoking func_.
+        Value insert_ready_with_hash(uint64_t h_lo, uint64_t h_hi, Value value) const
+        {
+            if ((h_lo | h_hi) == 0) {
+                h_lo = 1;
+            }
+
+            size_t idx = mix64(h_lo) & mask_;
+            for (size_t probe = 0; probe < max_probe_; ++probe) {
+                Entry& e = table_[idx];
+
+                for (;;) {
+                    uint64_t existing = e.h_lo.load(std::memory_order_acquire);
+                    if (existing == 0) {
+                        if (e.h_lo.compare_exchange_strong(
+                            existing, h_lo,
+                            std::memory_order_acq_rel,
+                            std::memory_order_acquire))
+                        {
+                            e.h_hi.store(h_hi, std::memory_order_relaxed);
+                            e.value = std::move(value);
+                            e.state.store(State::ready, std::memory_order_release);
+                            e.state.notify_all();
+                            return e.value;
+                        }
+                        continue; // Re-read this slot after a failed claim.
+                    }
+
+                    if (existing != h_lo) {
+                        break;
+                    }
+
+                    State current_state = e.state.load(std::memory_order_acquire);
+                    while (current_state == State::empty) {
+                        if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                            break;
+                        }
+                        e.state.wait(State::empty, std::memory_order_acquire);
+                        current_state = e.state.load(std::memory_order_acquire);
+                    }
+                    if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                        continue;
+                    }
+                    if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
+                        break;
+                    }
+
+                    while (current_state == State::computing) {
+                        e.state.wait(State::computing, std::memory_order_acquire);
+                        current_state = e.state.load(std::memory_order_acquire);
+                        if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                            break;
+                        }
+                    }
+                    if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                        continue;
+                    }
+                    if (current_state == State::ready
+                        && e.h_hi.load(std::memory_order_acquire) == h_hi) {
+                        return e.value;
+                    }
+                }
+
+                idx = (idx + 1) & mask_;
+            }
+
+            throw std::runtime_error("hash table probe limit exceeded");
+        }
+
         // Variant that accepts pre-computed hash
         template<typename... Args>
             requires HashFunctor<Hasher, std::remove_cvref_t<Args>...>&&
@@ -179,12 +311,10 @@ namespace gb::yadro::container
                             return e.value;
                         }
                         catch (...) {
-                            // Notify waiters first
-                            e.state.notify_all();
-
-                            // Reset slot for retry
+                            // Publish the complete reset before waking waiters.
                             e.state.store(State::empty, std::memory_order_relaxed);
                             e.h_lo.store(0, std::memory_order_release);
+                            e.state.notify_all();
                             throw;
                         }
                     }
@@ -548,6 +678,27 @@ namespace gb::yadro::container
                     h_hi,
                     std::forward<Args>(args)...
                 );
+            }
+
+            template<typename... Args>
+                requires HashFunctor<Hasher, std::remove_cvref_t<Args>...>
+            std::optional<Value> try_get(Args&&... args) const
+            {
+                auto [h_lo, h_hi] = std::invoke(hasher_, args...);
+                return try_get_with_hash(h_lo, h_hi);
+            }
+
+            std::optional<Value> try_get_with_hash(uint64_t h_lo, uint64_t h_hi) const
+            {
+                const size_t shard_idx = mix64(h_hi) & ShardMask;
+                return shards_[shard_idx]->try_get_with_hash(h_lo, h_hi);
+            }
+
+            Value insert_ready_with_hash(uint64_t h_lo, uint64_t h_hi, Value value) const
+            {
+                const size_t shard_idx = mix64(h_hi) & ShardMask;
+                return shards_[shard_idx]->insert_ready_with_hash(
+                    h_lo, h_hi, std::move(value));
             }
 
             /**
