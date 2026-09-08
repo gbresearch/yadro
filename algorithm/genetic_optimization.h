@@ -528,9 +528,13 @@
 //        100'000);
 //
 //    Parallelism covers both fitness evaluation and offspring breeding.
-//    Each worker thread uses its own per-thread RNG (detail::thread_rng()),
-//    seeded from std::random_device XOR std::hash<std::thread::id>.  No
-//    shared mutable RNG state exists between worker threads.
+//    LEGACY MODE ONLY: each worker thread uses its own per-thread RNG
+//    (detail::thread_rng()), seeded from std::random_device XOR
+//    std::hash<std::thread::id>.  No shared mutable RNG state exists
+//    between worker threads, but results therefore depend on which
+//    physical worker runs which task.  The duration-based overloads are
+//    NOT reproducible, and passing a seed to them cannot make them so.
+//    Use the deterministic overloads below for reproducible runs.
 //
 //  Parameters
 //    duration          Time budget.  The optimizer will not start a new
@@ -549,6 +553,92 @@
 //    std::pair<optimization_stats, optimization_history<...>>
 //    The history is a snapshot taken at the end of the run and is safe to
 //    use after the optimizer object is destroyed.
+//
+// ============================================================================
+// DETERMINISTIC OPTIMIZE() - OPT-IN, BUDGET DRIVEN
+// ============================================================================
+//
+//   The deterministic overloads take a deterministic_ga_options instead of a
+//   duration and max_tries.  They guarantee identical completed results for
+//   the same starting optimizer state, seed, options, GA/stopping/wrapper
+//   configuration, fitness results, and logical thread count.
+//
+//     auto [stats, history] = opt.optimize(
+//         deterministic_ga_options{
+//             0x123456789abcdef0ULL,      // seed
+//             250,                        // generation_budget
+//             100'000,                    // evaluation_budget
+//             std::chrono::minutes{ 10 }  // failure_timeout
+//         },
+//         200,                            // population_size
+//         50);                            // max_history (default: unlimited)
+//
+//     auto [stats, history] = opt.optimize(   // parallel
+//         thread_pool,
+//         deterministic_ga_options{ seed, 250, 100'000, 10min }, 200, 50);
+//
+//     auto [stats, history] = opt.optimize(   // adaptive, 4 phases
+//         thread_pool, 4,
+//         deterministic_ga_options{ seed, 250, 100'000, 10min }, 200, 50);
+//
+//   Budgets vs. the failure ceiling
+//     generation_budget  Maximum fully evaluated generations committed by one
+//                        call.  Completing the initial population is not a
+//                        generation.  Exhausting it stops with
+//                        stop_reason::generation_budget.
+//     evaluation_budget  Maximum target-function invocations started by one
+//                        call.  Memo hits consume none.  A candidate generation
+//                        that does not fit is discarded whole and the call stops
+//                        with stop_reason::evaluation_budget.
+//     failure_timeout    An OPERATIONAL CEILING, not a search budget.  It never
+//                        selects a successful result: reaching it throws
+//                        genetic_optimization_timeout after in-flight target
+//                        calls drain, and never records stop_reason::deadline.
+//                        It cannot interrupt one blocking fitness call.
+//     Both budgets are per public call.  Returned counters stay cumulative.
+//
+//   Logical random streams
+//     No deterministic random decision depends on physical thread identity or
+//     task scheduling.  Every engine is derived from the stable stream key
+//     (seed, phase, generation, operation_domain, logical_stream) through a
+//     repository-owned SplitMix64 expansion.  The initial-population,
+//     normal-breeding, cataclysm, and elite-perturbation domains are distinct,
+//     so draws added to one operation cannot shift another's stream.  Parallel
+//     breeding uses min(num_offspring, logical_thread_count) active streams over
+//     a fixed contiguous partition of the offspring indices, so task stealing
+//     and completion order cannot change the output.  Thread counts at or above
+//     num_offspring produce the same partition.
+//
+//   Ties, evaluation, and commits
+//     Ranking is a stable full ordering (never nth_element), so equivalent
+//     fitness keeps the prior canonical order; tournament selection retains the
+//     first sampled candidate on a tie.  History keeps try_insert's existing
+//     lower_bound polarity.  Evaluation is planned in ascending population
+//     index, grouped by the memo table's normalized 128-bit key, admitted
+//     against the budget before any target call, and applied in ascending
+//     representative index; the controller alone writes the memo, in that same
+//     order.  Multiple failures rethrow the lowest representative index.  A
+//     generation is committed only when it is fully evaluated.
+//
+//   Preconditions on the fitness function
+//     It must return the same value for the same chromosome, must not depend on
+//     time, worker identity, invocation order, or mutable shared state, and must
+//     be safe for the selected parallel execution.  Violating these preconditions
+//     is outside the reproducibility guarantee.
+//
+//   Exclusions
+//     - optimization_stats::elapsed is observational and excluded.
+//     - Changing the logical thread count may change results; each count is
+//       independently reproducible.
+//     - Cross-toolchain, cross-standard-library, cross-architecture, and altered
+//       floating-point-mode reproducibility are not promised.
+//     - deterministic_ga_options is transient: it is not part of ga_config, is
+//       not serialized, and is not printed by report().  The memo table is not
+//       serialized either, so a loaded optimizer is not equivalent to the
+//       original in-memory state.
+//     - Grouping inherits the memo table's existing 128-bit key-collision
+//       semantics; this change does not correct them.
+//
 //
 // ── Warm restart ──────────────────────────────────────────────────────────
 //

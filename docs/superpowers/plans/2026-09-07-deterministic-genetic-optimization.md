@@ -1077,7 +1077,7 @@ Expected: direct/one-phase identity and repeated adaptive parallel runs pass.
 - Documents all public deterministic overloads, budgets, stream identity, tie policy, memo behavior, timeout failure, and reproducibility exclusions.
 - Produces no new runtime interface beyond Tasks 1-7.
 
-- [ ] **Step 1: Update the header's public design commentary**
+- [x] **Step 1: Update the header's public design commentary**
 
 Add complete serial, parallel, and adaptive deterministic examples using:
 
@@ -1095,11 +1095,11 @@ auto [stats, history] = optimizer.optimize(
 
 State that legacy overloads use physical thread-local RNGs; deterministic overloads use logical streams. Document per-call budget semantics, full-generation admission, memo-key collision inheritance, stable tie ordering, controller memo insertion, target purity, elapsed exclusion, same-thread-count guarantee, cross-toolchain exclusion, and serialization exclusion.
 
-- [ ] **Step 2: Update report text and exhaustiveness checks**
+- [x] **Step 2: Update report text and exhaustiveness checks**
 
 Ensure both budget stop reasons have names and descriptions, timeout never records `deadline`, and the report does not retain or print transient seed/options. Compile with warnings-as-errors so missing enum switch cases or unreachable overloads fail the build.
 
-- [ ] **Step 3: Run archive and API compatibility checks**
+- [x] **Step 3: Run archive and API compatibility checks**
 
 Run the complete Debug suite and confirm the manual legacy archive test passes. Inspect the serialized call in `genetic_optimization_t::serialize` and verify its argument order is unchanged:
 
@@ -1110,7 +1110,7 @@ target_fitness, prev_best_, fn_call_count_, total_eval_requests_
 
 Use `git diff 1b37273 -- algorithm/genetic_optimization.h` to verify no deterministic options, RNG cursor, deadline, or memo contents entered serialization.
 
-- [ ] **Step 4: Run full Debug and Release verification**
+- [x] **Step 4: Run full Debug and Release verification**
 
 ```powershell
 & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' `
@@ -1121,7 +1121,7 @@ Use `git diff 1b37273 -- algorithm/genetic_optimization.h` to verify no determin
 
 Expected: both rebuilds exit 0; the complete test executable reports zero failures in both configurations.
 
-- [ ] **Step 5: Run Release reproducibility stress three times**
+- [x] **Step 5: Run Release reproducibility stress three times**
 
 ```powershell
 1..3 | ForEach-Object {
@@ -1132,7 +1132,7 @@ Expected: both rebuilds exit 0; the complete test executable reports zero failur
 
 Expected: all three complete suites exit 0 with identical deterministic-GA assertions despite scheduling variation.
 
-- [ ] **Step 6: Perform final source and repository checks**
+- [x] **Step 6: Perform final source and repository checks**
 
 ```powershell
 git diff --check
@@ -1149,7 +1149,7 @@ Inspect every deterministic call site reported by the first search: deterministi
 
 Review against every acceptance criterion in the spec, with special attention to archive layout, exception reset ordering, memo insertion order, discarded-candidate counters, tie polarity, one-phase identity, and scheduling stress. Apply technically valid findings with fresh red/green cycles before the final commit.
 
-- [ ] **Step 8: Commit the final documentation and verification adjustments**
+- [x] **Step 8: Commit the final documentation and verification adjustments**
 
 ```powershell
 git add -- algorithm/genetic_optimization.h container/lockfree_memo_table.h `
