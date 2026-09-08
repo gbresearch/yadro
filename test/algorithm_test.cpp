@@ -61,6 +61,77 @@ namespace
         }
     };
 
+    struct counting_deterministic_thread_pool {
+        explicit counting_deterministic_thread_pool(std::size_t thread_count)
+            : pool(thread_count)
+        {
+        }
+
+        [[nodiscard]] std::size_t thread_count() const noexcept
+        {
+            return pool.thread_count();
+        }
+
+        template<typename F>
+        [[nodiscard]] auto operator()(F&& function)
+        {
+            submissions.fetch_add(1, std::memory_order_relaxed);
+            return pool(std::forward<F>(function));
+        }
+
+        gb::yadro::async::threadpool pool;
+        std::atomic<std::size_t> submissions{ 0 };
+    };
+
+    struct rejecting_breeding_thread_pool {
+        rejecting_breeding_thread_pool(
+            std::size_t thread_count, std::size_t reject_submission)
+            : pool(thread_count), reject_submission(reject_submission)
+        {
+        }
+
+        [[nodiscard]] std::size_t thread_count() const noexcept
+        {
+            return pool.thread_count();
+        }
+
+        template<typename F>
+        [[nodiscard]] auto operator()(F&& function)
+        {
+            const std::size_t submission =
+                submissions.fetch_add(1, std::memory_order_relaxed) + 1;
+            submissions.notify_all();
+            if (submission == reject_submission) {
+                throw std::runtime_error("rejected breeding submission");
+            }
+
+            using result_t = std::invoke_result_t<F&>;
+            if constexpr (std::is_void_v<result_t>) {
+                return pool([this,
+                    function = std::forward<F>(function)]() mutable {
+                        breeding_started.fetch_add(1, std::memory_order_relaxed);
+                        breeding_started.notify_all();
+                        release_breeding.wait(false, std::memory_order_acquire);
+                        // The fixture deliberately does not invoke the breeding
+                        // callable. A submission failure must be rethrown after
+                        // accepted work is drained, so its result is discarded.
+                        breeding_completed.fetch_add(1, std::memory_order_relaxed);
+                        breeding_completed.notify_all();
+                    });
+            }
+            else {
+                return pool(std::forward<F>(function));
+            }
+        }
+
+        gb::yadro::async::threadpool pool;
+        const std::size_t reject_submission;
+        std::atomic<std::size_t> submissions{ 0 };
+        std::atomic<std::size_t> breeding_started{ 0 };
+        std::atomic<std::size_t> breeding_completed{ 0 };
+        std::atomic<bool> release_breeding{ false };
+    };
+
     GB_TEST(algorithm, genetic_optimization_value_types_are_three_way_comparable, std::launch::deferred)
     {
         using namespace gb::yadro::algorithm::conv;
@@ -1081,6 +1152,155 @@ namespace
             lhs_pool, 4, deterministic_ga_options{ 105, 12, 200, 5s }, 8, 20);
         gbassert(carry_stats.generations == 12);
         gbassert(carry_stats.last_stop_reason == stop_reason::generation_budget);
+
+    }
+
+    GB_TEST(algorithm, deterministic_adaptive_expansion_obeys_global_budget,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        auto optimizer = genetic_optimization_t(
+            [](int value) { return value * value; }, std::less<int>{},
+            min_max_value_range<int>{ -50, 50 });
+        optimizer.config.memo_capacity = 0;
+        optimizer.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        optimizer.stop_criteria.diversity_threshold = 0.0;
+        optimizer.target_fitness = -1;
+
+        // Phases 0-2 consume 8 + 4*7 + 3*7 + 2*7 = 71 evaluations.
+        // Rule 5 then grows the population from 8 to 9.  Phase 3 must report
+        // exhaustion without replacing the last committed population.
+        const auto [stats, history] = optimizer.optimize(
+            4, deterministic_ga_options{ 106, 10, 71, 5s }, 8, 20);
+        gbassert(stats.total_evaluations == 71);
+        gbassert(stats.generations == 9);
+        gbassert(stats.last_stop_reason == stop_reason::evaluation_budget);
+        gbassert(optimizer.pop_size() == 8);
+        gbassert(!history.empty());
+    }
+
+    GB_TEST(algorithm, deterministic_adaptive_shrink_keeps_population_nonempty,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        // A valid one-element warm restart has a 100% phase cache-hit rate.
+        // Adaptive shrinking must retain a non-empty population.
+        auto singleton = genetic_optimization_t(
+            [](int value) { return value * value; }, std::less<int>{},
+            discrete_value_range<int>({ 0 }));
+        singleton.target_fitness = -1;
+        singleton.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        singleton.stop_criteria.diversity_threshold = 0.0;
+        (void)singleton.optimize(
+            deterministic_ga_options{ 107, 1, 1, 5s }, 1, 20);
+        singleton.soft_reset();
+        const auto [singleton_stats, singleton_history] = singleton.optimize(
+            2, deterministic_ga_options{ 108, 2, 1, 5s }, 1, 20);
+        gbassert(singleton_stats.generations == 2);
+        gbassert(singleton_stats.total_evaluations == 0);
+        gbassert(singleton_stats.cache_hits == 1);
+        gbassert(singleton_stats.last_stop_reason
+            == stop_reason::generation_budget);
+        gbassert(singleton.pop_size() == 1);
+        gbassert(!singleton_history.empty());
+    }
+
+    GB_TEST(algorithm, deterministic_parallel_optimize_parallelizes_breeding,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        auto optimizer = genetic_optimization_t(
+            [](int value) { return value * value; }, std::less<int>{},
+            min_max_value_range<int>{ -100, 100 });
+        optimizer.config.memo_capacity = 0;
+        optimizer.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        optimizer.stop_criteria.diversity_threshold = 0.0;
+        optimizer.target_fitness = -1;
+
+        counting_deterministic_thread_pool pool(4);
+        const auto [stats, history] = optimizer.optimize(
+            pool, deterministic_ga_options{ 109, 1, 7, 5s }, 4, 20);
+
+        // Four initial evaluations + three breeding streams + three offspring
+        // evaluations. Seven submissions would mean breeding ran inline.
+        gbassert(pool.submissions.load(std::memory_order_relaxed) == 10);
+        gbassert(stats.generations == 1);
+        gbassert(stats.total_evaluations == 7);
+        gbassert(stats.last_stop_reason == stop_reason::generation_budget);
+        gbassert(!history.empty());
+
+        auto adaptive = genetic_optimization_t(
+            [](int value) { return value * value; }, std::less<int>{},
+            min_max_value_range<int>{ -100, 100 });
+        adaptive.config.memo_capacity = 0;
+        adaptive.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        adaptive.stop_criteria.diversity_threshold = 0.0;
+        adaptive.target_fitness = -1;
+
+        counting_deterministic_thread_pool adaptive_pool(4);
+        const auto [adaptive_stats, adaptive_history] = adaptive.optimize(
+            adaptive_pool, 2,
+            deterministic_ga_options{ 110, 2, 14, 5s }, 4, 20);
+        // Evaluation accounts for exactly total_evaluations submissions, so
+        // any additional submissions prove adaptive breeding used the pool.
+        gbassert(adaptive_pool.submissions.load(std::memory_order_relaxed)
+            > adaptive_stats.total_evaluations);
+        gbassert(adaptive_stats.generations == 2);
+        gbassert(!adaptive_history.empty());
+    }
+
+    GB_TEST(algorithm, deterministic_breeding_submission_failure_drains_tasks,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        auto optimizer = genetic_optimization_t(
+            [](int value) { return value * value; }, std::less<int>{},
+            min_max_value_range<int>{ -100, 100 });
+        optimizer.config.memo_capacity = 0;
+        optimizer.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        optimizer.stop_criteria.diversity_threshold = 0.0;
+        optimizer.target_fitness = -1;
+
+        // Submissions 1-4 evaluate the initial population. Breeding submissions
+        // 5 and 6 are accepted and blocked; submission 7 is rejected.
+        rejecting_breeding_thread_pool pool(4, 7);
+        auto optimization = std::async(std::launch::async, [&] {
+            return optimizer.optimize(
+                pool, deterministic_ga_options{ 111, 1, 7, 5s }, 4, 20);
+            });
+
+        for (std::size_t observed = pool.submissions.load(
+            std::memory_order_acquire); observed < 7;
+            observed = pool.submissions.load(std::memory_order_acquire)) {
+            pool.submissions.wait(observed, std::memory_order_acquire);
+        }
+        for (std::size_t observed = pool.breeding_started.load(
+            std::memory_order_acquire); observed < 2;
+            observed = pool.breeding_started.load(std::memory_order_acquire)) {
+            pool.breeding_started.wait(observed, std::memory_order_acquire);
+        }
+
+        const bool waited_for_accepted_tasks =
+            optimization.wait_for(20ms) == std::future_status::timeout;
+        pool.release_breeding.store(true, std::memory_order_release);
+        pool.release_breeding.notify_all();
+        must_throw<std::runtime_error>([&] { (void)optimization.get(); });
+
+        gbassert(waited_for_accepted_tasks);
+        gbassert(pool.breeding_completed.load(std::memory_order_acquire) == 2);
     }
 
     // Detection trait the optimizer uses to recognise container wrappers; must

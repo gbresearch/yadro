@@ -1117,15 +1117,37 @@ rg -n "generation_budget|evaluation_budget|genetic_optimization_timeout|try_get|
 
 Inspect every deterministic call site reported by the first search: deterministic breeding must use `make_deterministic_rng`, and deterministic evaluation must invoke `target_fn_` directly. Confirm the `void` memo specialization diff contains no behavior change.
 
-- [ ] **Step 7: Request independent code review and address findings**
+- [x] **Step 7: Request independent code review and address findings**
 
 Review against every acceptance criterion in the spec, with special attention to archive layout, exception reset ordering, memo insertion order, discarded-candidate counters, tie polarity, one-phase identity, and scheduling stress. Apply technically valid findings with fresh red/green cycles before the final commit.
 
-- [x] **Step 8: Commit the final documentation and verification adjustments**
+Post-implementation review added focused regressions and corrections for:
+
+- tombstone-preserving exception reset and collision-chain lookup/insertion;
+- normal `evaluation_budget` termination when a later adaptive phase cannot
+  fully evaluate its replacement population;
+- a minimum adaptive population size of one after high-cache shrinkage; and
+- thread-pool breeding dispatch in both direct and adaptive deterministic
+  overloads;
+- stable memo insertion under concurrent failure, using direct virgin claims
+  and tombstone reuse only after a full probe with no unstable entry; and
+- draining every accepted parallel-breeding task before propagating a later
+  submission failure, preserving the lifetime of referenced call-local state.
+
+The tombstone regression is also mutation-checked by temporarily making lookup
+stop at the first tombstone and confirming that only the collision-chain test
+fails.
+
+The final independent re-review reported no remaining critical, important, or
+minor findings after the stable-scan and accepted-task-drain corrections.
+
+- [ ] **Step 8: Commit the final documentation and verification adjustments**
 
 ```powershell
 git add -- algorithm/genetic_optimization.h container/lockfree_memo_table.h `
-  test/algorithm_test.cpp test/container_test.cpp
+  test/algorithm_test.cpp test/container_test.cpp `
+  docs/superpowers/specs/2026-09-06-deterministic-genetic-optimization-design.md `
+  docs/superpowers/plans/2026-09-07-deterministic-genetic-optimization.md
 git commit -m "docs: document deterministic genetic optimization"
 ```
 

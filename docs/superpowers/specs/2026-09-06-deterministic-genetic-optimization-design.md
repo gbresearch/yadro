@@ -214,7 +214,15 @@ thread-pool overloads require `tp.thread_count()` to produce a positive integral
 value and capture it once at call entry. That value is the logical thread count
 for the complete call. A pool without that observable contract remains usable
 through the legacy overloads but is not accepted by deterministic parallel
-overloads.
+overloads. The thread-pool overload uses that pool for both target evaluation
+and logical-stream breeding; sharing the controller with the serial overload
+must not silently serialize breeding.
+
+Parallel breeding retains the thread pool's native future type and drains every
+successfully submitted stream before propagating a task or later submission
+failure. This is a lifetime requirement: breeding tasks capture the candidate
+population and call-local stream inputs by reference, so the call must not
+unwind while accepted work can still access them.
 
 `deterministic_ga_options` is a transient execution policy. It is deliberately
 not a member of `ga_config`, is not part of `genetic_optimization_t::serialize`,
@@ -243,10 +251,14 @@ An existing warm population may contain unevaluated chromosomes, and a fresh
 run must create and evaluate its initial population before any generation can
 be committed. Deterministic mode first constructs that candidate initial state
 and its stable evaluation plan without invoking the target. If the complete
-plan exceeds the call's evaluation budget, it throws `std::invalid_argument`
-before invoking the target function or committing the candidate population.
-This avoids a successful result whose baseline population depends on partial
-evaluation.
+plan for phase zero exceeds the call's evaluation budget, it throws
+`std::invalid_argument` before invoking the target function or committing the
+candidate population. This avoids a successful result whose baseline
+population depends on partial evaluation. If an adaptive phase after phase zero
+cannot fully evaluate its new initial candidate within the remaining global
+budget, the call instead terminates normally with
+`stop_reason::evaluation_budget` and retains the last fully committed
+population.
 
 ## Deterministic Random Streams
 
@@ -561,6 +573,8 @@ Each phase receives its fixed generation share, while unused generations from
 an early deterministic stop roll forward to the next phase. A target-reached or
 evaluation-budget result ends the full call. Adaptive configuration changes
 continue to derive from per-phase statistics and are therefore deterministic.
+Population-size adaptation is clamped to at least one chromosome, including
+high-cache shrinkage from a valid singleton population.
 
 A phase with a zero generation share may still complete or reuse the current
 population and apply its deterministic stopping checks, but it cannot commit a

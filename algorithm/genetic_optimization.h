@@ -2013,16 +2013,28 @@ namespace gb::yadro::algorithm::conv {
             const std::size_t num_offspring = pop_size - elite_n;
             const std::size_t stream_count = logical_chunk_count(
                 num_offspring, logical_thread_count);
-            std::vector<std::future<void>> futures;
-            futures.reserve(stream_count);
-            for (std::size_t logical_stream = 0;
-                logical_stream < stream_count; ++logical_stream) {
-                futures.push_back(tp([&, logical_stream] {
+            const auto submit_stream = [&](std::size_t logical_stream) {
+                return tp([&, logical_stream] {
                     fill_deterministic_breeding_stream(next, population,
                         fitnesses, wrappers, config, compare, elite_n, seed,
                         phase_index, phase_generation, logical_thread_count,
                         logical_stream);
-                    }));
+                    });
+                };
+            using future_t = decltype(submit_stream(std::size_t{}));
+            std::vector<future_t> futures;
+            futures.reserve(stream_count);
+
+            std::exception_ptr submission_exception;
+            for (std::size_t logical_stream = 0;
+                logical_stream < stream_count; ++logical_stream) {
+                try {
+                    futures.emplace_back(submit_stream(logical_stream));
+                }
+                catch (...) {
+                    submission_exception = std::current_exception();
+                    break;
+                }
             }
 
             std::exception_ptr first_exception;
@@ -2035,6 +2047,9 @@ namespace gb::yadro::algorithm::conv {
                         first_exception = std::current_exception();
                     }
                 }
+            }
+            if (!first_exception) {
+                first_exception = submission_exception;
             }
             if (first_exception) {
                 std::rethrow_exception(first_exception);
@@ -2391,6 +2406,14 @@ namespace gb::yadro::algorithm::conv {
                 run, 1, population_size, max_history, 1,
                 [this](auto& candidate, auto& run_state) {
                     return evaluate_deterministic_serial(candidate, run_state);
+                },
+                [this](std::size_t pop_size, std::size_t elite_n,
+                    const auto& run_state, std::size_t phase_index,
+                    std::size_t phase_generation) {
+                        return breed_next_generation_deterministic(
+                            pop_size, elite_n, run_state.options.seed,
+                            phase_index, phase_generation,
+                            run_state.logical_thread_count);
                 });
         }
 
@@ -2413,6 +2436,14 @@ namespace gb::yadro::algorithm::conv {
                 [this, &thread_pool](auto& candidate, auto& run_state) {
                     return evaluate_deterministic_parallel(
                         thread_pool, candidate, run_state);
+                },
+                [this, &thread_pool](std::size_t pop_size, std::size_t elite_n,
+                    const auto& run_state, std::size_t phase_index,
+                    std::size_t phase_generation) {
+                        return breed_next_generation_deterministic(
+                            thread_pool, pop_size, elite_n,
+                            run_state.options.seed, phase_index,
+                            phase_generation, run_state.logical_thread_count);
                 });
         }
 
@@ -2441,6 +2472,14 @@ namespace gb::yadro::algorithm::conv {
                 run, num_phases, initial_population_size, max_history, 1,
                 [this](auto& candidate, auto& run_state) {
                     return evaluate_deterministic_serial(candidate, run_state);
+                },
+                [this](std::size_t pop_size, std::size_t elite_n,
+                    const auto& run_state, std::size_t phase_index,
+                    std::size_t phase_generation) {
+                        return breed_next_generation_deterministic(
+                            pop_size, elite_n, run_state.options.seed,
+                            phase_index, phase_generation,
+                            run_state.logical_thread_count);
                 });
         }
 
@@ -2469,6 +2508,14 @@ namespace gb::yadro::algorithm::conv {
                 [this, &thread_pool](auto& candidate, auto& run_state) {
                     return evaluate_deterministic_parallel(
                         thread_pool, candidate, run_state);
+                },
+                [this, &thread_pool](std::size_t pop_size, std::size_t elite_n,
+                    const auto& run_state, std::size_t phase_index,
+                    std::size_t phase_generation) {
+                        return breed_next_generation_deterministic(
+                            thread_pool, pop_size, elite_n,
+                            run_state.options.seed, phase_index,
+                            phase_generation, run_state.logical_thread_count);
                 });
         }
 
@@ -3500,16 +3547,19 @@ namespace gb::yadro::algorithm::conv {
                     max_pop,
                     static_cast<size_t>(current_population_size * 1.20));
             }
+            current_population_size = std::max(
+                std::size_t{ 1 }, current_population_size);
         }
 
-        template<typename Evaluator>
+        template<typename Evaluator, typename Breeder>
         [[nodiscard]] deterministic_phase_outcome run_deterministic_phase(
             deterministic_run_state& run,
             std::size_t phase_index,
             std::size_t generation_allocation,
             std::size_t population_size,
             std::size_t max_history,
-            Evaluator&& evaluate)
+            Evaluator& evaluate,
+            Breeder& breed)
         {
             throw_if_deterministic_timeout(run);
             auto initial = init_population_deterministic(
@@ -3518,9 +3568,13 @@ namespace gb::yadro::algorithm::conv {
             const stop_reason initial_evaluation = std::invoke(
                 evaluate, initial, run);
             if (initial_evaluation == stop_reason::evaluation_budget) {
-                throw std::invalid_argument(
-                    "deterministic optimize: evaluation_budget cannot evaluate "
-                    "the complete initial population");
+                if (phase_index == 0) {
+                    throw std::invalid_argument(
+                        "deterministic optimize: evaluation_budget cannot evaluate "
+                        "the complete initial population");
+                }
+                return {
+                    stop_reason::evaluation_budget, 0, generation_allocation };
             }
             throw_if_deterministic_timeout(run);
             population_ = std::move(initial);
@@ -3572,9 +3626,9 @@ namespace gb::yadro::algorithm::conv {
                 }
 
                 throw_if_deterministic_timeout(run);
-                auto candidate = breed_next_generation_deterministic(
-                    population_size, elite_n, run.options.seed,
-                    phase_index, phase_generations, run.logical_thread_count);
+                auto candidate = std::invoke(
+                    breed, population_size, elite_n, run,
+                    phase_index, phase_generations);
                 throw_if_deterministic_timeout(run);
                 const stop_reason evaluation = std::invoke(
                     evaluate, candidate, run);
@@ -3601,20 +3655,21 @@ namespace gb::yadro::algorithm::conv {
         // cumulative generation count never reset at a phase boundary.  The
         // phase index reaching run_deterministic_phase is the real zero-based
         // index, which keeps the phase component of every stream key distinct.
-        template<typename Evaluator>
+        template<typename Evaluator, typename Breeder>
         [[nodiscard]] deterministic_phase_outcome run_deterministic_adaptive(
             deterministic_run_state& run,
             std::size_t num_phases,
             std::size_t initial_population_size,
             std::size_t max_history,
-            Evaluator&& evaluate)
+            Evaluator& evaluate,
+            Breeder& breed)
         {
             // A single phase is the direct deterministic call: same routine,
             // phase zero, the full generation budget, and no baseline scaling.
             if (num_phases == 1) {
                 return run_deterministic_phase(
                     run, 0, run.options.generation_budget,
-                    initial_population_size, max_history, evaluate);
+                    initial_population_size, max_history, evaluate, breed);
             }
 
             auto allocations = detail::allocate_deterministic_generations(
@@ -3635,7 +3690,7 @@ namespace gb::yadro::algorithm::conv {
                 allocations[phase] += carried_generations;
                 outcome = run_deterministic_phase(
                     run, phase, allocations[phase], current_population_size,
-                    max_history, evaluate);
+                    max_history, evaluate, breed);
                 carried_generations = outcome.unused_generations;
 
                 // Publish this phase's reason so the adaptive rules read it from
@@ -3667,14 +3722,15 @@ namespace gb::yadro::algorithm::conv {
         // validation, the single run state, the one-shot elapsed accounting, and
         // the final stop reason, so the direct and adaptive entry points cannot
         // drift apart.
-        template<typename Evaluator>
+        template<typename Evaluator, typename Breeder>
         auto execute_deterministic(
             const deterministic_ga_options& run,
             std::size_t num_phases,
             std::size_t population_size,
             std::size_t max_history,
             std::size_t logical_thread_count,
-            Evaluator&& evaluate)
+            Evaluator&& evaluate,
+            Breeder&& breed)
             -> std::pair<optimization_stats, history_t>
         {
             validate_deterministic_options(run, population_size);
@@ -3701,7 +3757,8 @@ namespace gb::yadro::algorithm::conv {
 
             try {
                 const auto outcome = run_deterministic_adaptive(
-                    state, num_phases, population_size, max_history, evaluate);
+                    state, num_phases, population_size, max_history,
+                    evaluate, breed);
                 {
                     std::lock_guard lock(stats_mutex_);
                     stats_.last_stop_reason = outcome.reason;
