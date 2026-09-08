@@ -980,7 +980,7 @@ git commit -m "feat: make deterministic GA recovery atomic"
 - Produces: serial and constrained parallel adaptive deterministic overloads.
 - Consumes: one shared `deterministic_run_state` across every phase.
 
-- [ ] **Step 1: Add exact allocation and one-phase equivalence tests**
+- [x] **Step 1: Add exact allocation and one-phase equivalence tests**
 
 Pin triangular largest-remainder allocation:
 
@@ -993,11 +993,11 @@ gbassert(detail::allocate_deterministic_generations(7, 4)
 
 Run a direct deterministic call and a one-phase adaptive deterministic call from equivalent fresh state. Compare normalized statistics, ordered history, and `serialized_population_state` byte-for-byte.
 
-- [ ] **Step 2: Build Debug and confirm adaptive overloads and allocator are absent**
+- [x] **Step 2: Build Debug and confirm adaptive overloads and allocator are absent**
 
 Expected: compile errors naming the missing allocator and deterministic adaptive overloads.
 
-- [ ] **Step 3: Implement integer triangular allocation**
+- [x] **Step 3: Implement integer triangular allocation**
 
 For phase `i`, use weight `num_phases - i` and denominator `num_phases * (num_phases + 1) / 2`. Compute base shares and remainders with checked integer arithmetic. Distribute the leftover one generation at a time by descending remainder and ascending phase index. Reject `num_phases == 0` before allocation.
 
@@ -1018,7 +1018,7 @@ for (size_t phase = 0; phase < num_phases; ++phase) {
 
 Before either multiplication, validate that it cannot overflow `size_t`; reject an unrepresentable allocation with `std::invalid_argument("deterministic optimize: phase allocation overflow")`. Sort a copy of indices by `(remainder descending, phase ascending)` for leftover distribution, then return generations in phase-index order.
 
-- [ ] **Step 4: Implement the private phase-aware driver**
+- [x] **Step 4: Implement the private phase-aware driver**
 
 Create one `deterministic_run_state` at the public call boundary. Pass the actual zero-based phase index, phase generation allocation, shared `remaining_evaluations`, and shared deadline into the existing private deterministic phase routine. Never call a public deterministic overload from inside the adaptive loop.
 
@@ -1043,7 +1043,7 @@ For multi-phase calls, `apply_deterministic_phase_baseline` runs before each pha
 
 `apply_deterministic_adaptive_rules` receives the cumulative current snapshot and `previous_stats` by reference, computes the same evaluation/cache deltas and configuration changes as legacy `optimize_imp`, then replaces `previous_stats` with the current snapshot.
 
-- [ ] **Step 5: Preserve one-phase identity and add parallel adaptive stress**
+- [x] **Step 5: Preserve one-phase identity and add parallel adaptive stress**
 
 Special-case `num_phases == 1` by invoking the same private routine as direct optimize with phase zero, the full budgets, and the same deadline. Do not apply baseline adaptive scaling in that branch.
 
@@ -1058,7 +1058,7 @@ For four phases, run repeated four-thread optimizations with forced completion-o
 
 Add an early-phase deterministic stagnation case whose unused generation share is nonzero. Assert the next phase receives that exact carry and the sum of committed plus finally unused generations equals the original global generation budget.
 
-- [ ] **Step 6: Run Debug and Release and commit Task 7**
+- [x] **Step 6: Run Debug and Release and commit Task 7**
 
 ```powershell
 git add -- algorithm/genetic_optimization.h test/algorithm_test.cpp
