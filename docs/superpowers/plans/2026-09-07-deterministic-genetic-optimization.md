@@ -515,7 +515,7 @@ git commit -m "feat: add logical GA random streams"
 - Produces: public serial `optimize(const deterministic_ga_options&, size_t, size_t)`.
 - Consumes: memo APIs from Task 1, public contracts from Task 2, and RNG/ranking/breeding from Task 3.
 
-- [ ] **Step 1: Add failing serial budget and memo-accounting tests**
+- [x] **Step 1: Add failing serial budget and memo-accounting tests**
 
 Use a helper that suppresses every non-budget stop:
 
@@ -599,11 +599,11 @@ gbassert(uncached_stats.cache_hits == 0);
 
 For a pre-existing memo hit, optimize a one-value `{0}` space, call `soft_reset()` to preserve its memo, capture the cumulative counters, repeat the same deterministic call, and assert the second call's deltas are zero target evaluations and one cache hit. Add a `detail::group_deterministic_memo_keys` unit test with two different logical chromosomes assigned the same synthetic `hash128_t`; assert the lower population index is the sole representative. This provides collision coverage without attempting to discover a real xxHash128 collision.
 
-- [ ] **Step 2: Build Debug and confirm no deterministic optimize overload exists**
+- [x] **Step 2: Build Debug and confirm no deterministic optimize overload exists**
 
 Expected: compile errors selecting `optimize(deterministic_ga_options, ...)`.
 
-- [ ] **Step 3: Add deterministic run-state and evaluation-plan types**
+- [x] **Step 3: Add deterministic run-state and evaluation-plan types**
 
 Use call-local state:
 
@@ -635,7 +635,7 @@ struct deterministic_phase_outcome {
 
 Scan candidate indices in ascending order and append each first-seen group directly to the plan vector. Use `std::map<hash128_t, size_t>` only as a key-to-plan-position lookup side table; never iterate the map to construct or reorder the plan. This preserves ascending representative-index order for lookup, submission, future draining, memo insertion, and lowest-index exception selection. Normalize raw key `(0, 0)` to `(1, 0)` before grouping, matching the memo table. If memoization is disabled, append one nonmemo group per unevaluated index.
 
-- [ ] **Step 4: Implement counter-neutral planning and admission**
+- [x] **Step 4: Implement counter-neutral planning and admission**
 
 For memo-enabled runs, call `ensure_memo_table()`, hash through the concrete `memo_table_t` hasher, group normalized keys, and call `try_get_with_hash` in representative order. Count missing representatives without incrementing either atomic counter. If missing count exceeds `remaining_evaluations`, return `stop_reason::evaluation_budget` without changing the candidate, counters, or memo.
 
@@ -655,7 +655,7 @@ const size_t requests = std::ranges::count_if(candidate,
 total_eval_requests_.fetch_add(requests, std::memory_order_relaxed);
 ```
 
-- [ ] **Step 5: Implement serial evaluation, deterministic memo commit, and exception selection**
+- [x] **Step 5: Implement serial evaluation, deterministic memo commit, and exception selection**
 
 Evaluate representatives in ascending index. Capture each result or exception. After every admitted computation finishes, insert successful memoized results with `insert_ready_with_hash` in representative order and use the returned memo value. Copy that value to every group member. Rethrow the exception for the lowest representative index after deterministic memo commits and `sync_stats()`.
 
@@ -690,7 +690,7 @@ if (!failures.empty()) std::rethrow_exception(failures.front().second);
 
 The plan is already representative-index ordered, so `failures.front()` is the required lowest-index exception.
 
-- [ ] **Step 6: Implement the serial deterministic phase loop**
+- [x] **Step 6: Implement the serial deterministic phase loop**
 
 Add private `run_deterministic_phase`, receiving `(run_state&, phase_index, generation_allocation, population_size, max_history, evaluator)`. It:
 
@@ -744,7 +744,7 @@ while (true) {
 
 The temporary `logic_error` prevents the Task 4 checkpoint from returning a nominally deterministic result after the legacy helper has taken an in-place recovery path. Task 6 removes this guard when it replaces the legacy call with decision-only, domain-separated, transactional recovery.
 
-- [ ] **Step 7: Add the public serial wrapper and timeout checks**
+- [x] **Step 7: Add the public serial wrapper and timeout checks**
 
 Validate before changing history, population, memo, or counters:
 
@@ -770,7 +770,7 @@ The wrapper then creates one steady-clock deadline, sets logical thread count on
 
 Use one public-boundary scope guard to add `now - started` to `stats_.elapsed` exactly once on normal return or exception. Successful return sets `last_stop_reason` to the deterministic criterion or budget reason selected by the phase loop. A timeout records elapsed time but leaves `last_stop_reason` distinct from legacy `deadline`.
 
-- [ ] **Step 8: Run Debug and Release and commit Task 4**
+- [x] **Step 8: Run Debug and Release and commit Task 4**
 
 Expected: the exact 6/16 budget accounting passes, rejected candidates are counter-neutral, and all legacy tests remain green.
 
