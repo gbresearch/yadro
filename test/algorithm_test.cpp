@@ -40,6 +40,27 @@ namespace
     using namespace gb::yadro::util;
     using namespace gb::yadro::archive;
 
+    template<typename Optimizer>
+    auto serialized_population_state(Optimizer& optimizer)
+    {
+        using reset_flag = typename Optimizer::reset_flag;
+        optimizer.soft_reset(reset_flag::keep_population);
+        gb::yadro::archive::omem_archive<> archive;
+        archive(optimizer);
+        return archive.get_stream().buffer();
+    }
+
+    struct zero_deterministic_thread_pool {
+        [[nodiscard]] std::size_t thread_count() const noexcept { return 0; }
+
+        template<typename F>
+        [[nodiscard]] auto operator()(F&& function)
+        {
+            return std::async(
+                std::launch::deferred, std::forward<F>(function));
+        }
+    };
+
     GB_TEST(algorithm, genetic_optimization_value_types_are_three_way_comparable, std::launch::deferred)
     {
         using namespace gb::yadro::algorithm::conv;
@@ -446,6 +467,216 @@ namespace
         gbassert(groups[1].key == second);
         gbassert(groups[1].representative == 1);
         gbassert(groups[1].members == std::vector<std::size_t>{ 1 });
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_parallel_reproducibility,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int value) {
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds((std::abs(value) % 7) * 20));
+                    return value * value;
+                },
+                std::less<int>{}, min_max_value_range<int>{ -100, 100 });
+            optimizer.config.memo_capacity = 1024;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 0.0;
+            optimizer.target_fitness = -1;
+            return optimizer;
+        };
+        const auto normalize_stats = [](optimization_stats stats) {
+            stats.elapsed = {};
+            return stats;
+        };
+        const deterministic_ga_options options{ 0x12345678, 3, 40, 5s };
+
+        gb::yadro::async::threadpool lhs_pool(4);
+        gb::yadro::async::threadpool rhs_pool(4);
+        for (int repetition = 0; repetition < 20; ++repetition) {
+            auto lhs = make_optimizer();
+            auto rhs = make_optimizer();
+
+            for (int task_index = 0; task_index < 12; ++task_index) {
+                auto noise = rhs_pool([task_index] {
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds((task_index % 5) * 10));
+                    return task_index;
+                    });
+                gbassert(noise.get() == task_index);
+            }
+
+            const auto [lhs_stats, lhs_history] =
+                lhs.optimize(lhs_pool, options, 8, 20);
+            const auto [rhs_stats, rhs_history] =
+                rhs.optimize(rhs_pool, options, 8, 20);
+            gbassert(normalize_stats(lhs_stats) == normalize_stats(rhs_stats));
+            gbassert(lhs_history.all() == rhs_history.all());
+            gbassert(serialized_population_state(lhs)
+                == serialized_population_state(rhs));
+        }
+
+        {
+            gb::yadro::async::threadpool eight_threads(8);
+            gb::yadro::async::threadpool sixteen_threads(16);
+            auto lhs = make_optimizer();
+            auto rhs = make_optimizer();
+            const auto [lhs_stats, lhs_history] =
+                lhs.optimize(eight_threads, options, 8, 20);
+            const auto [rhs_stats, rhs_history] =
+                rhs.optimize(sixteen_threads, options, 8, 20);
+            gbassert(normalize_stats(lhs_stats) == normalize_stats(rhs_stats));
+            gbassert(lhs_history.all() == rhs_history.all());
+            gbassert(serialized_population_state(lhs)
+                == serialized_population_state(rhs));
+        }
+
+        {
+            auto lhs = make_optimizer();
+            auto rhs = make_optimizer();
+            const auto [lhs_first_stats, lhs_first_history] =
+                lhs.optimize(lhs_pool, options, 8, 20);
+            const auto [rhs_first_stats, rhs_first_history] =
+                rhs.optimize(rhs_pool, options, 8, 20);
+            gbassert(normalize_stats(lhs_first_stats)
+                == normalize_stats(rhs_first_stats));
+            gbassert(lhs_first_history.all() == rhs_first_history.all());
+            gbassert(serialized_population_state(lhs)
+                == serialized_population_state(rhs));
+
+            const auto [lhs_second_stats, lhs_second_history] =
+                lhs.optimize(lhs_pool, options, 8, 20);
+            const auto [rhs_second_stats, rhs_second_history] =
+                rhs.optimize(rhs_pool, options, 8, 20);
+            gbassert(normalize_stats(lhs_second_stats)
+                == normalize_stats(rhs_second_stats));
+            gbassert(lhs_second_history.all() == rhs_second_history.all());
+            gbassert(serialized_population_state(lhs)
+                == serialized_population_state(rhs));
+        }
+
+        {
+            auto lhs = make_optimizer();
+            auto rhs = make_optimizer();
+            (void)lhs.optimize(lhs_pool,
+                deterministic_ga_options{ 41, 2, 30, 5s }, 8, 20);
+            (void)rhs.optimize(rhs_pool,
+                deterministic_ga_options{ 42, 2, 30, 5s }, 8, 20);
+            gbassert(serialized_population_state(lhs)
+                != serialized_population_state(rhs));
+        }
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_parallel_exceptions,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        std::atomic<int> finished = 0;
+        auto optimizer = genetic_optimization_t(
+            [&finished](int value) -> int {
+                if (value == 0) {
+                    std::this_thread::sleep_for(10ms);
+                    finished.fetch_add(1, std::memory_order_relaxed);
+                    throw std::runtime_error("index-0");
+                }
+                if (value == 2) {
+                    finished.fetch_add(1, std::memory_order_relaxed);
+                    throw std::runtime_error("index-2");
+                }
+                finished.fetch_add(1, std::memory_order_relaxed);
+                return value;
+            },
+            std::less<int>{}, discrete_value_range<int>({ 0, 1, 2, 3 }));
+        optimizer.config.memo_capacity = 0;
+        optimizer.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        optimizer.stop_criteria.diversity_threshold = 0.0;
+        optimizer.target_fitness = -1;
+        for (int value = 0; value < 4; ++value) {
+            optimizer.inject_chromosome(std::tuple{ value });
+        }
+
+        gb::yadro::async::threadpool pool(4);
+        bool caught = false;
+        try {
+            (void)optimizer.optimize(pool,
+                deterministic_ga_options{ 51, 1, 4, 5s }, 4, 10);
+        }
+        catch (const std::runtime_error& error) {
+            caught = true;
+            gbassert(std::string_view{ error.what() } == "index-0");
+        }
+        gbassert(caught);
+        gbassert(finished.load(std::memory_order_relaxed) == 4);
+        gbassert(optimizer.stats().total_evaluations == 4);
+        gbassert(optimizer.pop_size() == 4);
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_parallel_timeout,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        std::atomic<bool> slow = false;
+        std::atomic<int> calls = 0;
+        auto optimizer = genetic_optimization_t(
+            [&slow, &calls](int value) {
+                calls.fetch_add(1, std::memory_order_relaxed);
+                if (slow.load(std::memory_order_relaxed)) {
+                    std::this_thread::sleep_for(5ms);
+                }
+                return value * value;
+            },
+            std::less<int>{}, discrete_value_range<int>({ 0, 1, 2, 3 }));
+        optimizer.config.memo_capacity = 0;
+        optimizer.stop_criteria.stagnation_absolute_floor =
+            std::numeric_limits<std::size_t>::max();
+        optimizer.stop_criteria.diversity_threshold = 0.0;
+        optimizer.target_fitness = -1;
+        for (int value = 0; value < 4; ++value) {
+            optimizer.inject_chromosome(std::tuple{ value });
+        }
+
+        gb::yadro::async::threadpool pool(2);
+        (void)optimizer.optimize(pool,
+            deterministic_ga_options{ 61, 1, 7, 5s }, 4, 10);
+        const auto committed = serialized_population_state(optimizer);
+
+        calls.store(0, std::memory_order_relaxed);
+        slow.store(true, std::memory_order_relaxed);
+        bool caught = false;
+        try {
+            (void)optimizer.optimize(pool,
+                deterministic_ga_options{ 61, 1, 7, 1ms }, 4, 10);
+        }
+        catch (const genetic_optimization_timeout& error) {
+            caught = true;
+            gbassert(error.timeout() == 1ms);
+            gbassert(error.elapsed() >= error.timeout());
+            gbassert(optimizer.stats().last_stop_reason != stop_reason::deadline);
+        }
+        gbassert(caught);
+        gbassert(calls.load(std::memory_order_relaxed) == 4);
+        gbassert(serialized_population_state(optimizer) == committed);
+
+        zero_deterministic_thread_pool zero_pool;
+        auto invalid = genetic_optimization_t(
+            [](int value) { return value; }, std::less<int>{},
+            discrete_value_range<int>({ 0, 1 }));
+        must_throw<std::invalid_argument>([&] {
+            (void)invalid.optimize(zero_pool,
+                deterministic_ga_options{ 62, 1, 2, 5s }, 2, 10);
+            });
+        gbassert(invalid.stats().total_evaluations == 0);
+        gbassert(invalid.pop_size() == 0);
     }
 
     // Detection trait the optimizer uses to recognise container wrappers; must

@@ -2231,7 +2231,8 @@ namespace gb::yadro::algorithm::conv {
                 run,
                 started,
                 started + run.failure_timeout,
-                run.evaluation_budget };
+                run.evaluation_budget,
+                1 };
             bool elapsed_recorded = false;
             const auto record_elapsed = [&] {
                 if (elapsed_recorded) {
@@ -2251,6 +2252,62 @@ namespace gb::yadro::algorithm::conv {
                     [this](auto& candidate, auto& run_state) {
                         return evaluate_deterministic_serial(
                             candidate, run_state);
+                    });
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    stats_.last_stop_reason = outcome.reason;
+                }
+                record_elapsed();
+                return make_result_snapshot();
+            }
+            catch (...) {
+                record_elapsed();
+                throw;
+            }
+        }
+
+        template<detail::DeterministicThreadPool ThreadPool>
+        auto optimize(
+            ThreadPool& thread_pool,
+            const deterministic_ga_options& run,
+            std::size_t population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            const std::size_t logical_thread_count =
+                static_cast<std::size_t>(thread_pool.thread_count());
+            if (logical_thread_count == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: thread count must be > 0");
+            }
+            validate_deterministic_options(run, population_size);
+
+            const auto started = deterministic_clock::now();
+            deterministic_run_state state{
+                run,
+                started,
+                started + run.failure_timeout,
+                run.evaluation_budget,
+                logical_thread_count };
+            bool elapsed_recorded = false;
+            const auto record_elapsed = [&] {
+                if (elapsed_recorded) {
+                    return;
+                }
+                elapsed_recorded = true;
+                const auto elapsed = std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        deterministic_clock::now() - started);
+                std::lock_guard lock(stats_mutex_);
+                stats_.elapsed += elapsed;
+            };
+
+            try {
+                const auto outcome = run_deterministic_phase(
+                    state, 0, run.generation_budget, population_size, max_history,
+                    [this, &thread_pool](auto& candidate, auto& run_state) {
+                        return evaluate_deterministic_parallel(
+                            thread_pool, candidate, run_state);
                     });
                 {
                     std::lock_guard lock(stats_mutex_);
@@ -3051,6 +3108,7 @@ namespace gb::yadro::algorithm::conv {
             deterministic_clock::time_point started;
             deterministic_clock::time_point deadline;
             std::size_t remaining_evaluations;
+            std::size_t logical_thread_count;
             std::size_t committed_generations{};
         };
 
@@ -3199,7 +3257,7 @@ namespace gb::yadro::algorithm::conv {
                 throw_if_deterministic_timeout(run);
                 auto candidate = breed_next_generation_deterministic(
                     population_size, elite_n, run.options.seed,
-                    phase_index, phase_generations, 1);
+                    phase_index, phase_generations, run.logical_thread_count);
                 throw_if_deterministic_timeout(run);
                 const stop_reason evaluation = std::invoke(
                     evaluate, candidate, run);
@@ -3606,6 +3664,95 @@ namespace gb::yadro::algorithm::conv {
 
             sync_stats();
             if (!failures.empty()) {
+                std::rethrow_exception(failures.front().second);
+            }
+            return stop_reason::none;
+        }
+
+        template<detail::DeterministicThreadPool ThreadPool>
+        [[nodiscard]] stop_reason evaluate_deterministic_parallel(
+            ThreadPool& thread_pool,
+            std::vector<individual_t>& candidate,
+            deterministic_run_state& run)
+        {
+            auto plan = build_deterministic_evaluation_plan(candidate);
+            const std::size_t required = static_cast<std::size_t>(
+                std::ranges::count_if(plan,
+                    [](const deterministic_evaluation_group& group) {
+                        return !group.value.has_value();
+                    }));
+            if (required > run.remaining_evaluations) {
+                return stop_reason::evaluation_budget;
+            }
+
+            const std::size_t requests = static_cast<std::size_t>(
+                std::ranges::count_if(candidate,
+                    [](const individual_t& individual) {
+                        return !individual.second.has_value();
+                    }));
+            total_eval_requests_.fetch_add(requests, std::memory_order_relaxed);
+
+            const auto submit_representative =
+                [this, &thread_pool, &candidate](std::size_t index) {
+                    // evaluate_chromosome() is forbidden here: it writes through
+                    // get_or_compute(), exposing worker completion order to memo state.
+                    return thread_pool([this, &candidate, index] {
+                        fn_call_count_.fetch_add(1, std::memory_order_relaxed);
+                        return std::apply([this](const auto&... args) {
+                            return target_fn_(args...);
+                            }, candidate[index].first);
+                        });
+                };
+            using future_t = decltype(submit_representative(std::size_t{}));
+            std::vector<std::tuple<std::size_t, std::size_t, future_t>> futures;
+            futures.reserve(required);
+            std::vector<std::pair<std::size_t, std::exception_ptr>> failures;
+            for (std::size_t plan_index = 0; plan_index < plan.size(); ++plan_index) {
+                const auto& group = plan[plan_index];
+                if (group.value) {
+                    continue;
+                }
+                try {
+                    futures.emplace_back(
+                        plan_index,
+                        group.representative,
+                        submit_representative(group.representative));
+                    --run.remaining_evaluations;
+                }
+                catch (...) {
+                    failures.emplace_back(
+                        group.representative, std::current_exception());
+                    break;
+                }
+            }
+
+            for (auto& [plan_index, representative, future] : futures) {
+                try {
+                    plan[plan_index].value = future.get();
+                }
+                catch (...) {
+                    failures.emplace_back(
+                        representative, std::current_exception());
+                }
+            }
+
+            for (auto& group : plan) {
+                if (!group.value) {
+                    continue;
+                }
+                if (group.uses_memo) {
+                    group.value = memo_.table->insert_ready_with_hash(
+                        group.key.low, group.key.high, *group.value);
+                }
+                for (const std::size_t index : group.members) {
+                    candidate[index].second = *group.value;
+                }
+            }
+
+            sync_stats();
+            if (!failures.empty()) {
+                std::ranges::sort(failures, {},
+                    [](const auto& failure) { return failure.first; });
                 std::rethrow_exception(failures.front().second);
             }
             return stop_reason::none;
