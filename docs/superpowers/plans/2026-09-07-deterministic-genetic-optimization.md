@@ -390,7 +390,7 @@ git commit -m "feat: define deterministic GA contracts"
 - Produces: `detail::logical_chunk_count(...)` and `detail::logical_chunk_bounds(...)`.
 - Produces: private deterministic initialization, stable ranking, and serial/parallel breeding helpers.
 
-- [ ] **Step 1: Add seed-material and partition tests**
+- [x] **Step 1: Add seed-material and partition tests**
 
 Start with behavioral RED tests that do not assume a golden vector from code that has not been implemented. Create two engines for every domain and assert their first eight outputs agree for identical keys. Assert that changing each key component independently—seed, phase, generation, domain, and logical stream—changes the observed sequence. Capture a later-key normal-breeding sequence, exhaust a cataclysm and an elite-perturbation engine, then recreate the later-key normal engine and assert its sequence is unchanged; recovery draws must not shift normal-breeding streams.
 
@@ -404,13 +404,13 @@ static_assert(detail::logical_chunk_bounds(7, 4, 0) == std::pair{ 0uz, 2uz });
 static_assert(detail::logical_chunk_bounds(7, 4, 3) == std::pair{ 6uz, 7uz });
 ```
 
-- [ ] **Step 2: Build Debug and confirm RED on missing deterministic stream helpers**
+- [x] **Step 2: Build Debug and confirm RED on missing deterministic stream helpers**
 
 Run the Debug build command.
 
 Expected: compile errors for the missing domain, seed-material, and partition functions.
 
-- [ ] **Step 3: Implement the exact stream derivation**
+- [x] **Step 3: Implement the exact stream derivation**
 
 Use these fixed domain values:
 
@@ -437,7 +437,7 @@ Use canonical SplitMix64:
 
 Build the 16-word material by first applying `splitmix64(seed)`, then for each of `phase`, `generation`, `std::to_underlying(domain)`, and `logical_stream` assigning `state = splitmix64(state ^ splitmix64(component))`. For word pairs zero through seven, assign `state = splitmix64(state + pair_index)`, then emit low and high 32-bit halves. Construct `std::seed_seq` from the material and seed `std::mt19937_64` from that sequence.
 
-- [ ] **Step 4: Compute, inspect, and pin the implemented seed material**
+- [x] **Step 4: Compute, inspect, and pin the implemented seed material**
 
 After implementing Step 3, add a temporary nonasserting diagnostic that calls `detail::deterministic_seed_material` for `(seed=0x0123456789abcdef, phase=2, generation=7, domain=normal_breeding, stream=3)` and prints all 16 words in fixed-width hexadecimal. Build Debug with `/p:PostBuildEventUseInBuild=false`, then run `& '.\exe\x64\Debug\yadro_test.exe'`. Inspect the complete output and independently walk the Step 3 SplitMix64 state transitions to confirm the value source. Do not obtain the vector by copying a compiler assertion failure. Remove the diagnostic, then add this regression lock using the deliberately recorded output:
 
@@ -455,7 +455,7 @@ static_assert(material == std::array<std::uint32_t, 16>{
     0x23b71f49U, 0x0402ca23U, 0xd202bfc0U, 0x08eb8139U });
 ```
 
-- [ ] **Step 5: Implement and test stable ranking**
+- [x] **Step 5: Implement and test stable ranking**
 
 Add a deterministic-only sorter:
 
@@ -474,7 +474,7 @@ Do not change legacy `sort_population(size_t)`. Add a constant-fitness test with
 
 Pin tournament tie behavior by creating two identical deterministic engines. Use the first engine and `std::uniform_int_distribution<size_t>{0, fitnesses.size() - 1}` to capture the first sampled index. Pass the second engine, an all-equal fitness vector, and `k > 1` to `detail::tournament_select`; assert it returns that first sampled index.
 
-- [ ] **Step 6: Implement deterministic initialization and breeding helpers**
+- [x] **Step 6: Implement deterministic initialization and breeding helpers**
 
 Initialization copies the current population into a candidate, stably ranks before truncating, and fills missing indices from the `initial_population` stream keyed by `(seed, phase, 0, domain, 0)`. It does not mutate `population_` until Task 4 admits and evaluates the candidate.
 
@@ -488,13 +488,13 @@ const size_t stream_count = detail::logical_chunk_count(
 
 Copy elites in rank order. Each logical stream owns the exact contiguous range from `logical_chunk_bounds`, creates one `normal_breeding` engine keyed by phase, phase-local generation, and logical stream, and fills `next[elite_n + offspring_index]`. The serial helper calls the same implementation with logical thread count one. The parallel helper submits one task per active logical stream and drains futures in logical-stream order. Neither helper reads `detail::thread_rng()`.
 
-- [ ] **Step 7: Run stream and breeding reproducibility tests**
+- [x] **Step 7: Run stream and breeding reproducibility tests**
 
 Add a test that calls deterministic breeding twice with the same fixed evaluated population and compares every chromosome. Submit unrelated tasks to a four-thread pool between calls and confirm the result stays identical. For seven offspring, compare the results from eight- and sixteen-thread pools and confirm they match because both use seven active logical streams.
 
 Run Debug and Release builds. Expected: all tests pass; legacy GA tests remain unchanged.
 
-- [ ] **Step 8: Commit Task 3**
+- [x] **Step 8: Commit Task 3**
 
 ```powershell
 git add -- algorithm/genetic_optimization.h test/algorithm_test.cpp
