@@ -124,6 +124,192 @@ namespace
         verify_legacy_round_trip(stop_reason::evaluation_budget);
     }
 
+    GB_TEST(algorithm, deterministic_genetic_optimization_logical_streams,
+        std::launch::deferred)
+    {
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        static_assert(cdetail::logical_chunk_count(0, 8) == 0);
+        static_assert(cdetail::logical_chunk_count(7, 4) == 4);
+        static_assert(cdetail::logical_chunk_count(7, 16) == 7);
+        static_assert(cdetail::logical_chunk_bounds(7, 4, 0)
+            == std::pair{ 0uz, 2uz });
+        static_assert(cdetail::logical_chunk_bounds(7, 4, 3)
+            == std::pair{ 6uz, 7uz });
+
+        constexpr std::uint64_t seed = 0x0123456789abcdefULL;
+        constexpr auto normal = cdetail::deterministic_rng_domain::normal_breeding;
+        constexpr auto material = cdetail::deterministic_seed_material(
+            seed, 2, 7, normal, 3);
+        static_assert(material == cdetail::deterministic_seed_material(
+            seed, 2, 7, normal, 3));
+        static_assert(material != cdetail::deterministic_seed_material(
+            seed + 1, 2, 7, normal, 3));
+        static_assert(material != cdetail::deterministic_seed_material(
+            seed, 3, 7, normal, 3));
+        static_assert(material != cdetail::deterministic_seed_material(
+            seed, 2, 8, normal, 3));
+        static_assert(material != cdetail::deterministic_seed_material(
+            seed, 2, 7, cdetail::deterministic_rng_domain::cataclysm, 3));
+        static_assert(material != cdetail::deterministic_seed_material(
+            seed, 2, 7, normal, 4));
+        static_assert(material == std::array<std::uint32_t, 16>{
+            0x739cd088U, 0xb7d9ab74U, 0xf5c06ebaU, 0x114cefd2U,
+            0x6d7c2359U, 0x1a2a3647U, 0x27d18387U, 0xe681427bU,
+            0x93521029U, 0x0cee4d77U, 0x69e28142U, 0x1379bc46U,
+            0x23b71f49U, 0x0402ca23U, 0xd202bfc0U, 0x08eb8139U });
+
+        const auto take_eight = [](auto engine) {
+            std::array<std::uint64_t, 8> values;
+            std::ranges::generate(values, [&] { return engine(); });
+            return values;
+        };
+
+        constexpr std::array domains{
+            cdetail::deterministic_rng_domain::initial_population,
+            cdetail::deterministic_rng_domain::normal_breeding,
+            cdetail::deterministic_rng_domain::cataclysm,
+            cdetail::deterministic_rng_domain::elite_perturbation,
+        };
+        for (const auto domain : domains) {
+            gbassert(take_eight(cdetail::make_deterministic_rng(
+                seed, 2, 7, domain, 3))
+                == take_eight(cdetail::make_deterministic_rng(
+                    seed, 2, 7, domain, 3)));
+        }
+
+        const auto baseline = take_eight(cdetail::make_deterministic_rng(
+            seed, 2, 7, normal, 3));
+        gbassert(baseline != take_eight(cdetail::make_deterministic_rng(
+            seed + 1, 2, 7, normal, 3)));
+        gbassert(baseline != take_eight(cdetail::make_deterministic_rng(
+            seed, 3, 7, normal, 3)));
+        gbassert(baseline != take_eight(cdetail::make_deterministic_rng(
+            seed, 2, 8, normal, 3)));
+        gbassert(baseline != take_eight(cdetail::make_deterministic_rng(
+            seed, 2, 7, cdetail::deterministic_rng_domain::cataclysm, 3)));
+        gbassert(baseline != take_eight(cdetail::make_deterministic_rng(
+            seed, 2, 7, normal, 4)));
+
+        const auto later_normal = take_eight(cdetail::make_deterministic_rng(
+            seed, 3, 12, normal, 1));
+        auto cataclysm = cdetail::make_deterministic_rng(seed, 2, 7,
+            cdetail::deterministic_rng_domain::cataclysm, 0);
+        auto elite = cdetail::make_deterministic_rng(seed, 2, 7,
+            cdetail::deterministic_rng_domain::elite_perturbation, 0);
+        for (std::size_t i = 0; i < 64; ++i) {
+            (void)cataclysm();
+            (void)elite();
+        }
+        gbassert(later_normal == take_eight(cdetail::make_deterministic_rng(
+            seed, 3, 12, normal, 1)));
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_tie_order,
+        std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        using chromosome_t = std::tuple<int>;
+        using individual_t = std::pair<chromosome_t, std::optional<int>>;
+        std::vector<individual_t> population{
+            { chromosome_t{ 0 }, 5 },
+            { chromosome_t{ 1 }, std::nullopt },
+            { chromosome_t{ 2 }, 5 },
+            { chromosome_t{ 3 }, 5 },
+        };
+        cdetail::stable_rank_population(population, std::less<int>{});
+        gbassert(std::get<0>(population[0].first) == 0);
+        gbassert(std::get<0>(population[1].first) == 2);
+        gbassert(std::get<0>(population[2].first) == 3);
+        gbassert(std::get<0>(population[3].first) == 1);
+
+        optimization_history<chromosome_t, int, std::less<int>> history{
+            8, std::less<int>{} };
+        for (int chromosome = 0; chromosome < 8; ++chromosome) {
+            history.try_insert(5, chromosome_t{ chromosome });
+        }
+        for (std::size_t rank = 0; rank < history.size(); ++rank) {
+            gbassert(std::get<0>(history.all()[rank].second)
+                == 7 - static_cast<int>(rank));
+        }
+
+        auto first_draw_engine = cdetail::make_deterministic_rng(17, 1, 4,
+            cdetail::deterministic_rng_domain::normal_breeding, 2);
+        auto selection_engine = cdetail::make_deterministic_rng(17, 1, 4,
+            cdetail::deterministic_rng_domain::normal_breeding, 2);
+        const std::vector<int> fitnesses(8, 5);
+        const std::size_t expected = std::uniform_int_distribution<std::size_t>{
+            0, fitnesses.size() - 1 }(first_draw_engine);
+        const std::size_t selected = cdetail::tournament_select(
+            selection_engine, fitnesses, 5, std::less<int>{});
+        gbassert(selected == expected);
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_breeding_streams,
+        std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        using chromosome_t = std::tuple<int>;
+        using individual_t = std::pair<chromosome_t, std::optional<int>>;
+        using population_t = std::vector<individual_t>;
+
+        population_t population;
+        for (const int value : { 0, 1, -1, 2, -2, 3, -3, 4 }) {
+            population.push_back({ chromosome_t{ value }, value * value });
+        }
+        const auto wrappers = std::tuple{
+            discrete_value_range<int>({ -20, -10, -5, -2, -1, 0, 1, 2, 5, 10, 20 }) };
+        ga_config config;
+        config.tournament_size = 3;
+        config.crossover_rate = 0.75;
+        config.mutation_rate = 0.60;
+
+        constexpr std::uint64_t seed = 0x5a17c9e3ULL;
+        constexpr std::size_t population_size = 8;
+        constexpr std::size_t elite_count = 1;
+
+        const auto serial_lhs = cdetail::breed_next_generation_deterministic(
+            population, wrappers, config, std::less<int>{}, population_size,
+            elite_count, seed, 2, 5, 1);
+        const auto serial_rhs = cdetail::breed_next_generation_deterministic(
+            population, wrappers, config, std::less<int>{}, population_size,
+            elite_count, seed, 2, 5, 1);
+        gbassert(serial_lhs == serial_rhs);
+
+        gb::yadro::async::threadpool pool4(4);
+        const auto parallel_lhs = cdetail::breed_next_generation_deterministic(
+            pool4, population, wrappers, config, std::less<int>{},
+            population_size, elite_count, seed, 2, 5, pool4.thread_count());
+        std::vector<std::future<void>> unrelated;
+        for (std::size_t task = 0; task < 32; ++task) {
+            unrelated.push_back(pool4([task] {
+                volatile std::size_t sink = task * task;
+                (void)sink;
+                }));
+        }
+        for (auto& future : unrelated) {
+            future.get();
+        }
+        const auto parallel_rhs = cdetail::breed_next_generation_deterministic(
+            pool4, population, wrappers, config, std::less<int>{},
+            population_size, elite_count, seed, 2, 5, pool4.thread_count());
+        gbassert(parallel_lhs == parallel_rhs);
+
+        gb::yadro::async::threadpool pool8(8);
+        gb::yadro::async::threadpool pool16(16);
+        const auto eight_threads = cdetail::breed_next_generation_deterministic(
+            pool8, population, wrappers, config, std::less<int>{},
+            population_size, elite_count, seed, 2, 5, pool8.thread_count());
+        const auto sixteen_threads = cdetail::breed_next_generation_deterministic(
+            pool16, population, wrappers, config, std::less<int>{},
+            population_size, elite_count, seed, 2, 5, pool16.thread_count());
+        gbassert(eight_threads == sixteen_threads);
+    }
+
     // Detection trait the optimizer uses to recognise container wrappers; must
     // key on the public tag, not a private member (finding 6.A).
     template<class W>

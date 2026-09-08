@@ -1522,6 +1522,85 @@ namespace gb::yadro::algorithm::conv {
             { tp.thread_count() } -> std::convertible_to<std::size_t>;
         };
 
+        enum class deterministic_rng_domain : std::uint64_t {
+            initial_population = 0x494e495400000001ULL,
+            normal_breeding = 0x4e4f524d414c0001ULL,
+            cataclysm = 0x4341544100000001ULL,
+            elite_perturbation = 0x454c495400000001ULL,
+        };
+
+        [[nodiscard]] constexpr std::uint64_t splitmix64(
+            std::uint64_t value) noexcept
+        {
+            value += 0x9e3779b97f4a7c15ULL;
+            value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+            return value ^ (value >> 31);
+        }
+
+        [[nodiscard]] constexpr std::array<std::uint32_t, 16>
+            deterministic_seed_material(
+                std::uint64_t seed,
+                std::size_t phase,
+                std::size_t generation,
+                deterministic_rng_domain domain,
+                std::size_t logical_stream) noexcept
+        {
+            std::uint64_t state = splitmix64(seed);
+            for (const std::uint64_t component : std::array{
+                static_cast<std::uint64_t>(phase),
+                static_cast<std::uint64_t>(generation),
+                std::to_underlying(domain),
+                static_cast<std::uint64_t>(logical_stream) }) {
+                state = splitmix64(state ^ splitmix64(component));
+            }
+
+            std::array<std::uint32_t, 16> material{};
+            for (std::size_t pair_index = 0; pair_index < 8; ++pair_index) {
+                state = splitmix64(state + pair_index);
+                material[pair_index * 2] = static_cast<std::uint32_t>(state);
+                material[pair_index * 2 + 1] =
+                    static_cast<std::uint32_t>(state >> 32);
+            }
+            return material;
+        }
+
+        [[nodiscard]] inline std::mt19937_64 make_deterministic_rng(
+            std::uint64_t seed,
+            std::size_t phase,
+            std::size_t generation,
+            deterministic_rng_domain domain,
+            std::size_t logical_stream)
+        {
+            const auto material = deterministic_seed_material(
+                seed, phase, generation, domain, logical_stream);
+            std::seed_seq sequence(material.begin(), material.end());
+            return std::mt19937_64{ sequence };
+        }
+
+        [[nodiscard]] constexpr std::size_t logical_chunk_count(
+            std::size_t work_count,
+            std::size_t logical_thread_count) noexcept
+        {
+            return std::min(work_count, logical_thread_count);
+        }
+
+        [[nodiscard]] constexpr std::pair<std::size_t, std::size_t>
+            logical_chunk_bounds(
+                std::size_t work_count,
+                std::size_t logical_thread_count,
+                std::size_t logical_stream) noexcept
+        {
+            if (logical_thread_count == 0) {
+                return { 0, 0 };
+            }
+            const std::size_t chunk_size = work_count / logical_thread_count
+                + (work_count % logical_thread_count != 0);
+            const std::size_t begin = std::min(
+                logical_stream * chunk_size, work_count);
+            return { begin, std::min(begin + chunk_size, work_count) };
+        }
+
         inline std::mt19937_64& thread_rng() {
             thread_local std::mt19937_64 rng{
                 std::random_device{}() ^
@@ -1604,6 +1683,178 @@ namespace gb::yadro::algorithm::conv {
                 if (cmp(fitnesses[c], fitnesses[best])) best = c;
             }
             return best;
+        }
+
+        template<typename Population, typename CompareFn>
+        void stable_rank_population(Population& population, CompareFn cmp)
+        {
+            std::stable_sort(population.begin(), population.end(),
+                [&](const auto& lhs, const auto& rhs) {
+                    if (lhs.second && rhs.second) {
+                        return cmp(*lhs.second, *rhs.second);
+                    }
+                    return lhs.second.has_value() && !rhs.second.has_value();
+                });
+        }
+
+        template<typename Population, typename WrapperTuple, typename CompareFn>
+        void fill_deterministic_breeding_stream(
+            Population& next,
+            const Population& population,
+            const std::vector<typename std::remove_cvref_t<
+                decltype(population.front().second)>::value_type>& fitnesses,
+            const WrapperTuple& wrappers,
+            const ga_config& config,
+            CompareFn compare,
+            std::size_t elite_n,
+            std::uint64_t seed,
+            std::size_t phase_index,
+            std::size_t phase_generation,
+            std::size_t logical_thread_count,
+            std::size_t logical_stream)
+        {
+            using chromosome_t = typename Population::value_type::first_type;
+            const std::size_t num_offspring = next.size() - elite_n;
+            const auto [begin, end] = logical_chunk_bounds(
+                num_offspring, logical_thread_count, logical_stream);
+            auto rng = make_deterministic_rng(
+                seed, phase_index, phase_generation,
+                deterministic_rng_domain::normal_breeding, logical_stream);
+            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
+
+            for (std::size_t offspring_index = begin;
+                offspring_index < end; ++offspring_index) {
+                const std::size_t p1 = tournament_select(
+                    rng, fitnesses, config.tournament_size, compare);
+                chromosome_t child;
+                if (coin(rng) < config.crossover_rate) {
+                    const std::size_t p2 = tournament_select(
+                        rng, fitnesses, config.tournament_size, compare);
+                    child = crossover_chromosomes(rng,
+                        population[p1].first, population[p2].first, wrappers);
+                }
+                else {
+                    child = population[p1].first;
+                }
+                child = mutate_chromosome(
+                    rng, std::move(child), wrappers, config.mutation_rate);
+                next[elite_n + offspring_index] = {
+                    std::move(child), std::nullopt };
+            }
+        }
+
+        template<typename Population, typename WrapperTuple, typename CompareFn>
+        [[nodiscard]] Population breed_next_generation_deterministic(
+            const Population& population,
+            const WrapperTuple& wrappers,
+            const ga_config& config,
+            CompareFn compare,
+            std::size_t pop_size,
+            std::size_t elite_n,
+            std::uint64_t seed,
+            std::size_t phase_index,
+            std::size_t phase_generation,
+            std::size_t logical_thread_count)
+        {
+            util::gbassert(logical_thread_count > 0,
+                "deterministic breeding requires a positive logical thread count");
+            util::gbassert(!population.empty() && elite_n <= pop_size,
+                "deterministic breeding requires a valid evaluated population");
+
+            using optional_target_t = std::remove_cvref_t<
+                decltype(population.front().second)>;
+            using target_t = typename optional_target_t::value_type;
+            std::vector<target_t> fitnesses;
+            fitnesses.reserve(population.size());
+            for (const auto& [chrom, fit] : population) {
+                util::gbassert(fit.has_value(),
+                    "breed_next_generation_deterministic: all individuals must be evaluated beforehand");
+                fitnesses.push_back(*fit);
+            }
+
+            Population next(pop_size, population.front());
+            for (std::size_t i = 0; i < elite_n && i < population.size(); ++i) {
+                next[i] = population[i];
+            }
+
+            const std::size_t num_offspring = pop_size - elite_n;
+            const std::size_t stream_count = logical_chunk_count(
+                num_offspring, logical_thread_count);
+            for (std::size_t logical_stream = 0;
+                logical_stream < stream_count; ++logical_stream) {
+                fill_deterministic_breeding_stream(next, population, fitnesses,
+                    wrappers, config, compare, elite_n, seed, phase_index,
+                    phase_generation, logical_thread_count, logical_stream);
+            }
+            return next;
+        }
+
+        template<typename ThreadPool, typename Population,
+            typename WrapperTuple, typename CompareFn>
+        [[nodiscard]] Population breed_next_generation_deterministic(
+            ThreadPool& tp,
+            const Population& population,
+            const WrapperTuple& wrappers,
+            const ga_config& config,
+            CompareFn compare,
+            std::size_t pop_size,
+            std::size_t elite_n,
+            std::uint64_t seed,
+            std::size_t phase_index,
+            std::size_t phase_generation,
+            std::size_t logical_thread_count)
+        {
+            util::gbassert(logical_thread_count > 0,
+                "deterministic breeding requires a positive logical thread count");
+            util::gbassert(!population.empty() && elite_n <= pop_size,
+                "deterministic breeding requires a valid evaluated population");
+
+            using optional_target_t = std::remove_cvref_t<
+                decltype(population.front().second)>;
+            using target_t = typename optional_target_t::value_type;
+            std::vector<target_t> fitnesses;
+            fitnesses.reserve(population.size());
+            for (const auto& [chrom, fit] : population) {
+                util::gbassert(fit.has_value(),
+                    "breed_next_generation_deterministic: all individuals must be evaluated beforehand");
+                fitnesses.push_back(*fit);
+            }
+
+            Population next(pop_size, population.front());
+            for (std::size_t i = 0; i < elite_n && i < population.size(); ++i) {
+                next[i] = population[i];
+            }
+
+            const std::size_t num_offspring = pop_size - elite_n;
+            const std::size_t stream_count = logical_chunk_count(
+                num_offspring, logical_thread_count);
+            std::vector<std::future<void>> futures;
+            futures.reserve(stream_count);
+            for (std::size_t logical_stream = 0;
+                logical_stream < stream_count; ++logical_stream) {
+                futures.push_back(tp([&, logical_stream] {
+                    fill_deterministic_breeding_stream(next, population,
+                        fitnesses, wrappers, config, compare, elite_n, seed,
+                        phase_index, phase_generation, logical_thread_count,
+                        logical_stream);
+                    }));
+            }
+
+            std::exception_ptr first_exception;
+            for (auto& future : futures) {
+                try {
+                    future.get();
+                }
+                catch (...) {
+                    if (!first_exception) {
+                        first_exception = std::current_exception();
+                    }
+                }
+            }
+            if (first_exception) {
+                std::rethrow_exception(first_exception);
+            }
+            return next;
         }
 
     } // namespace detail
@@ -3056,6 +3307,32 @@ namespace gb::yadro::algorithm::conv {
             current_pop_size_.store(population_.size(), std::memory_order_relaxed);
         }
 
+        [[nodiscard]] std::vector<individual_t> init_population_deterministic(
+            size_t target_size,
+            std::uint64_t seed,
+            size_t phase_index)
+        {
+            if (target_size == 0) {
+                throw std::invalid_argument(
+                    "Population size must be greater than zero.");
+            }
+
+            auto candidate = population_;
+            detail::stable_rank_population(candidate, compare_);
+            if (candidate.size() > target_size) {
+                candidate.resize(target_size);
+            }
+
+            auto rng = detail::make_deterministic_rng(
+                seed, phase_index, 0,
+                detail::deterministic_rng_domain::initial_population, 0);
+            while (candidate.size() < target_size) {
+                candidate.push_back({
+                    detail::random_chromosome(rng, wrappers_), std::nullopt });
+            }
+            return candidate;
+        }
+
         void evaluate_all_single() {
             for (auto& ind : population_)
                 if (!ind.second)
@@ -3119,6 +3396,11 @@ namespace gb::yadro::algorithm::conv {
             auto last = population_.end();
             std::ranges::nth_element(first, middle, last, comp);
             std::ranges::sort(first, middle, comp);
+        }
+
+        void sort_population_deterministic()
+        {
+            detail::stable_rank_population(population_, compare_);
         }
 
         // FIX #17: All writes to history_ are guarded by history_mutex_.
@@ -3192,6 +3474,36 @@ namespace gb::yadro::algorithm::conv {
                 next.push_back({ std::move(child), std::nullopt });
             }
             return next;
+        }
+
+        [[nodiscard]] std::vector<individual_t>
+            breed_next_generation_deterministic(
+                size_t pop_size,
+                size_t elite_n,
+                std::uint64_t seed,
+                size_t phase_index,
+                size_t phase_generation,
+                size_t logical_thread_count)
+        {
+            return detail::breed_next_generation_deterministic(
+                population_, wrappers_, config, compare_, pop_size, elite_n,
+                seed, phase_index, phase_generation, logical_thread_count);
+        }
+
+        template<typename ThreadPool>
+        [[nodiscard]] std::vector<individual_t>
+            breed_next_generation_deterministic(
+                ThreadPool& tp,
+                size_t pop_size,
+                size_t elite_n,
+                std::uint64_t seed,
+                size_t phase_index,
+                size_t phase_generation,
+                size_t logical_thread_count)
+        {
+            return detail::breed_next_generation_deterministic(
+                tp, population_, wrappers_, config, compare_, pop_size, elite_n,
+                seed, phase_index, phase_generation, logical_thread_count);
         }
 
         // Parallel counterpart to breed_next_generation(pop_size, elite_n, rng).
