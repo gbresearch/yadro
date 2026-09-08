@@ -891,7 +891,7 @@ git commit -m "feat: parallelize deterministic GA evaluation"
 - Produces: private `commit_recovery_statistics(stop_reason)` called only after a recovered population is fully evaluated.
 - Preserves: legacy `should_stop_or_cataclysm` and legacy recovery RNG path.
 
-- [ ] **Step 1: Add recovery-budget atomicity tests**
+- [x] **Step 1: Add recovery-budget atomicity tests**
 
 Force cataclysm with `diversity_threshold = 1.0`, `cataclysm_enabled = true`, and a finite recovery cap. Set the evaluation budget one call below the complete recovery plan and assert population serialization, `cataclysm_count`, request counters, and generation count remain at their pre-recovery committed values. Repeat with exactly enough budget and assert recovery commits once.
 
@@ -899,7 +899,7 @@ Force elite perturbation with a constant numeric target, no target fitness, `eli
 
 Add paired repeated runs for terminal `target_reached`, `stagnation`, `diversity`, and `elite_converged` outcomes. For each pair, assert identical normalized statistics, ordered history, and population bytes, including the exact terminal reason and generations-without-improvement counter.
 
-- [ ] **Step 2: Add full-sort survivor and tied-history tests**
+- [x] **Step 2: Add full-sort survivor and tied-history tests**
 
 Create two optimizers with the same distinct-fitness chromosomes injected in ascending and descending order. Give them the same seed and force cataclysm with `cataclysm_survival_fraction > elitism_fraction`. After deterministic stable full ranking and recovery, normalize through `serialized_population_state` and assert both populations match. This proves survivors come from the full fitness-ranked prefix rather than the legacy unspecified post-elite partition.
 
@@ -907,7 +907,7 @@ Add a separate all-equal-fitness recovery case with survivor count above the eli
 
 For constant fitness and injected `0..7`, stop at the target check after the initial unsorted feed and assert history chromosome order is exactly `7,6,5,4,3,2,1,0`, preserving `try_insert`'s lower-bound polarity.
 
-- [ ] **Step 3: Split deterministic stopping decisions from mutation**
+- [x] **Step 3: Split deterministic stopping decisions from mutation**
 
 Keep target, diversity, elite convergence, and stagnation precedence identical. Add a deterministic decision helper that updates deterministic observations but returns `cataclysm` or `elite_perturbation` without mutating `population_` or incrementing recovery counters. Replace the Task 4 legacy-helper call and remove its temporary recovery `logic_error`; legacy code continues to call `should_stop_or_cataclysm` unchanged.
 
@@ -924,7 +924,7 @@ struct deterministic_stop_decision {
 
 `check_deterministic_stop` performs target, stagnation-observation, diversity, elite-convergence, and stagnation checks in the same order as the legacy function. It returns recovery metadata but never calls either legacy trigger.
 
-- [ ] **Step 4: Build and evaluate recovery candidates transactionally**
+- [x] **Step 4: Build and evaluate recovery candidates transactionally**
 
 For cataclysm, copy the committed, fully ranked population; preserve `[0, survivor_count)` and replace later indices with `random_chromosome` using domain `cataclysm`, phase, phase-local generation, and logical stream zero. For elite perturbation, preserve index zero and replace `[1, elite_n)` with domain `elite_perturbation`.
 
@@ -942,7 +942,7 @@ population_ = std::move(candidate);
 commit_recovery_statistics(decision.reason);
 ```
 
-- [ ] **Step 5: Resume breeding after committed recovery**
+- [x] **Step 5: Resume breeding after committed recovery**
 
 After a recovery commit, breed from the fully evaluated recovered population within the same generation iteration. If the offspring evaluation plan cannot fit, retain the recovered population as the last committed boundary, do not increment generations, and stop with `evaluation_budget`.
 
@@ -958,7 +958,7 @@ auto offspring = breed_next_generation_deterministic(
     phase_index, phase_generation, logical_thread_count);
 ```
 
-- [ ] **Step 6: Run Debug and Release and commit Task 6**
+- [x] **Step 6: Run Debug and Release and commit Task 6**
 
 Expected: recovery tests pass at both sides of the budget boundary, tie order is pinned, and legacy recovery tests remain green.
 
