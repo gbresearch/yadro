@@ -112,20 +112,25 @@ Write-Host 'RED confirmed: value-table waiter remained blocked after exception r
 
 Expected RED: the test process remains blocked until the 15-second outer ceiling kills it. A normal exit, including exit code zero, does not confirm this defect; it means the lost-wakeup race did not materialize on that run (or a different failure occurred and must be inspected). Retry the bounded run or strengthen the waiter synchronization rather than treating a pass as evidence that the bug is absent. The test must not be allowed to hang the implementation session indefinitely.
 
-- [x] **Step 3: Fix the value-returning exception reset order only**
+- [x] **Step 3: Fix value-returning exception reset without breaking probe chains**
 
-Replace the value-returning catch block's notify-before-reset sequence with:
+Add a tombstone state to the value-returning table and replace its
+notify-before-reset sequence with:
 
 ```cpp
 catch (...) {
-    e.state.store(State::empty, std::memory_order_relaxed);
+    e.state.store(State::tombstone, std::memory_order_release);
     e.h_lo.store(0, std::memory_order_release);
     e.state.notify_all();
     throw;
 }
 ```
 
-Do not make the analogous edit in `lockfree_memo_table<Hasher, Function, void>`.
+`State::empty` remains reserved for a virgin slot so a failed computation does
+not create a hole in a collision chain. Do not wait on either `State::empty` or
+`State::tombstone`, because the next changed word may be `h_lo` while state
+remains unchanged. Do not make the analogous edit in
+`lockfree_memo_table<Hasher, Function, void>`.
 
 - [x] **Step 4: Run the Debug build and confirm the waiter regression is GREEN**
 
@@ -185,54 +190,21 @@ Expected: compile errors naming missing `try_get`, `try_get_with_hash`, and `ins
 
 - [x] **Step 7: Implement the value-returning plain-table APIs**
 
-Add `<optional>`. Reuse the existing zero-key normalization and probe sequence. The lookup implementation follows this state machine:
+Add `<optional>`. Reuse the existing zero-key normalization and probe sequence.
+Implement `try_get(Args&&...)` by hashing once and forwarding. A virgin empty
+slot is a conclusive miss; a tombstone is not, so lookup continues probing.
+For a matching hash in `State::empty` or `State::tombstone`, recheck `h_lo` and
+yield instead of using `atomic::wait`. Wait only on `State::computing`.
 
-```cpp
-std::optional<Value> try_get_with_hash(uint64_t h_lo, uint64_t h_hi) const
-{
-    if ((h_lo | h_hi) == 0) h_lo = 1;
-    size_t idx = mix64(h_lo) & mask_;
-
-    for (size_t probe = 0; probe < max_probe_; ++probe) {
-        Entry& e = table_[idx];
-        const uint64_t existing = e.h_lo.load(std::memory_order_acquire);
-        if (existing == 0) return std::nullopt;
-        if (existing != h_lo) {
-            idx = (idx + 1) & mask_;
-            continue;
-        }
-
-        State state = e.state.load(std::memory_order_acquire);
-        while (state == State::empty) {
-            if (e.h_lo.load(std::memory_order_acquire) != h_lo) break;
-            e.state.wait(State::empty, std::memory_order_acquire);
-            state = e.state.load(std::memory_order_acquire);
-        }
-        if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
-            idx = (idx + 1) & mask_;
-            continue;
-        }
-        if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
-            idx = (idx + 1) & mask_;
-            continue;
-        }
-        while (state == State::computing) {
-            e.state.wait(State::computing, std::memory_order_acquire);
-            state = e.state.load(std::memory_order_acquire);
-            if (e.h_lo.load(std::memory_order_acquire) != h_lo) break;
-        }
-        if (state == State::ready
-            && e.h_lo.load(std::memory_order_acquire) == h_lo
-            && e.h_hi.load(std::memory_order_acquire) == h_hi)
-            return e.value;
-
-        idx = (idx + 1) & mask_;
-    }
-    throw std::runtime_error("hash table probe limit exceeded");
-}
-```
-
-Implement `try_get(Args&&...)` by hashing once and forwarding. Implement `insert_ready_with_hash` with the same loop, but on a successful empty-slot claim store `h_hi`, move the value into `e.value`, publish `State::ready` with release ordering, notify waiters, and return `e.value`. A matching ready key returns its existing value; a matching computing key waits or resumes after reset. After a failed CAS, re-read the same slot rather than blindly advancing.
+Implement `insert_ready_with_hash` with the same state machine. Record the first
+tombstone while continuing the exact-key search. Only after reaching a virgin
+empty slot or exhausting the search may insertion try to claim the recorded
+tombstone; this prevents duplicate keys when an existing key lies later in the
+chain. On a successful claim, store `h_hi`, move the value into `e.value`,
+publish `State::ready` with release ordering, notify waiters, and return
+`e.value`. A matching ready key returns its existing value; a matching computing
+key waits or resumes after reset. After a failed CAS, restart the search rather
+than blindly advancing.
 
 - [x] **Step 8: Implement sharded forwarding and run Debug and Release**
 

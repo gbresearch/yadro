@@ -358,16 +358,33 @@ The lookup never claims an empty slot and never invokes `func_`. A matching
 `State::computing` waits for that state to become ready or for the slot to be
 reset; it then returns the ready value or resumes the probe respectively. A
 matching `h_lo` whose state is still `State::empty` is treated as the existing
-key-publication window: lookup waits for `h_hi` and state publication or observes
-a reset rather than reporting a false miss. A different key continues probing.
-A conclusively empty slot returns `std::nullopt`, and exhausting `max_probe_`
-throws the table's existing probe-limit error. Although a valid optimizer
-boundary has no outstanding memo computations, defining the concurrent case
-keeps the container API correct on its own. Exception reset must publish
-`State::empty`, then reset `h_lo` to zero with release ordering, and only then
-call `state.notify_all()`. Publishing only `State::empty` before notification is
-insufficient: a waiter could still observe the matching `h_lo`, wait on the
-empty state, and miss the later unnotified `h_lo` reset.
+key-publication window: lookup rechecks `h_lo` while waiting for `h_hi` and
+state publication or observes a reset rather than reporting a false miss. It
+must not use `atomic::wait` on `State::empty`, because the next changed word can
+be `h_lo`. A different key continues probing. A virgin empty slot returns
+`std::nullopt`, and exhausting `max_probe_` throws the table's existing
+probe-limit error unless a tombstone already proves the searched chain can
+contain a missing key. Although a valid optimizer boundary has no outstanding
+memo computations, defining the concurrent case keeps the container API
+correct on its own.
+
+Failed value computations publish `State::tombstone`, reset `h_lo` to zero
+with release ordering, and only then call `state.notify_all()`. Waiters never
+wait on `State::empty` or `State::tombstone`: both are publication/reset states
+where `h_lo` may be the next changed word. Tombstones preserve open-addressing
+probe chains. Lookup continues past them. Insertion records the first tombstone
+while it continues the exact-key search. A virgin empty terminator is always
+claimed directly, so concurrent same-key inserters converge on the same CAS
+rather than choosing different tombstone/virgin slots from stale observations.
+The first tombstone is reused only after a full probe that observed no unstable
+different-key entry. This includes a computing entry with the requested low hash
+but a different high hash. For a different low hash, insertion accepts a ready
+state as stable only after reloading the low hash and confirming that the state
+and hash observations still describe the same entry. If a full probe saw an
+entry still being published or computed, insertion yields and retries because
+that entry may itself become the first tombstone. This prevents false misses and
+duplicate insertion behind a failed slot without blocking on an unrelated
+colliding computation.
 
 Parallel target evaluation must not make memo occupancy depend on completion
 order. Add corresponding `insert_ready_with_hash(h_lo, h_hi, value)` operations
@@ -375,7 +392,8 @@ to the value-returning plain and sharded tables. They insert a precomputed value
 without invoking `func_`; the sharded form uses the identical shard mapping. A
 matching ready key preserves and returns the table's existing value. A matching
 computing key waits under the same rule as `try_get`. New distinct keys claim
-slots using the existing probe rules.
+slots using the same stable-scan rule, including direct virgin-slot claims and
+deferred tombstone reuse after an exact-key search with no unstable entry.
 
 ```cpp
 Value insert_ready_with_hash(
@@ -389,13 +407,15 @@ success or failure are therefore deterministic. The deterministic path must not
 call `evaluate_chromosome()`: that helper routes through `get_or_compute`, which
 would let worker completion order determine memo insertion order.
 
-The value-returning table's reset reordering is an intentional fix to a
-pre-existing `get_or_compute` lost-wakeup defect and therefore changes legacy
-concurrency behavior from potentially hanging to making progress. Its existing
-success, value, collision, and exception contracts remain unchanged. The `void`
-specialization has the same notification-before-reset defect, but it is not used
-by the GA and is explicitly outside this change; repairing it requires separate
-coverage for its configurable fire-and-forget and wait-for-completion behavior.
+The value-returning table's tombstone reset protocol is an intentional fix to
+pre-existing `get_or_compute` lost-wakeup and probe-chain defects and therefore
+changes legacy exception concurrency behavior from potentially hanging or
+missing a colliding entry to making progress while preserving the chain. Its
+existing success, value, collision, and exception contracts remain unchanged.
+The `void` specialization has the same notification-before-reset defect, but it
+is not used by the GA and is explicitly outside this change; repairing it
+requires separate coverage for its configurable fire-and-forget and
+wait-for-completion behavior.
 
 The concrete GA memo type that consumes the new sharded forwarding operations
 is `sharded_lockfree_memo_table<xxhash128, memo_fn_t, target_t,
@@ -404,7 +424,9 @@ value-returning table and this sharded wrapper must expose the required API.
 
 Tests for these container APIs belong in `test/container_test.cpp` and cover
 ready hit, miss, normalized all-zero key, collision probing, matching computing
-wait/reset, sharded routing, stable ready insertion, and probe exhaustion.
+wait/reset, sharded routing, stable ready insertion, probe exhaustion, and a
+full probe whose unstable collision later becomes the reusable tombstone,
+including collisions that share a low hash but differ in their high hash.
 
 ## Deterministic Evaluation
 
@@ -591,9 +613,10 @@ self-contained relative to its starting optimizer state.
 
 - Existing `optimize()` signatures, overload resolution, defaults, and
   successful nonexception runtime behavior remain unchanged.
-- The value-returning memo table intentionally fixes exception-reset wakeup
-  ordering for existing `get_or_compute` callers; the `void` specialization is
-  unchanged and outside scope.
+- The value-returning memo table intentionally adds a tombstone reset protocol
+  for existing `get_or_compute` callers, fixing exception-reset wakeup and
+  probe-chain behavior; the `void` specialization is unchanged and outside
+  scope.
 - `ga_config`, `adaptive_phase_config`, wrapper, and optimizer serialization
   field order remain unchanged.
 - Existing stop-reason numeric values remain unchanged; new values are appended.

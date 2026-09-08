@@ -652,6 +652,11 @@ namespace
         gbassert(waiter.wait_for(1s) == std::future_status::ready);
         gbassert(waiter.get() == 42);
         gbassert(calls.load(std::memory_order_relaxed) == 2);
+
+        // The retry must remain discoverable after the failed leader's reset.
+        gbassert(table.try_get(21) == 42);
+        const auto [h_lo, h_hi] = hasher{}(21);
+        gbassert(table.insert_ready_with_hash(h_lo, h_hi, 99) == 42);
     }
 
     GB_TEST(container, lockfree_memo_lookup_and_ready_insert)
@@ -718,6 +723,150 @@ namespace
         gbassert(calls.load(std::memory_order_relaxed) == 1);
         gbassert(table.get_or_compute(21) == 42);
         gbassert(calls.load(std::memory_order_relaxed) == 2);
+    }
+
+    GB_TEST(container, lockfree_memo_exception_tombstone_preserves_probe_chain)
+    {
+        using namespace std::chrono_literals;
+
+        std::atomic<bool> failing_call_entered{ false };
+        std::atomic<bool> release_failing_call{ false };
+        auto fn = [&](int value) -> int {
+            failing_call_entered.store(true, std::memory_order_release);
+            failing_call_entered.notify_all();
+            release_failing_call.wait(false, std::memory_order_acquire);
+            throw std::runtime_error(std::to_string(value));
+            };
+        struct unused_hasher {
+            std::pair<std::uint64_t, std::uint64_t> operator()(int) const
+                noexcept
+            {
+                return { 1, 1 };
+            }
+        };
+
+        // Pin the deliberately colliding probe starts used by this fixture.
+        gbassert((mix64(4) & 7) == (mix64(5) & 7));
+        lockfree_memo_table table(8, fn, unused_hasher{}, 4);
+        auto failing = std::async(std::launch::async, [&] {
+            return table.get_or_compute_with_hash(4, 1, 1);
+            });
+        failing_call_entered.wait(false, std::memory_order_acquire);
+
+        gbassert(table.insert_ready_with_hash(5, 2, 55) == 55);
+        release_failing_call.store(true, std::memory_order_release);
+        release_failing_call.notify_all();
+        must_throw<std::runtime_error>([&] { (void)failing.get(); });
+
+        // The failed entry is a tombstone before the ready colliding entry.
+        gbassert(table.insert_ready_with_hash(5, 2, 99) == 55);
+        gbassert(table.try_get_with_hash(5, 2) == 55);
+    }
+
+    GB_TEST(container, lockfree_memo_full_probe_waits_for_unstable_collision)
+    {
+        using namespace std::chrono_literals;
+
+        std::atomic<bool> failing_call_entered{ false };
+        std::atomic<bool> release_failing_call{ false };
+        auto fn = [&](int) -> int {
+            failing_call_entered.store(true, std::memory_order_release);
+            failing_call_entered.notify_all();
+            release_failing_call.wait(false, std::memory_order_acquire);
+            throw std::runtime_error("expected failure");
+            };
+        struct unused_hasher {
+            std::pair<std::uint64_t, std::uint64_t> operator()(int) const
+                noexcept
+            {
+                return { 1, 1 };
+            }
+        };
+
+        lockfree_memo_table table(8, fn, unused_hasher{}, 2);
+        std::uint64_t blocker_h_lo = 1;
+        while ((mix64(blocker_h_lo) & 7) != 6) {
+            ++blocker_h_lo;
+        }
+        gbassert(table.insert_ready_with_hash(blocker_h_lo, 99, 66) == 66);
+
+        // Hashes 4 and 5 both start at slot 5. The ready blocker occupies slot
+        // 6, so the two-slot probe has no virgin terminator while hash 4 is
+        // computing.
+        gbassert((mix64(4) & 7) == 5);
+        gbassert((mix64(5) & 7) == 5);
+        auto failing = std::async(std::launch::async, [&] {
+            return table.get_or_compute_with_hash(4, 1, 1);
+            });
+        failing_call_entered.wait(false, std::memory_order_acquire);
+
+        // A full probe containing an unstable computation cannot safely reuse
+        // a tombstone or report exhaustion: that computation may fail and open
+        // the first reusable slot in the probe chain.
+        auto inserting = std::async(std::launch::async, [&] {
+            return table.insert_ready_with_hash(5, 2, 55);
+            });
+        const bool waited_for_stable_probe =
+            inserting.wait_for(20ms) == std::future_status::timeout;
+
+        release_failing_call.store(true, std::memory_order_release);
+        release_failing_call.notify_all();
+        must_throw<std::runtime_error>([&] { (void)failing.get(); });
+        gbassert(inserting.get() == 55);
+        gbassert(waited_for_stable_probe);
+    }
+
+    GB_TEST(container, lockfree_memo_full_probe_waits_for_unstable_high_hash_collision)
+    {
+        using namespace std::chrono_literals;
+
+        std::atomic<bool> failing_call_entered{ false };
+        std::atomic<bool> release_failing_call{ false };
+        auto fn = [&](int value) -> int {
+            if (value == 1) {
+                failing_call_entered.store(true, std::memory_order_release);
+                failing_call_entered.notify_all();
+                release_failing_call.wait(false, std::memory_order_acquire);
+            }
+            throw std::runtime_error("expected failure");
+            };
+        struct unused_hasher {
+            std::pair<std::uint64_t, std::uint64_t> operator()(int) const
+                noexcept
+            {
+                return { 1, 1 };
+            }
+        };
+
+        lockfree_memo_table table(8, fn, unused_hasher{}, 2);
+        std::uint64_t tombstone_h_lo = 1;
+        while ((mix64(tombstone_h_lo) & 7) != 6) {
+            ++tombstone_h_lo;
+        }
+        must_throw<std::runtime_error>([&] {
+            (void)table.get_or_compute_with_hash(tombstone_h_lo, 99, 2);
+            });
+
+        // The target and the in-flight collision share low hash 4 but use
+        // different high hashes. Slot 6 is already a tombstone, so insertion
+        // may reuse it only after the slot-5 computation becomes stable.
+        gbassert((mix64(4) & 7) == 5);
+        auto failing = std::async(std::launch::async, [&] {
+            return table.get_or_compute_with_hash(4, 1, 1);
+            });
+        failing_call_entered.wait(false, std::memory_order_acquire);
+
+        auto inserting = std::async(std::launch::async, [&] {
+            return table.insert_ready_with_hash(4, 2, 55);
+            });
+        const bool waited_for_stable_probe =
+            inserting.wait_for(20ms) == std::future_status::timeout;
+
+        release_failing_call.store(true, std::memory_order_release);
+        release_failing_call.notify_all();
+        must_throw<std::runtime_error>([&] { (void)failing.get(); });
+        gbassert(inserting.get() == 55);
+        gbassert(waited_for_stable_probe);
     }
 
     GB_TEST(container, lockfree_memo_ready_insert_preserves_collision_probing)

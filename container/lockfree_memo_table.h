@@ -66,7 +66,8 @@ namespace gb::yadro::container
     enum class State : uint8_t {
         empty,
         computing,
-        ready
+        ready,
+        tombstone
     };
 
     // mix64 function from MurmurHash3
@@ -146,11 +147,18 @@ namespace gb::yadro::container
             }
 
             size_t idx = mix64(h_lo) & mask_;
+            bool saw_tombstone = false;
             for (size_t probe = 0; probe < max_probe_; ++probe) {
                 Entry& e = table_[idx];
                 const uint64_t existing = e.h_lo.load(std::memory_order_acquire);
 
                 if (existing == 0) {
+                    if (e.state.load(std::memory_order_acquire)
+                        == State::tombstone) {
+                        saw_tombstone = true;
+                        idx = (idx + 1) & mask_;
+                        continue;
+                    }
                     return std::nullopt;
                 }
                 if (existing != h_lo) {
@@ -159,11 +167,15 @@ namespace gb::yadro::container
                 }
 
                 State current_state = e.state.load(std::memory_order_acquire);
-                while (current_state == State::empty) {
+                while (current_state == State::empty
+                    || current_state == State::tombstone) {
                     if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
                         goto next_lookup_probe;
                     }
-                    e.state.wait(State::empty, std::memory_order_acquire);
+                    // `empty` and `tombstone` are publication/reset states.  The
+                    // hash word, rather than state, may be the next value to
+                    // change, so atomic::wait on state could sleep forever.
+                    std::this_thread::yield();
                     current_state = e.state.load(std::memory_order_acquire);
                 }
 
@@ -189,6 +201,9 @@ namespace gb::yadro::container
                 idx = (idx + 1) & mask_;
             }
 
+            if (saw_tombstone) {
+                return std::nullopt;
+            }
             throw std::runtime_error("hash table probe limit exceeded");
         }
 
@@ -199,66 +214,136 @@ namespace gb::yadro::container
                 h_lo = 1;
             }
 
-            size_t idx = mix64(h_lo) & mask_;
-            for (size_t probe = 0; probe < max_probe_; ++probe) {
-                Entry& e = table_[idx];
+            const size_t initial_idx = mix64(h_lo) & mask_;
+            const auto try_claim = [&](size_t claim_idx) -> Entry* {
+                Entry& claim = table_[claim_idx];
+                uint64_t expected = 0;
+                if (!claim.h_lo.compare_exchange_strong(
+                    expected, h_lo,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                    return nullptr;
+                }
+                claim.h_hi.store(h_hi, std::memory_order_relaxed);
+                try {
+                    claim.value = std::move(value);
+                }
+                catch (...) {
+                    claim.state.store(
+                        State::tombstone, std::memory_order_release);
+                    claim.h_lo.store(0, std::memory_order_release);
+                    claim.state.notify_all();
+                    throw;
+                }
+                claim.state.store(State::ready, std::memory_order_release);
+                claim.state.notify_all();
+                return &claim;
+            };
 
-                for (;;) {
-                    uint64_t existing = e.h_lo.load(std::memory_order_acquire);
+            for (;;) {
+                std::optional<size_t> first_tombstone;
+                size_t idx = initial_idx;
+                bool restart = false;
+                bool saw_unstable = false;
+                for (size_t probe = 0; probe < max_probe_; ++probe) {
+                    Entry& e = table_[idx];
+                    const uint64_t existing =
+                        e.h_lo.load(std::memory_order_acquire);
                     if (existing == 0) {
-                        if (e.h_lo.compare_exchange_strong(
-                            existing, h_lo,
-                            std::memory_order_acq_rel,
-                            std::memory_order_acquire))
-                        {
-                            e.h_hi.store(h_hi, std::memory_order_relaxed);
-                            e.value = std::move(value);
-                            e.state.store(State::ready, std::memory_order_release);
-                            e.state.notify_all();
-                            return e.value;
+                        if (e.state.load(std::memory_order_acquire)
+                            == State::tombstone) {
+                            if (!first_tombstone) {
+                                first_tombstone = idx;
+                            }
+                            idx = (idx + 1) & mask_;
+                            continue;
                         }
-                        continue; // Re-read this slot after a failed claim.
+
+                        // Claim the virgin terminator directly. Deferring to an
+                        // earlier tombstone can race a failing computation and
+                        // let two inserters choose different slots for one key.
+                        if (Entry* claimed = try_claim(idx)) {
+                            return claimed->value;
+                        }
+                        restart = true;
+                        break;
                     }
 
                     if (existing != h_lo) {
-                        break;
+                        const State observed_state =
+                            e.state.load(std::memory_order_acquire);
+                        if (e.h_lo.load(std::memory_order_acquire)
+                            != existing) {
+                            restart = true;
+                            break;
+                        }
+                        if (observed_state != State::ready) {
+                            saw_unstable = true;
+                        }
+                        idx = (idx + 1) & mask_;
+                        continue;
                     }
 
                     State current_state = e.state.load(std::memory_order_acquire);
-                    while (current_state == State::empty) {
+                    while (current_state == State::empty
+                        || current_state == State::tombstone) {
                         if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                            restart = true;
                             break;
                         }
-                        e.state.wait(State::empty, std::memory_order_acquire);
+                        std::this_thread::yield();
                         current_state = e.state.load(std::memory_order_acquire);
                     }
-                    if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
-                        continue;
+                    if (restart) {
+                        break;
                     }
                     if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
-                        break;
+                        if (current_state != State::ready) {
+                            saw_unstable = true;
+                        }
+                        idx = (idx + 1) & mask_;
+                        continue;
                     }
 
                     while (current_state == State::computing) {
                         e.state.wait(State::computing, std::memory_order_acquire);
                         current_state = e.state.load(std::memory_order_acquire);
                         if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                            restart = true;
                             break;
                         }
                     }
-                    if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
-                        continue;
+                    if (restart) {
+                        break;
                     }
                     if (current_state == State::ready
                         && e.h_hi.load(std::memory_order_acquire) == h_hi) {
                         return e.value;
                     }
+
+                    restart = true;
+                    break;
                 }
 
-                idx = (idx + 1) & mask_;
+                if (restart) {
+                    continue;
+                }
+                if (saw_unstable) {
+                    // A full probe containing an in-flight entry is not a
+                    // stable basis for tombstone reuse: that entry may itself
+                    // become the first tombstone. Retry without blocking the
+                    // unrelated computation.
+                    std::this_thread::yield();
+                    continue;
+                }
+                if (first_tombstone) {
+                    if (Entry* claimed = try_claim(*first_tombstone)) {
+                        return claimed->value;
+                    }
+                    continue;
+                }
+                throw std::runtime_error("hash table probe limit exceeded");
             }
-
-            throw std::runtime_error("hash table probe limit exceeded");
         }
 
         // Variant that accepts pre-computed hash
@@ -274,7 +359,7 @@ namespace gb::yadro::container
         template<typename... Args>
             requires HashFunctor<Hasher, std::remove_cvref_t<Args>...>&&
         variadic_invocable<Function, Value, Args...>
-            Value get_or_compute_with_hash(uint64_t h_lo, uint64_t h_hi, Args&&... args) const
+        Value get_or_compute_with_hash(uint64_t h_lo, uint64_t h_hi, Args&&... args) const
         {
             auto args_tuple = std::forward_as_tuple(std::forward<Args>(args)...);
 
@@ -282,91 +367,170 @@ namespace gb::yadro::container
                 h_lo = 1;
             }
 
-            size_t idx = mix64(h_lo) & mask_;
+            const size_t initial_idx = mix64(h_lo) & mask_;
+            const auto try_claim = [&](size_t claim_idx) -> Entry* {
+                Entry& claim = table_[claim_idx];
+                uint64_t expected = 0;
+                if (!claim.h_lo.compare_exchange_strong(
+                    expected, h_lo,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                    return nullptr;
+                }
+                claim.h_hi.store(h_hi, std::memory_order_relaxed);
+                claim.state.store(State::computing, std::memory_order_release);
 
-            for (size_t probe = 0; probe < max_probe_; ++probe) {
-                Entry& e = table_[idx];
+                try {
+                    claim.value = std::apply([this](auto&&... stored_args) {
+                            return std::invoke(func_,
+                                std::forward<decltype(stored_args)>(stored_args)...);
+                        }, std::move(args_tuple));
+                }
+                catch (...) {
+                    // Tombstones preserve the collision chain.  Waiters never
+                    // wait on this state because h_lo is the next word reset.
+                    claim.state.store(
+                        State::tombstone, std::memory_order_release);
+                    claim.h_lo.store(0, std::memory_order_release);
+                    claim.state.notify_all();
+                    throw;
+                }
+                claim.state.store(State::ready, std::memory_order_release);
+                claim.state.notify_all();
+                return &claim;
+            };
 
-                uint64_t existing = e.h_lo.load(std::memory_order_acquire);
+            for (;;) {
+                std::optional<size_t> first_tombstone;
+                size_t idx = initial_idx;
+                bool restart = false;
+                bool saw_unstable = false;
 
-                // CASE 1: Slot is empty, try to claim it
-                if (existing == 0) {
-                    if (e.h_lo.compare_exchange_strong(
-                        existing, h_lo,
-                        std::memory_order_acq_rel,
-                        std::memory_order_acquire))
-                    {
-                        // Successfully claimed
-                        e.h_hi.store(h_hi, std::memory_order_relaxed);
-                        e.state.store(State::computing, std::memory_order_release);
+                for (size_t probe = 0; probe < max_probe_; ++probe) {
+                    Entry& e = table_[idx];
+                    const uint64_t existing =
+                        e.h_lo.load(std::memory_order_acquire);
 
-                        try {
-                            e.value = std::apply([this](auto&&... stored_args) {
-                                return std::invoke(func_,
-                                    std::forward<decltype(stored_args)>(stored_args)...);
-                                }, std::move(args_tuple));
+                    if (existing == 0) {
+                        if (e.state.load(std::memory_order_acquire)
+                            == State::tombstone) {
+                            if (!first_tombstone) {
+                                first_tombstone = idx;
+                            }
+                            idx = (idx + 1) & mask_;
+                            continue;
+                        }
 
-                            e.state.store(State::ready, std::memory_order_release);
-                            e.state.notify_all();
+                        // Claim the virgin terminator directly. Deferring to an
+                        // earlier tombstone can race a failing computation and
+                        // let two inserters choose different slots for one key.
+                        if (Entry* claimed = try_claim(idx)) {
+                            return claimed->value;
+                        }
+                        restart = true;
+                        break;
+                    }
+
+                    if (existing != h_lo) {
+                        const State observed_state =
+                            e.state.load(std::memory_order_acquire);
+                        if (e.h_lo.load(std::memory_order_acquire)
+                            != existing) {
+                            restart = true;
+                            break;
+                        }
+                        if (observed_state != State::ready) {
+                            saw_unstable = true;
+                        }
+                        idx = (idx + 1) & mask_;
+                        continue;
+                    }
+
+                    if (existing == h_lo) {
+                        State current_state =
+                            e.state.load(std::memory_order_acquire);
+
+                        // The claiming thread publishes h_lo before h_hi and
+                        // state. Comparing h_hi during this publication window
+                        // could falsely reject a matching in-progress entry.
+                        // Spin because reset may change h_lo while leaving the
+                        // tombstone state unchanged.
+                        while (current_state == State::empty
+                            || current_state == State::tombstone) {
+                            if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
+                                restart = true;
+                                break;
+                            }
+                            std::this_thread::yield();
+                            current_state =
+                                e.state.load(std::memory_order_acquire);
+                        }
+                        if (restart) {
+                            break;
+                        }
+
+                        // The entry is now fully published. Confirm h_hi before
+                        // treating this as the requested key.
+                        if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
+                            if (current_state != State::ready) {
+                                saw_unstable = true;
+                            }
+                            idx = (idx + 1) & mask_;
+                            continue;
+                        }
+
+                        while (current_state != State::ready) {
+                            // A failed computation may reset and reclaim this
+                            // slot while a waiter is waking.
+                            if (e.h_lo.load(std::memory_order_acquire) != h_lo ||
+                                e.h_hi.load(std::memory_order_acquire) != h_hi) {
+                                restart = true;
+                                break;
+                            }
+
+                            if (current_state == State::computing) {
+                                e.state.wait(
+                                    State::computing, std::memory_order_acquire);
+                            }
+                            else {
+                                std::this_thread::yield();
+                            }
+                            current_state =
+                                e.state.load(std::memory_order_acquire);
+                        }
+                        if (restart) {
+                            break;
+                        }
+
+                        if (e.h_lo.load(std::memory_order_acquire) == h_lo &&
+                            e.h_hi.load(std::memory_order_acquire) == h_hi) {
                             return e.value;
                         }
-                        catch (...) {
-                            // Publish the complete reset before waking waiters.
-                            e.state.store(State::empty, std::memory_order_relaxed);
-                            e.h_lo.store(0, std::memory_order_release);
-                            e.state.notify_all();
-                            throw;
-                        }
-                    }
-                }
-                // CASE 2: Slot might match our key
-                else if (existing == h_lo)
-                {
-                    State current_state = e.state.load(std::memory_order_acquire);
-
-                    // The claiming thread publishes h_lo (via CAS) BEFORE h_hi and
-                    // state. While the entry is still empty, h_hi may hold its initial
-                    // value, so comparing it now could falsely reject an in-progress
-                    // matching entry and trigger a redundant recompute in another slot.
-                    // Wait until the entry leaves the empty state (state is stored with
-                    // release after h_hi, so once it is observed h_hi is visible too).
-                    while (current_state == State::empty) {
-                        // Slot might have been reset/reclaimed (e.g. after an exception)
-                        if (e.h_lo.load(std::memory_order_acquire) != h_lo) {
-                            goto next_probe;
-                        }
-                        current_state = e.state.load(std::memory_order_acquire);
+                        restart = true;
+                        break;
                     }
 
-                    // Entry is fully published; confirm this is really our key.
-                    if (e.h_hi.load(std::memory_order_acquire) != h_hi) {
-                        goto next_probe; // h_lo collision with a different key
-                    }
-
-                    while (current_state != State::ready) {
-                        // Re-verify hash match (slot might have been reset/reclaimed)
-                        if (e.h_lo.load(std::memory_order_acquire) != h_lo ||
-                            e.h_hi.load(std::memory_order_acquire) != h_hi) {
-                            goto next_probe;
-                        }
-
-                        e.state.wait(current_state, std::memory_order_acquire);
-                        current_state = e.state.load(std::memory_order_acquire);
-                    }
-
-                    // Final verification before returning
-                    if (e.h_lo.load(std::memory_order_acquire) == h_lo &&
-                        e.h_hi.load(std::memory_order_acquire) == h_hi) {
-                        return e.value;
-                    }
-                    // else: Hash changed between ready check and final verify, retry
                 }
 
-            next_probe:
-                idx = (idx + 1) & mask_;
+                if (restart) {
+                    continue;
+                }
+                if (saw_unstable) {
+                    // A full probe containing an in-flight entry is not a
+                    // stable basis for tombstone reuse: that entry may itself
+                    // become the first tombstone. Retry without blocking the
+                    // unrelated computation.
+                    std::this_thread::yield();
+                    continue;
+                }
+                if (first_tombstone) {
+                    if (Entry* claimed = try_claim(*first_tombstone)) {
+                        return claimed->value;
+                    }
+                    continue;
+                }
+                throw std::runtime_error("hash table probe limit exceeded");
             }
-
-            throw std::runtime_error("hash table probe limit exceeded");
         }
     };
 
