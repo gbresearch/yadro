@@ -790,7 +790,7 @@ git commit -m "feat: add serial deterministic GA execution"
 - Produces: private `evaluate_deterministic_parallel` and parallel phase runner.
 - Consumes: Task 4 evaluation plans; worker tasks return values/exceptions only.
 
-- [ ] **Step 1: Add repeated parallel reproducibility tests with scheduling perturbation**
+- [x] **Step 1: Add repeated parallel reproducibility tests with scheduling perturbation**
 
 Create two fresh optimizers per iteration with a pure target that sleeps according to the chromosome value. Run twenty iterations with four-thread pools and compare:
 
@@ -808,7 +808,7 @@ Before the second run, submit and drain unrelated tasks on its pool. Use the sam
 
 Run the same two-call warm-restart sequence on two equivalent optimizers and assert equality after both calls. Add a different-seed sanity case over a large discrete space and assert the serialized generated populations differ; treat this only as coverage that the seed participates in stream identity, not as a universal collision guarantee.
 
-- [ ] **Step 2: Add a deterministic final-population comparison helper in the test only**
+- [x] **Step 2: Add a deterministic final-population comparison helper in the test only**
 
 Do not add a production accessor. After collecting result assertions, normalize each optimizer for serialization:
 
@@ -826,11 +826,11 @@ auto serialized_population_state(Optimizer& optimizer)
 
 Compare the returned buffers. `soft_reset(keep_population)` clears statistics/history and makes fitness optional values empty while retaining chromosome order; the memo is not serialized.
 
-- [ ] **Step 3: Build Debug and confirm the constrained parallel overload is absent**
+- [x] **Step 3: Build Debug and confirm the constrained parallel overload is absent**
 
 Expected: compile failure for the thread-pool/options overload while the lvalue-`size_t` static assertion from Task 2 continues to compile.
 
-- [ ] **Step 4: Implement parallel representative evaluation without worker memo writes**
+- [x] **Step 4: Implement parallel representative evaluation without worker memo writes**
 
 Constrain the public overload with `template<detail::DeterministicThreadPool ThreadPool>`. Capture `static_cast<size_t>(tp.thread_count())` exactly once at call entry, reject zero, and retain that logical count in the call-local state.
 
@@ -851,11 +851,11 @@ for (auto& group : plan) {
 
 Add a code comment at the submission site stating that `evaluate_chromosome()` is forbidden because it writes through `get_or_compute`.
 
-- [ ] **Step 5: Add lowest-index multi-exception coverage**
+- [x] **Step 5: Add lowest-index multi-exception coverage**
 
 Inject a known population whose target throws `std::runtime_error("index-0")` and `std::runtime_error("index-2")` for two representative chromosomes. Delay the lower-index throw so it completes last. Assert that all futures drain and the public exception text is `index-0`, proving selection follows representative order.
 
-- [ ] **Step 6: Add timeout failure tests**
+- [x] **Step 6: Add timeout failure tests**
 
 Use a target that blocks for longer than a 1ms failure timeout but eventually returns. Assert:
 
@@ -869,7 +869,7 @@ catch (const genetic_optimization_timeout& error) {
 
 Also run the same optimization with a generous timeout and verify its normalized result matches a repeated run. Confirm timeout drains submitted futures and retains only the last fully committed population.
 
-- [ ] **Step 7: Run Debug and Release, then commit Task 5**
+- [x] **Step 7: Run Debug and Release, then commit Task 5**
 
 Expected: repeated runs match despite varied worker history and completion order; no deterministic worker writes the memo.
 
