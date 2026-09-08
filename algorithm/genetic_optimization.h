@@ -1601,6 +1601,71 @@ namespace gb::yadro::algorithm::conv {
             return { begin, std::min(begin + chunk_size, work_count) };
         }
 
+        [[nodiscard]] inline std::vector<std::size_t>
+            allocate_deterministic_generations(
+                std::size_t total_generations,
+                std::size_t num_phases)
+        {
+            if (num_phases == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: num_phases must be > 0");
+            }
+            constexpr std::size_t max =
+                std::numeric_limits<std::size_t>::max();
+            if (num_phases == max
+                || num_phases > max / (num_phases + 1)) {
+                throw std::invalid_argument(
+                    "deterministic optimize: phase allocation overflow");
+            }
+            const std::size_t denominator =
+                num_phases * (num_phases + 1) / 2;
+
+            struct phase_share {
+                std::size_t index;
+                std::size_t generations;
+                std::size_t remainder;
+            };
+            std::vector<phase_share> shares;
+            shares.reserve(num_phases);
+            std::size_t assigned = 0;
+            for (std::size_t phase = 0; phase < num_phases; ++phase) {
+                const std::size_t weight = num_phases - phase;
+                if (total_generations != 0
+                    && weight > max / total_generations) {
+                    throw std::invalid_argument(
+                        "deterministic optimize: phase allocation overflow");
+                }
+                const std::size_t numerator = total_generations * weight;
+                const std::size_t generations = numerator / denominator;
+                shares.push_back({
+                    phase, generations, numerator % denominator });
+                assigned += generations;
+            }
+
+            std::vector<std::size_t> remainder_order;
+            remainder_order.reserve(num_phases);
+            for (std::size_t phase = 0; phase < num_phases; ++phase) {
+                remainder_order.push_back(phase);
+            }
+            std::ranges::sort(remainder_order,
+                [&shares](std::size_t lhs, std::size_t rhs) {
+                    if (shares[lhs].remainder != shares[rhs].remainder) {
+                        return shares[lhs].remainder > shares[rhs].remainder;
+                    }
+                    return shares[lhs].index < shares[rhs].index;
+                });
+            const std::size_t leftover_count = total_generations - assigned;
+            for (std::size_t index = 0; index < leftover_count; ++index) {
+                ++shares[remainder_order[index]].generations;
+            }
+
+            std::vector<std::size_t> allocation(num_phases);
+            for (const auto& share : shares) {
+                allocation[share.index] = share.generations;
+            }
+            return allocation;
+        }
+
         inline std::mt19937_64& thread_rng() {
             thread_local std::mt19937_64 rng{
                 std::random_device{}() ^
@@ -2218,52 +2283,25 @@ namespace gb::yadro::algorithm::conv {
         {
         }
 
+        // =========================================================================
+        // Deterministic optimize (opt-in, budget driven)
+        //
+        // Successful completion is selected only by the discrete generation and
+        // evaluation budgets and the deterministic stopping criteria.  The
+        // failure_timeout is an operational ceiling that throws
+        // genetic_optimization_timeout; it never produces a normal result.
+        // =========================================================================
         auto optimize(
             const deterministic_ga_options& run,
             std::size_t population_size,
             std::size_t max_history = std::numeric_limits<size_t>::max())
             -> std::pair<optimization_stats, history_t>
         {
-            validate_deterministic_options(run, population_size);
-
-            const auto started = deterministic_clock::now();
-            deterministic_run_state state{
-                run,
-                started,
-                started + run.failure_timeout,
-                run.evaluation_budget,
-                1 };
-            bool elapsed_recorded = false;
-            const auto record_elapsed = [&] {
-                if (elapsed_recorded) {
-                    return;
-                }
-                elapsed_recorded = true;
-                const auto elapsed = std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(
-                        deterministic_clock::now() - started);
-                std::lock_guard lock(stats_mutex_);
-                stats_.elapsed += elapsed;
-            };
-
-            try {
-                const auto outcome = run_deterministic_phase(
-                    state, 0, run.generation_budget, population_size, max_history,
-                    [this](auto& candidate, auto& run_state) {
-                        return evaluate_deterministic_serial(
-                            candidate, run_state);
-                    });
-                {
-                    std::lock_guard lock(stats_mutex_);
-                    stats_.last_stop_reason = outcome.reason;
-                }
-                record_elapsed();
-                return make_result_snapshot();
-            }
-            catch (...) {
-                record_elapsed();
-                throw;
-            }
+            return execute_deterministic(
+                run, 1, population_size, max_history, 1,
+                [this](auto& candidate, auto& run_state) {
+                    return evaluate_deterministic_serial(candidate, run_state);
+                });
         }
 
         template<detail::DeterministicThreadPool ThreadPool>
@@ -2280,46 +2318,68 @@ namespace gb::yadro::algorithm::conv {
                 throw std::invalid_argument(
                     "deterministic optimize: thread count must be > 0");
             }
-            validate_deterministic_options(run, population_size);
+            return execute_deterministic(
+                run, 1, population_size, max_history, logical_thread_count,
+                [this, &thread_pool](auto& candidate, auto& run_state) {
+                    return evaluate_deterministic_parallel(
+                        thread_pool, candidate, run_state);
+                });
+        }
 
-            const auto started = deterministic_clock::now();
-            deterministic_run_state state{
-                run,
-                started,
-                started + run.failure_timeout,
-                run.evaluation_budget,
-                logical_thread_count };
-            bool elapsed_recorded = false;
-            const auto record_elapsed = [&] {
-                if (elapsed_recorded) {
-                    return;
-                }
-                elapsed_recorded = true;
-                const auto elapsed = std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(
-                        deterministic_clock::now() - started);
-                std::lock_guard lock(stats_mutex_);
-                stats_.elapsed += elapsed;
-            };
+        // =========================================================================
+        // Deterministic adaptive multi-phase optimize
+        //
+        // The generation budget is split across phases with the same triangular
+        // front-loaded weights the duration-based overloads use, allocated by
+        // integer largest-remainder with lower phase index breaking ties.  The
+        // evaluation budget and the failure deadline stay global for the whole
+        // call rather than being partitioned per phase, so an arbitrary phase
+        // boundary cannot reject a generation the call can still afford.
+        // =========================================================================
+        auto optimize(
+            std::size_t num_phases,
+            const deterministic_ga_options& run,
+            std::size_t initial_population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            if (num_phases == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: num_phases must be > 0");
+            }
+            return execute_deterministic(
+                run, num_phases, initial_population_size, max_history, 1,
+                [this](auto& candidate, auto& run_state) {
+                    return evaluate_deterministic_serial(candidate, run_state);
+                });
+        }
 
-            try {
-                const auto outcome = run_deterministic_phase(
-                    state, 0, run.generation_budget, population_size, max_history,
-                    [this, &thread_pool](auto& candidate, auto& run_state) {
-                        return evaluate_deterministic_parallel(
-                            thread_pool, candidate, run_state);
-                    });
-                {
-                    std::lock_guard lock(stats_mutex_);
-                    stats_.last_stop_reason = outcome.reason;
-                }
-                record_elapsed();
-                return make_result_snapshot();
+        template<detail::DeterministicThreadPool ThreadPool>
+        auto optimize(
+            ThreadPool& thread_pool,
+            std::size_t num_phases,
+            const deterministic_ga_options& run,
+            std::size_t initial_population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            if (num_phases == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: num_phases must be > 0");
             }
-            catch (...) {
-                record_elapsed();
-                throw;
+            const std::size_t logical_thread_count =
+                static_cast<std::size_t>(thread_pool.thread_count());
+            if (logical_thread_count == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: thread count must be > 0");
             }
+            return execute_deterministic(
+                run, num_phases, initial_population_size, max_history,
+                logical_thread_count,
+                [this, &thread_pool](auto& candidate, auto& run_state) {
+                    return evaluate_deterministic_parallel(
+                        thread_pool, candidate, run_state);
+                });
         }
 
         // =========================================================================
@@ -3197,6 +3257,161 @@ namespace gb::yadro::algorithm::conv {
             }
         }
 
+        // Restores the tuning knobs that deterministic adaptive phases mutate.
+        // Mirrors optimize_imp's restore step, but as an RAII guard so that a
+        // deterministic timeout or evaluation failure cannot leave the optimizer
+        // holding a phase's scaled configuration.
+        struct deterministic_config_guard {
+            genetic_optimization_t* owner;
+            ga_config               saved_config;
+            stopping_criteria       saved_stop;
+
+            explicit deterministic_config_guard(genetic_optimization_t* opt)
+                : owner(opt)
+                , saved_config(opt->config)
+                , saved_stop(opt->stop_criteria)
+            {
+            }
+            deterministic_config_guard(const deterministic_config_guard&) = delete;
+            deterministic_config_guard& operator=(
+                const deterministic_config_guard&) = delete;
+
+            ~deterministic_config_guard() {
+                owner->config = saved_config;
+                owner->stop_criteria = saved_stop;
+            }
+        };
+
+        // Baseline exploration -> refinement interpolation, identical to the
+        // schedule optimize_imp applies before each adaptive phase.  Derived
+        // solely from the saved configuration and the phase index, so it is
+        // deterministic.
+        void apply_deterministic_phase_baseline(
+            const ga_config& saved_config,
+            std::size_t phase,
+            std::size_t num_phases)
+        {
+            // A single deterministic phase is the direct call and keeps the
+            // caller's configuration unscaled.  The guard is also what lets the
+            // interpolation below divide by num_phases - 1 safely.
+            if (num_phases <= 1) {
+                return;
+            }
+            const double t = static_cast<double>(phase)
+                / static_cast<double>(num_phases - 1);
+            const double mut_scale = 1.30 - 0.60 * t; // 1.30 -> 0.70
+            const double tour_scale = 0.80 + 0.40 * t; // 0.80 -> 1.20
+
+            config.mutation_rate = std::clamp(
+                saved_config.mutation_rate * mut_scale,
+                adaptive_config.mutation_rate_min,
+                adaptive_config.mutation_rate_max);
+
+            config.tournament_size = static_cast<size_t>(std::clamp(
+                std::round(
+                    static_cast<double>(saved_config.tournament_size) * tour_scale),
+                static_cast<double>(adaptive_config.tournament_size_min),
+                static_cast<double>(adaptive_config.tournament_size_max)));
+        }
+
+        // Per-phase adaptation rules, ported unchanged from optimize_imp.  Every
+        // input is a deterministic committed statistic, so the resulting
+        // configuration for the next phase is deterministic too.  `previous` is
+        // replaced with `current` so the next call sees this phase's baseline.
+        void apply_deterministic_adaptive_rules(
+            const optimization_stats& current,
+            optimization_stats& previous,
+            std::size_t phase,
+            std::size_t num_phases,
+            std::size_t initial_population_size,
+            std::size_t& current_population_size)
+        {
+            const size_t delta_evals = current.total_evaluations
+                - previous.total_evaluations;
+            const size_t delta_hits = current.cache_hits - previous.cache_hits;
+            const size_t delta_total = delta_evals + delta_hits;
+            const double cache_rate = (delta_total > 0)
+                ? static_cast<double>(delta_hits)
+                / static_cast<double>(delta_total)
+                : 0.0;
+
+            const stop_reason reason = current.last_stop_reason;
+            const double diversity = current.last_diversity;
+            const bool   low_div =
+                diversity < stop_criteria.diversity_threshold * 3.0;
+            const bool   high_cache =
+                cache_rate > adaptive_config.high_cache_threshold;
+
+            previous = current;
+
+            // Rule 1 - Stagnation with healthy diversity
+            if (reason == stop_reason::stagnation && !low_div) {
+                config.mutation_rate = std::clamp(
+                    config.mutation_rate * 1.40,
+                    adaptive_config.mutation_rate_min,
+                    adaptive_config.mutation_rate_max);
+                config.crossover_rate = std::clamp(
+                    config.crossover_rate * 0.90, 0.50, 0.95);
+                config.tournament_size = std::max(
+                    adaptive_config.tournament_size_min,
+                    config.tournament_size - 1u);
+            }
+
+            // Rule 2 - Stagnation with low diversity
+            if (reason == stop_reason::stagnation && low_div) {
+                config.mutation_rate = std::clamp(
+                    config.mutation_rate * 1.30,
+                    adaptive_config.mutation_rate_min,
+                    adaptive_config.mutation_rate_max);
+                stop_criteria.cataclysm_survival_fraction =
+                    std::clamp(
+                        stop_criteria.cataclysm_survival_fraction * 0.75,
+                        0.05, 0.30);
+            }
+
+            // Rule 3 - Elite convergence (perturbation budget exhausted)
+            if (reason == stop_reason::elite_converged) {
+                config.mutation_rate = std::clamp(
+                    config.mutation_rate * 0.50,
+                    adaptive_config.mutation_rate_min,
+                    adaptive_config.mutation_rate_max);
+                config.crossover_rate = std::clamp(
+                    config.crossover_rate * 1.05, 0.50, 0.95);
+                config.tournament_size = std::min(
+                    adaptive_config.tournament_size_max,
+                    config.tournament_size + 2u);
+                stop_criteria.elite_convergence_epsilon *= 0.10;
+                stop_criteria.max_elite_perturbation_count =
+                    std::min(stop_criteria.max_elite_perturbation_count + 1u,
+                        size_t{ 5 });
+            }
+
+            // Rule 4 - High per-phase cache hit rate
+            if (high_cache) {
+                config.mutation_rate = std::clamp(
+                    config.mutation_rate * 1.25,
+                    adaptive_config.mutation_rate_min,
+                    adaptive_config.mutation_rate_max);
+                const size_t min_pop = static_cast<size_t>(
+                    initial_population_size * adaptive_config.pop_size_min_frac);
+                current_population_size = std::max(
+                    min_pop,
+                    static_cast<size_t>(current_population_size * 0.85));
+            }
+
+            // Rule 5 - Very low per-phase cache rate in later phases
+            if (!high_cache
+                && cache_rate < adaptive_config.low_cache_threshold
+                && phase >= num_phases / 2)
+            {
+                const size_t max_pop = static_cast<size_t>(
+                    initial_population_size * adaptive_config.pop_size_max_frac);
+                current_population_size = std::min(
+                    max_pop,
+                    static_cast<size_t>(current_population_size * 1.20));
+            }
+        }
+
         template<typename Evaluator>
         [[nodiscard]] deterministic_phase_outcome run_deterministic_phase(
             deterministic_run_state& run,
@@ -3287,6 +3502,126 @@ namespace gb::yadro::algorithm::conv {
                     std::lock_guard lock(stats_mutex_);
                     ++stats_.generations;
                 }
+            }
+        }
+
+        // Deterministic adaptive driver.  Every phase runs through the same
+        // private phase routine that a direct deterministic call uses, sharing
+        // one run state so the evaluation budget, the failure deadline, and the
+        // cumulative generation count never reset at a phase boundary.  The
+        // phase index reaching run_deterministic_phase is the real zero-based
+        // index, which keeps the phase component of every stream key distinct.
+        template<typename Evaluator>
+        [[nodiscard]] deterministic_phase_outcome run_deterministic_adaptive(
+            deterministic_run_state& run,
+            std::size_t num_phases,
+            std::size_t initial_population_size,
+            std::size_t max_history,
+            Evaluator&& evaluate)
+        {
+            // A single phase is the direct deterministic call: same routine,
+            // phase zero, the full generation budget, and no baseline scaling.
+            if (num_phases == 1) {
+                return run_deterministic_phase(
+                    run, 0, run.options.generation_budget,
+                    initial_population_size, max_history, evaluate);
+            }
+
+            auto allocations = detail::allocate_deterministic_generations(
+                run.options.generation_budget, num_phases);
+
+            const deterministic_config_guard restore_config{ this };
+            const ga_config saved_config = config;
+
+            std::size_t current_population_size = initial_population_size;
+            std::size_t carried_generations = 0;
+            optimization_stats previous_stats = {};
+            deterministic_phase_outcome outcome{};
+
+            for (std::size_t phase = 0; phase < num_phases; ++phase) {
+                apply_deterministic_phase_baseline(
+                    saved_config, phase, num_phases);
+
+                allocations[phase] += carried_generations;
+                outcome = run_deterministic_phase(
+                    run, phase, allocations[phase], current_population_size,
+                    max_history, evaluate);
+                carried_generations = outcome.unused_generations;
+
+                // Publish this phase's reason so the adaptive rules read it from
+                // the cumulative snapshot exactly as optimize_imp does.
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    stats_.last_stop_reason = outcome.reason;
+                }
+
+                // target_reached and evaluation_budget end the whole call; the
+                // remaining phases cannot improve on a met target and cannot
+                // afford another generation.
+                if (outcome.reason == stop_reason::target_reached
+                    || outcome.reason == stop_reason::evaluation_budget
+                    || phase == num_phases - 1) {
+                    break;
+                }
+
+                apply_deterministic_adaptive_rules(
+                    make_result_snapshot().first, previous_stats,
+                    phase, num_phases, initial_population_size,
+                    current_population_size);
+            }
+
+            return outcome;
+        }
+
+        // Shared public-call boundary for every deterministic overload.  Owns
+        // validation, the single run state, the one-shot elapsed accounting, and
+        // the final stop reason, so the direct and adaptive entry points cannot
+        // drift apart.
+        template<typename Evaluator>
+        auto execute_deterministic(
+            const deterministic_ga_options& run,
+            std::size_t num_phases,
+            std::size_t population_size,
+            std::size_t max_history,
+            std::size_t logical_thread_count,
+            Evaluator&& evaluate)
+            -> std::pair<optimization_stats, history_t>
+        {
+            validate_deterministic_options(run, population_size);
+
+            const auto started = deterministic_clock::now();
+            deterministic_run_state state{
+                run,
+                started,
+                started + run.failure_timeout,
+                run.evaluation_budget,
+                logical_thread_count };
+            bool elapsed_recorded = false;
+            const auto record_elapsed = [&] {
+                if (elapsed_recorded) {
+                    return;
+                }
+                elapsed_recorded = true;
+                const auto elapsed = std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        deterministic_clock::now() - started);
+                std::lock_guard lock(stats_mutex_);
+                stats_.elapsed += elapsed;
+            };
+
+            try {
+                const auto outcome = run_deterministic_adaptive(
+                    state, num_phases, population_size, max_history, evaluate);
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    stats_.last_stop_reason = outcome.reason;
+                }
+                record_elapsed();
+                return make_result_snapshot();
+            }
+            catch (...) {
+                record_elapsed();
+                throw;
             }
         }
 

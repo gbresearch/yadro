@@ -937,6 +937,152 @@ namespace
             });
     }
 
+    GB_TEST(algorithm, deterministic_genetic_optimization_adaptive_allocation,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        gbassert(cdetail::allocate_deterministic_generations(10, 4)
+            == std::vector<std::size_t>{ 4, 3, 2, 1 });
+        gbassert(cdetail::allocate_deterministic_generations(7, 4)
+            == std::vector<std::size_t>{ 3, 2, 1, 1 });
+        must_throw<std::invalid_argument>([] {
+            (void)cdetail::allocate_deterministic_generations(10, 0);
+            });
+        must_throw<std::invalid_argument>([] {
+            (void)cdetail::allocate_deterministic_generations(
+                std::numeric_limits<std::size_t>::max(), 2);
+            });
+
+        const auto make_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int value) { return value * value; }, std::less<int>{},
+                min_max_value_range<int>{ -50, 50 });
+            optimizer.config.memo_capacity = 0;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 0.0;
+            optimizer.target_fitness = -1;
+            return optimizer;
+        };
+        const auto normalize_stats = [](optimization_stats stats) {
+            stats.elapsed = {};
+            return stats;
+        };
+        const deterministic_ga_options options{ 101, 3, 40, 5s };
+
+        auto direct = make_optimizer();
+        auto one_phase = make_optimizer();
+        const auto [direct_stats, direct_history] =
+            direct.optimize(options, 8, 20);
+        const auto [phase_stats, phase_history] =
+            one_phase.optimize(1, options, 8, 20);
+        gbassert(normalize_stats(direct_stats) == normalize_stats(phase_stats));
+        gbassert(direct_history.all() == phase_history.all());
+        gbassert(serialized_population_state(direct)
+            == serialized_population_state(one_phase));
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_adaptive_parallel,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int value) {
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds((std::abs(value) % 5) * 20));
+                    return value * value;
+                },
+                std::less<int>{}, min_max_value_range<int>{ -100, 100 });
+            optimizer.config.memo_capacity = 0;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 0.0;
+            optimizer.target_fitness = -1;
+            return optimizer;
+        };
+        const auto normalize_stats = [](optimization_stats stats) {
+            stats.elapsed = {};
+            return stats;
+        };
+        const deterministic_ga_options options{ 102, 10, 100, 5s };
+        gb::yadro::async::threadpool lhs_pool(4);
+        gb::yadro::async::threadpool rhs_pool(4);
+
+        for (int repetition = 0; repetition < 5; ++repetition) {
+            auto lhs = make_optimizer();
+            auto rhs = make_optimizer();
+            for (int index = 0; index < 8; ++index) {
+                auto noise = rhs_pool([index] { return index * index; });
+                gbassert(noise.get() == index * index);
+            }
+            const auto [lhs_stats, lhs_history] =
+                lhs.optimize(lhs_pool, 4, options, 8, 20);
+            const auto [rhs_stats, rhs_history] =
+                rhs.optimize(rhs_pool, 4, options, 8, 20);
+            gbassert(lhs_stats.generations == 10);
+            gbassert(lhs_stats.last_stop_reason
+                == stop_reason::generation_budget);
+            gbassert(normalize_stats(lhs_stats) == normalize_stats(rhs_stats));
+            gbassert(lhs_history.all() == rhs_history.all());
+            gbassert(serialized_population_state(lhs)
+                == serialized_population_state(rhs));
+        }
+
+        auto global_budget = make_optimizer();
+        const auto [budget_stats, budget_history] = global_budget.optimize(
+            lhs_pool, 4,
+            deterministic_ga_options{ 103, 10, 10, 5s }, 6, 20);
+        gbassert(budget_stats.total_evaluations == 6);
+        gbassert(budget_stats.generations == 0);
+        gbassert(budget_stats.last_stop_reason
+            == stop_reason::evaluation_budget);
+        gbassert(!budget_history.empty());
+
+        const auto make_stagnating = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int) { return 0; }, std::less<int>{},
+                discrete_value_range<int>({ 0, 1, 2, 3 }));
+            optimizer.config.memo_capacity = 0;
+            optimizer.stop_criteria.diversity_threshold = 0.0;
+            optimizer.stop_criteria.stagnation_absolute_floor = 1;
+            optimizer.stop_criteria.stagnation_fraction = 0.0;
+            optimizer.target_fitness = -1;
+            for (int value = 0; value < 4; ++value) {
+                optimizer.inject_chromosome(std::tuple{ value });
+            }
+            return optimizer;
+        };
+        auto stagnating = make_stagnating();
+        const auto [stagnation_stats, stagnation_history] = stagnating.optimize(
+            4, deterministic_ga_options{ 104, 10, 40, 5s }, 4, 20);
+        // Phase 0 stagnates after one generation, so its unused share rolls
+        // forward instead of being dropped at the phase boundary.  Every later
+        // phase restagnates immediately on this constant landscape, so the whole
+        // call commits exactly one generation and the rest of the global budget
+        // remains unused: committed + finally unused == generation_budget.
+        gbassert(stagnation_stats.generations == 1);
+        gbassert(stagnation_stats.generations <= 10);
+        gbassert(stagnation_stats.last_stop_reason == stop_reason::stagnation);
+        gbassert(stagnation_stats.generations_without_improvement >= 1);
+        gbassert(!stagnation_history.empty());
+
+        // Carry conservation with progress available: four phases over a budget
+        // of 12 allocate {5,4,2,1}.  No phase stops the call early, so every
+        // allocated generation - carried or not - is committed and the total is
+        // exactly the global generation budget rather than a per-phase share.
+        auto carry = make_optimizer();
+        const auto [carry_stats, carry_history] = carry.optimize(
+            lhs_pool, 4, deterministic_ga_options{ 105, 12, 200, 5s }, 8, 20);
+        gbassert(carry_stats.generations == 12);
+        gbassert(carry_stats.last_stop_reason == stop_reason::generation_budget);
+    }
+
     // Detection trait the optimizer uses to recognise container wrappers; must
     // key on the public tag, not a private member (finding 6.A).
     template<class W>
