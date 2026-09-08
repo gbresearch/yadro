@@ -310,6 +310,144 @@ namespace
         gbassert(eight_threads == sixteen_threads);
     }
 
+    GB_TEST(algorithm, deterministic_genetic_optimization_serial_budgets,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_budget_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int value) { return value * value; },
+                std::less<int>{},
+                discrete_value_range<int>({ -20, -10, -5, 5, 10, 20 }));
+            optimizer.config.memo_capacity = 0;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 0.0;
+            optimizer.target_fitness = -1;
+            return optimizer;
+        };
+
+        {
+            auto optimizer = make_budget_optimizer();
+            const auto [stats, history] = optimizer.optimize(
+                deterministic_ga_options{ 101, 2, 16, 5s }, 6, 20);
+            gbassert(stats.generations == 2);
+            gbassert(stats.total_evaluations == 16);
+            gbassert(stats.cache_hits == 0);
+            gbassert(stats.last_stop_reason == stop_reason::generation_budget);
+            gbassert(!history.empty());
+        }
+        {
+            auto optimizer = make_budget_optimizer();
+            const auto [stats, history] = optimizer.optimize(
+                deterministic_ga_options{ 101, 2, 10, 5s }, 6, 20);
+            gbassert(stats.generations == 0);
+            gbassert(stats.total_evaluations == 6);
+            gbassert(stats.cache_hits == 0);
+            gbassert(stats.last_stop_reason == stop_reason::evaluation_budget);
+            gbassert(!history.empty());
+        }
+        {
+            auto optimizer = make_budget_optimizer();
+            must_throw<std::invalid_argument>([&] {
+                (void)optimizer.optimize(
+                    deterministic_ga_options{ 101, 2, 5, 5s }, 6, 20);
+                });
+            gbassert(optimizer.stats().total_evaluations == 0);
+            gbassert(optimizer.pop_size() == 0);
+        }
+
+        const auto verify_invalid = [&](deterministic_ga_options options,
+            std::size_t population_size) {
+                auto optimizer = make_budget_optimizer();
+                must_throw<std::invalid_argument>([&] {
+                    (void)optimizer.optimize(options, population_size, 20);
+                    });
+                gbassert(optimizer.stats().total_evaluations == 0);
+                gbassert(optimizer.pop_size() == 0);
+            };
+        verify_invalid(deterministic_ga_options{ 101, 1, 6, 5s }, 0);
+        verify_invalid(deterministic_ga_options{ 101, 0, 6, 5s }, 6);
+        verify_invalid(deterministic_ga_options{ 101, 1, 0, 5s }, 6);
+        verify_invalid(deterministic_ga_options{ 101, 1, 6, 0ns }, 6);
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_serial_memo_accounting,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_duplicate_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int value) { return value * value; },
+                std::less<int>{},
+                discrete_value_range<int>({ 3 }));
+            optimizer.target_fitness = 9;
+            return optimizer;
+        };
+
+        auto memoized = make_duplicate_optimizer();
+        for (int i = 0; i < 4; ++i) {
+            memoized.inject_chromosome(std::tuple{ 3 });
+        }
+        const auto [memo_stats, memo_history] = memoized.optimize(
+            deterministic_ga_options{ 202, 1, 4, 5s }, 4, 10);
+        gbassert(memo_stats.total_evaluations == 1);
+        gbassert(memo_stats.cache_hits == 3);
+        gbassert(!memo_history.empty());
+
+        auto uncached = make_duplicate_optimizer();
+        for (int i = 0; i < 4; ++i) {
+            uncached.inject_chromosome(std::tuple{ 3 });
+        }
+        uncached.config.memo_capacity = 0;
+        const auto [uncached_stats, uncached_history] = uncached.optimize(
+            deterministic_ga_options{ 202, 1, 4, 5s }, 4, 10);
+        gbassert(uncached_stats.total_evaluations == 4);
+        gbassert(uncached_stats.cache_hits == 0);
+        gbassert(!uncached_history.empty());
+
+        auto warm = genetic_optimization_t(
+            [](int value) { return value * value; },
+            std::less<int>{}, discrete_value_range<int>({ 0 }));
+        warm.target_fitness = 0;
+        const deterministic_ga_options warm_run{ 303, 1, 1, 5s };
+        const auto [first_stats, first_history] = warm.optimize(warm_run, 1, 5);
+        gbassert(first_stats.total_evaluations == 1);
+        gbassert(first_stats.cache_hits == 0);
+        gbassert(!first_history.empty());
+
+        warm.soft_reset();
+        const auto [second_stats, second_history] = warm.optimize(warm_run, 1, 5);
+        gbassert(second_stats.total_evaluations == 0);
+        gbassert(second_stats.cache_hits == 1);
+        gbassert(!second_history.empty());
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_groups_memo_keys,
+        std::launch::deferred)
+    {
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+        const gb::yadro::util::hash128_t first{ 11, 22 };
+        const gb::yadro::util::hash128_t second{ 33, 44 };
+        const auto groups = cdetail::group_deterministic_memo_keys(
+            std::vector{
+                std::pair{ 0uz, first },
+                std::pair{ 1uz, second },
+                std::pair{ 2uz, first } });
+
+        gbassert(groups.size() == 2);
+        gbassert(groups[0].key == first);
+        gbassert(groups[0].representative == 0);
+        gbassert(groups[0].members == std::vector<std::size_t>{ 0, 2 });
+        gbassert(groups[1].key == second);
+        gbassert(groups[1].representative == 1);
+        gbassert(groups[1].members == std::vector<std::size_t>{ 1 });
+    }
+
     // Detection trait the optimizer uses to recognise container wrappers; must
     // key on the public tag, not a private member (finding 6.A).
     template<class W>

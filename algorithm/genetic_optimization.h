@@ -1697,6 +1697,36 @@ namespace gb::yadro::algorithm::conv {
                 });
         }
 
+        struct deterministic_memo_key_group {
+            hash128_t key{};
+            std::size_t representative{};
+            std::vector<std::size_t> members;
+        };
+
+        [[nodiscard]] inline std::vector<deterministic_memo_key_group>
+            group_deterministic_memo_keys(
+                const std::vector<std::pair<std::size_t, hash128_t>>& indexed_keys)
+        {
+            std::vector<deterministic_memo_key_group> groups;
+            // `positions` is lookup-only.  Never iterate it: `groups` must retain
+            // the ascending representative-index order supplied by the caller.
+            std::map<hash128_t, std::size_t> positions;
+            for (auto [index, key] : indexed_keys) {
+                if ((key.low | key.high) == 0) {
+                    key.low = 1;
+                }
+                const auto [position, inserted] = positions.try_emplace(
+                    key, groups.size());
+                if (inserted) {
+                    groups.push_back({ key, index, { index } });
+                }
+                else {
+                    groups[position->second].members.push_back(index);
+                }
+            }
+            return groups;
+        }
+
         template<typename Population, typename WrapperTuple, typename CompareFn>
         void fill_deterministic_breeding_stream(
             Population& next,
@@ -2186,6 +2216,53 @@ namespace gb::yadro::algorithm::conv {
             , wrappers_(std::move(type_wrappers)...)
             , history_(std::numeric_limits<size_t>::max(), compare_)
         {
+        }
+
+        auto optimize(
+            const deterministic_ga_options& run,
+            std::size_t population_size,
+            std::size_t max_history = std::numeric_limits<size_t>::max())
+            -> std::pair<optimization_stats, history_t>
+        {
+            validate_deterministic_options(run, population_size);
+
+            const auto started = deterministic_clock::now();
+            deterministic_run_state state{
+                run,
+                started,
+                started + run.failure_timeout,
+                run.evaluation_budget };
+            bool elapsed_recorded = false;
+            const auto record_elapsed = [&] {
+                if (elapsed_recorded) {
+                    return;
+                }
+                elapsed_recorded = true;
+                const auto elapsed = std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        deterministic_clock::now() - started);
+                std::lock_guard lock(stats_mutex_);
+                stats_.elapsed += elapsed;
+            };
+
+            try {
+                const auto outcome = run_deterministic_phase(
+                    state, 0, run.generation_budget, population_size, max_history,
+                    [this](auto& candidate, auto& run_state) {
+                        return evaluate_deterministic_serial(
+                            candidate, run_state);
+                    });
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    stats_.last_stop_reason = outcome.reason;
+                }
+                record_elapsed();
+                return make_result_snapshot();
+            }
+            catch (...) {
+                record_elapsed();
+                throw;
+            }
         }
 
         // =========================================================================
@@ -2967,6 +3044,30 @@ namespace gb::yadro::algorithm::conv {
         using memo_table_t = sharded_lockfree_memo_table<
             xxhash128, memo_fn_t, target_t, /*NumShards=*/128>;
 
+        using deterministic_clock = std::chrono::steady_clock;
+
+        struct deterministic_run_state {
+            deterministic_ga_options options;
+            deterministic_clock::time_point started;
+            deterministic_clock::time_point deadline;
+            std::size_t remaining_evaluations;
+            std::size_t committed_generations{};
+        };
+
+        struct deterministic_evaluation_group {
+            hash128_t key{};
+            std::size_t representative{};
+            std::vector<std::size_t> members;
+            std::optional<target_t> value;
+            bool uses_memo{};
+        };
+
+        struct deterministic_phase_outcome {
+            stop_reason reason{ stop_reason::none };
+            std::size_t committed_generations{};
+            std::size_t unused_generations{};
+        };
+
         // The memoization table is populated lazily by a lambda that captures the
         // owning optimizer's `this`.  The optimizer is move-constructible (see the
         // static_assert in least_squares_optimizer), so a naive default move would
@@ -2995,6 +3096,129 @@ namespace gb::yadro::algorithm::conv {
         // =========================================================================
         // Stopping criteria implementation
         // =========================================================================
+
+        void validate_deterministic_options(
+            const deterministic_ga_options& run,
+            std::size_t population_size) const
+        {
+            if (population_size == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: population_size must be > 0");
+            }
+            if (run.generation_budget == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: generation_budget must be > 0");
+            }
+            if (run.evaluation_budget == 0) {
+                throw std::invalid_argument(
+                    "deterministic optimize: evaluation_budget must be > 0");
+            }
+            if (run.failure_timeout <= std::chrono::nanoseconds::zero()) {
+                throw std::invalid_argument(
+                    "deterministic optimize: failure_timeout must be > 0");
+            }
+            config.validate();
+            stop_criteria.validate();
+        }
+
+        void throw_if_deterministic_timeout(
+            const deterministic_run_state& run) const
+        {
+            const auto now = deterministic_clock::now();
+            if (now >= run.deadline) {
+                throw genetic_optimization_timeout{
+                    run.options.failure_timeout,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        now - run.started) };
+            }
+        }
+
+        template<typename Evaluator>
+        [[nodiscard]] deterministic_phase_outcome run_deterministic_phase(
+            deterministic_run_state& run,
+            std::size_t phase_index,
+            std::size_t generation_allocation,
+            std::size_t population_size,
+            std::size_t max_history,
+            Evaluator&& evaluate)
+        {
+            throw_if_deterministic_timeout(run);
+            auto initial = init_population_deterministic(
+                population_size, run.options.seed, phase_index);
+            throw_if_deterministic_timeout(run);
+            const stop_reason initial_evaluation = std::invoke(
+                evaluate, initial, run);
+            if (initial_evaluation == stop_reason::evaluation_budget) {
+                throw std::invalid_argument(
+                    "deterministic optimize: evaluation_budget cannot evaluate "
+                    "the complete initial population");
+            }
+            throw_if_deterministic_timeout(run);
+            population_ = std::move(initial);
+            current_pop_size_.store(
+                population_.size(), std::memory_order_relaxed);
+            {
+                std::lock_guard lock(history_mutex_);
+                history_.resize_limit(max_history);
+            }
+            feed_history_from_population();
+
+            const std::size_t elite_n = elite_count(population_size);
+            const std::size_t stagnation_limit = compute_stagnation_limit(
+                run.options.evaluation_budget);
+            std::size_t phase_generations = 0;
+
+            while (true) {
+                throw_if_deterministic_timeout(run);
+                sort_population_deterministic();
+                feed_history_from_population();
+
+                auto decision_rng = detail::make_deterministic_rng(
+                    run.options.seed, phase_index, phase_generations,
+                    detail::deterministic_rng_domain::cataclysm, 0);
+                const stop_reason reason = should_stop_or_cataclysm(
+                    stagnation_limit, elite_n, decision_rng);
+                if (reason == stop_reason::cataclysm
+                    || reason == stop_reason::elite_perturbation) {
+                    throw std::logic_error(
+                        "deterministic recovery requires transactional handling");
+                }
+                if (is_terminal(reason)) {
+                    return {
+                        reason,
+                        phase_generations,
+                        generation_allocation - phase_generations };
+                }
+                if (phase_generations == generation_allocation) {
+                    return {
+                        stop_reason::generation_budget,
+                        phase_generations,
+                        0 };
+                }
+
+                throw_if_deterministic_timeout(run);
+                auto candidate = breed_next_generation_deterministic(
+                    population_size, elite_n, run.options.seed,
+                    phase_index, phase_generations, 1);
+                throw_if_deterministic_timeout(run);
+                const stop_reason evaluation = std::invoke(
+                    evaluate, candidate, run);
+                if (evaluation == stop_reason::evaluation_budget) {
+                    return {
+                        evaluation,
+                        phase_generations,
+                        generation_allocation - phase_generations };
+                }
+                throw_if_deterministic_timeout(run);
+                population_ = std::move(candidate);
+                ++phase_generations;
+                ++run.committed_generations;
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    ++stats_.generations;
+                }
+            }
+        }
 
         [[nodiscard]] size_t compute_stagnation_limit(size_t max_tries) const noexcept {
             const size_t floor = stop_criteria.stagnation_absolute_floor;
@@ -3280,6 +3504,111 @@ namespace gb::yadro::algorithm::conv {
             return std::apply([&](const auto&... args) {
                 return target_fn_(args...);
                 }, chrom);
+        }
+
+        [[nodiscard]] std::vector<deterministic_evaluation_group>
+            build_deterministic_evaluation_plan(
+                const std::vector<individual_t>& candidate)
+        {
+            std::vector<deterministic_evaluation_group> plan;
+            if (config.memo_capacity == 0) {
+                for (std::size_t index = 0; index < candidate.size(); ++index) {
+                    if (!candidate[index].second) {
+                        plan.push_back({ {}, index, { index }, std::nullopt, false });
+                    }
+                }
+                return plan;
+            }
+
+            ensure_memo_table();
+            util::gbassert(memo_.table.has_value(),
+                "deterministic memo planning requires an initialized table");
+
+            std::vector<std::pair<std::size_t, hash128_t>> indexed_keys;
+            indexed_keys.reserve(candidate.size());
+            for (std::size_t index = 0; index < candidate.size(); ++index) {
+                if (candidate[index].second) {
+                    continue;
+                }
+                hash128_t key = std::apply([this](const auto&... args) {
+                    return memo_.table->get_hasher()(args...);
+                    }, candidate[index].first);
+                if ((key.low | key.high) == 0) {
+                    key.low = 1;
+                }
+                indexed_keys.emplace_back(index, key);
+            }
+
+            const auto grouped = detail::group_deterministic_memo_keys(indexed_keys);
+            plan.reserve(grouped.size());
+            for (const auto& group : grouped) {
+                plan.push_back({
+                    group.key,
+                    group.representative,
+                    group.members,
+                    memo_.table->try_get_with_hash(
+                        group.key.low, group.key.high),
+                    true });
+            }
+            return plan;
+        }
+
+        [[nodiscard]] stop_reason evaluate_deterministic_serial(
+            std::vector<individual_t>& candidate,
+            deterministic_run_state& run)
+        {
+            auto plan = build_deterministic_evaluation_plan(candidate);
+            const std::size_t required = static_cast<std::size_t>(
+                std::ranges::count_if(plan,
+                    [](const deterministic_evaluation_group& group) {
+                        return !group.value.has_value();
+                    }));
+            if (required > run.remaining_evaluations) {
+                return stop_reason::evaluation_budget;
+            }
+
+            const std::size_t requests = static_cast<std::size_t>(
+                std::ranges::count_if(candidate,
+                    [](const individual_t& individual) {
+                        return !individual.second.has_value();
+                    }));
+            total_eval_requests_.fetch_add(requests, std::memory_order_relaxed);
+
+            std::vector<std::pair<std::size_t, std::exception_ptr>> failures;
+            for (auto& group : plan) {
+                if (!group.value) {
+                    fn_call_count_.fetch_add(1, std::memory_order_relaxed);
+                    --run.remaining_evaluations;
+                    try {
+                        // Do not route deterministic work through
+                        // evaluate_chromosome(): its memo insertion happens on the
+                        // evaluating worker and would expose completion order.
+                        group.value = std::apply([this](const auto&... args) {
+                            return target_fn_(args...);
+                            }, candidate[group.representative].first);
+                    }
+                    catch (...) {
+                        failures.emplace_back(
+                            group.representative, std::current_exception());
+                    }
+                }
+                if (!group.value) {
+                    continue;
+                }
+                if (group.uses_memo) {
+                    group.value = memo_.table->insert_ready_with_hash(
+                        group.key.low, group.key.high, *group.value);
+                }
+                for (const std::size_t index : group.members) {
+                    candidate[index].second = *group.value;
+                }
+            }
+
+            sync_stats();
+            if (!failures.empty()) {
+                std::rethrow_exception(failures.front().second);
+            }
+            return stop_reason::none;
         }
 
         // =========================================================================
