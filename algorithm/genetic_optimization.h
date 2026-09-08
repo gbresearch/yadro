@@ -3126,6 +3126,12 @@ namespace gb::yadro::algorithm::conv {
             std::size_t unused_generations{};
         };
 
+        struct deterministic_stop_decision {
+            stop_reason reason{ stop_reason::none };
+            std::size_t elite_n{};
+            std::size_t survivor_count{};
+        };
+
         // The memoization table is populated lazily by a lambda that captures the
         // owning optimizer's `this`.  The optimizer is move-constructible (see the
         // static_assert in least_squares_optimizer), so a naive default move would
@@ -3231,19 +3237,11 @@ namespace gb::yadro::algorithm::conv {
                 sort_population_deterministic();
                 feed_history_from_population();
 
-                auto decision_rng = detail::make_deterministic_rng(
-                    run.options.seed, phase_index, phase_generations,
-                    detail::deterministic_rng_domain::cataclysm, 0);
-                const stop_reason reason = should_stop_or_cataclysm(
-                    stagnation_limit, elite_n, decision_rng);
-                if (reason == stop_reason::cataclysm
-                    || reason == stop_reason::elite_perturbation) {
-                    throw std::logic_error(
-                        "deterministic recovery requires transactional handling");
-                }
-                if (is_terminal(reason)) {
+                const auto decision = check_deterministic_stop(
+                    stagnation_limit, elite_n);
+                if (is_terminal(decision.reason)) {
                     return {
-                        reason,
+                        decision.reason,
                         phase_generations,
                         generation_allocation - phase_generations };
                 }
@@ -3252,6 +3250,20 @@ namespace gb::yadro::algorithm::conv {
                         stop_reason::generation_budget,
                         phase_generations,
                         0 };
+                }
+
+                if (decision.reason == stop_reason::cataclysm
+                    || decision.reason == stop_reason::elite_perturbation) {
+                    const stop_reason recovery =
+                        evaluate_and_commit_deterministic_recovery(
+                            decision, run, phase_index, phase_generations,
+                            evaluate);
+                    if (recovery == stop_reason::evaluation_budget) {
+                        return {
+                            recovery,
+                            phase_generations,
+                            generation_allocation - phase_generations };
+                    }
                 }
 
                 throw_if_deterministic_timeout(run);
@@ -3276,6 +3288,165 @@ namespace gb::yadro::algorithm::conv {
                     ++stats_.generations;
                 }
             }
+        }
+
+        [[nodiscard]] deterministic_stop_decision check_deterministic_stop(
+            std::size_t stagnation_limit,
+            std::size_t elite_n)
+        {
+            if (population_.empty() || !population_.front().second) {
+                return {};
+            }
+
+            const target_t& best = *population_.front().second;
+            if (target_fitness.has_value() && !compare_(*target_fitness, best)) {
+                return { stop_reason::target_reached, elite_n, 0 };
+            }
+
+            const bool improved =
+                !prev_best_.has_value() || compare_(best, *prev_best_);
+            if (improved) {
+                prev_best_ = best;
+            }
+            std::size_t generations_without_improvement;
+            {
+                std::lock_guard lock(stats_mutex_);
+                if (improved) {
+                    stats_.generations_without_improvement = 0;
+                }
+                else {
+                    ++stats_.generations_without_improvement;
+                }
+                generations_without_improvement =
+                    stats_.generations_without_improvement;
+            }
+
+            const double diversity = measure_diversity();
+            {
+                std::lock_guard lock(stats_mutex_);
+                stats_.last_diversity = diversity;
+            }
+            if (diversity < stop_criteria.diversity_threshold) {
+                if (!stop_criteria.cataclysm_enabled) {
+                    return { stop_reason::diversity, elite_n, 0 };
+                }
+                std::size_t cataclysm_count;
+                {
+                    std::lock_guard lock(stats_mutex_);
+                    cataclysm_count = stats_.cataclysm_count;
+                }
+                if (cataclysm_count >= stop_criteria.max_cataclysm_count) {
+                    return { stop_reason::diversity, elite_n, 0 };
+                }
+                const std::size_t survivors = std::max(
+                    std::size_t{ 1 },
+                    static_cast<std::size_t>(
+                        stop_criteria.cataclysm_survival_fraction
+                        * population_.size()));
+                return { stop_reason::cataclysm, elite_n, survivors };
+            }
+
+            if constexpr (std::is_arithmetic_v<target_t>) {
+                if (!target_fitness.has_value()
+                    && compute_elite_convergence_gap()
+                        < stop_criteria.elite_convergence_epsilon) {
+                    std::size_t perturbation_count;
+                    {
+                        std::lock_guard lock(stats_mutex_);
+                        perturbation_count = stats_.elite_perturbation_count;
+                    }
+                    if (perturbation_count
+                        < stop_criteria.max_elite_perturbation_count) {
+                        return {
+                            stop_reason::elite_perturbation, elite_n, 0 };
+                    }
+                    return { stop_reason::elite_converged, elite_n, 0 };
+                }
+            }
+
+            if (generations_without_improvement >= stagnation_limit) {
+                return { stop_reason::stagnation, elite_n, 0 };
+            }
+            return { stop_reason::none, elite_n, 0 };
+        }
+
+        [[nodiscard]] std::vector<individual_t>
+            make_deterministic_cataclysm_candidate(
+                std::size_t survivor_count,
+                std::uint64_t seed,
+                std::size_t phase_index,
+                std::size_t phase_generation) const
+        {
+            auto candidate = population_;
+            auto rng = detail::make_deterministic_rng(
+                seed, phase_index, phase_generation,
+                detail::deterministic_rng_domain::cataclysm, 0);
+            for (std::size_t index = survivor_count;
+                index < candidate.size(); ++index) {
+                candidate[index] = {
+                    detail::random_chromosome(rng, wrappers_), std::nullopt };
+            }
+            return candidate;
+        }
+
+        [[nodiscard]] std::vector<individual_t>
+            make_deterministic_elite_perturbation_candidate(
+                std::size_t elite_n,
+                std::uint64_t seed,
+                std::size_t phase_index,
+                std::size_t phase_generation) const
+        {
+            auto candidate = population_;
+            auto rng = detail::make_deterministic_rng(
+                seed, phase_index, phase_generation,
+                detail::deterministic_rng_domain::elite_perturbation, 0);
+            for (std::size_t index = 1;
+                index < elite_n && index < candidate.size(); ++index) {
+                candidate[index] = {
+                    detail::random_chromosome(rng, wrappers_), std::nullopt };
+            }
+            return candidate;
+        }
+
+        void commit_recovery_statistics(stop_reason reason)
+        {
+            prev_best_ = std::nullopt;
+            std::lock_guard lock(stats_mutex_);
+            stats_.generations_without_improvement = 0;
+            if (reason == stop_reason::cataclysm) {
+                ++stats_.cataclysm_count;
+            }
+            else if (reason == stop_reason::elite_perturbation) {
+                ++stats_.elite_perturbation_count;
+            }
+        }
+
+        template<typename Evaluator>
+        [[nodiscard]] stop_reason evaluate_and_commit_deterministic_recovery(
+            const deterministic_stop_decision& decision,
+            deterministic_run_state& run,
+            std::size_t phase_index,
+            std::size_t phase_generation,
+            Evaluator&& evaluate)
+        {
+            auto candidate = decision.reason == stop_reason::cataclysm
+                ? make_deterministic_cataclysm_candidate(
+                    decision.survivor_count, run.options.seed,
+                    phase_index, phase_generation)
+                : make_deterministic_elite_perturbation_candidate(
+                    decision.elite_n, run.options.seed,
+                    phase_index, phase_generation);
+            const stop_reason evaluation = std::invoke(
+                std::forward<Evaluator>(evaluate), candidate, run);
+            if (evaluation == stop_reason::evaluation_budget) {
+                return evaluation;
+            }
+            throw_if_deterministic_timeout(run);
+            population_ = std::move(candidate);
+            current_pop_size_.store(
+                population_.size(), std::memory_order_relaxed);
+            commit_recovery_statistics(decision.reason);
+            return stop_reason::none;
         }
 
         [[nodiscard]] size_t compute_stagnation_limit(size_t max_tries) const noexcept {

@@ -679,6 +679,264 @@ namespace
         gbassert(invalid.pop_size() == 0);
     }
 
+    GB_TEST(algorithm, deterministic_genetic_optimization_recovery_budgets,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_cataclysm_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int value) { return value; }, std::less<int>{},
+                discrete_value_range<int>({ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+            optimizer.config.memo_capacity = 0;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 1.0;
+            optimizer.stop_criteria.cataclysm_enabled = true;
+            optimizer.stop_criteria.max_cataclysm_count = 1;
+            optimizer.stop_criteria.cataclysm_survival_fraction = 0.25;
+            optimizer.target_fitness = -1;
+            for (int index = 0; index < 4; ++index) {
+                optimizer.inject_chromosome(std::tuple{ 3 });
+            }
+            return optimizer;
+        };
+
+        auto cataclysm_baseline = make_cataclysm_optimizer();
+        const auto cataclysm_committed =
+            serialized_population_state(cataclysm_baseline);
+        auto cataclysm_insufficient = make_cataclysm_optimizer();
+        const auto [cat_short_stats, cat_short_history] =
+            cataclysm_insufficient.optimize(
+                deterministic_ga_options{ 71, 1, 6, 5s }, 4, 20);
+        gbassert(cat_short_stats.total_evaluations == 4);
+        gbassert(cat_short_stats.cache_hits == 0);
+        gbassert(cat_short_stats.generations == 0);
+        gbassert(cat_short_stats.cataclysm_count == 0);
+        gbassert(cat_short_stats.last_stop_reason
+            == stop_reason::evaluation_budget);
+        gbassert(!cat_short_history.empty());
+        gbassert(serialized_population_state(cataclysm_insufficient)
+            == cataclysm_committed);
+
+        auto cataclysm_exact = make_cataclysm_optimizer();
+        const auto [cat_exact_stats, cat_exact_history] =
+            cataclysm_exact.optimize(
+                deterministic_ga_options{ 71, 1, 7, 5s }, 4, 20);
+        gbassert(cat_exact_stats.total_evaluations == 7);
+        gbassert(cat_exact_stats.generations == 0);
+        gbassert(cat_exact_stats.cataclysm_count == 1);
+        gbassert(cat_exact_stats.last_stop_reason
+            == stop_reason::evaluation_budget);
+        gbassert(!cat_exact_history.empty());
+
+        const auto make_perturbation_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](int) { return 0; }, std::less<int>{},
+                discrete_value_range<int>({ 0, 1, 2, 3, 4, 5, 6, 7 }));
+            optimizer.config.memo_capacity = 0;
+            optimizer.config.elitism_fraction = 0.75;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 0.0;
+            optimizer.stop_criteria.elite_convergence_epsilon = 1.0;
+            optimizer.stop_criteria.max_elite_perturbation_count = 1;
+            for (int value = 0; value < 4; ++value) {
+                optimizer.inject_chromosome(std::tuple{ value });
+            }
+            return optimizer;
+        };
+
+        auto perturbation_baseline = make_perturbation_optimizer();
+        const auto perturbation_committed =
+            serialized_population_state(perturbation_baseline);
+        auto perturbation_insufficient = make_perturbation_optimizer();
+        const auto [perturb_short_stats, perturb_short_history] =
+            perturbation_insufficient.optimize(
+                deterministic_ga_options{ 72, 1, 5, 5s }, 4, 20);
+        gbassert(perturb_short_stats.total_evaluations == 4);
+        gbassert(perturb_short_stats.generations == 0);
+        gbassert(perturb_short_stats.elite_perturbation_count == 0);
+        gbassert(perturb_short_stats.last_stop_reason
+            == stop_reason::evaluation_budget);
+        gbassert(!perturb_short_history.empty());
+        gbassert(serialized_population_state(perturbation_insufficient)
+            == perturbation_committed);
+
+        auto perturbation_exact = make_perturbation_optimizer();
+        const auto [perturb_exact_stats, perturb_exact_history] =
+            perturbation_exact.optimize(
+                deterministic_ga_options{ 72, 1, 6, 5s }, 4, 20);
+        gbassert(perturb_exact_stats.total_evaluations == 6);
+        gbassert(perturb_exact_stats.generations == 0);
+        gbassert(perturb_exact_stats.elite_perturbation_count == 1);
+        gbassert(perturb_exact_stats.last_stop_reason
+            == stop_reason::evaluation_budget);
+        gbassert(!perturb_exact_history.empty());
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_recovery_ranking_and_ties,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto make_ranked = [](bool reverse) {
+            auto optimizer = genetic_optimization_t(
+                [](double value) { return value; }, std::less<double>{},
+                min_max_value_range<double>{ 0.0, 9.0, 0.15, 2.0, 9.0 });
+            optimizer.config.memo_capacity = 0;
+            optimizer.config.elitism_fraction = 0.25;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 1.0;
+            optimizer.stop_criteria.cataclysm_enabled = true;
+            optimizer.stop_criteria.max_cataclysm_count = 1;
+            optimizer.stop_criteria.cataclysm_survival_fraction = 0.75;
+            optimizer.target_fitness = -1.0;
+            for (int offset = 0; offset < 4; ++offset) {
+                const double value = reverse
+                    ? static_cast<double>(4 - offset)
+                    : static_cast<double>(offset + 1);
+                optimizer.inject_chromosome(std::tuple{ value });
+            }
+            return optimizer;
+        };
+
+        auto ascending = make_ranked(false);
+        auto descending = make_ranked(true);
+        const auto [ascending_stats, ascending_history] = ascending.optimize(
+            deterministic_ga_options{ 81, 1, 5, 5s }, 4, 20);
+        const auto [descending_stats, descending_history] = descending.optimize(
+            deterministic_ga_options{ 81, 1, 5, 5s }, 4, 20);
+        gbassert(ascending_stats.cataclysm_count == 1);
+        gbassert(descending_stats.cataclysm_count == 1);
+        gbassert(serialized_population_state(ascending)
+            == serialized_population_state(descending));
+
+        const auto make_tied = [] {
+            auto optimizer = genetic_optimization_t(
+                [](double) { return 0; }, std::less<int>{},
+                min_max_value_range<double>{ 0.0, 99.0, 0.15, 2.0, 99.0 });
+            optimizer.config.memo_capacity = 0;
+            optimizer.config.elitism_fraction = 0.125;
+            optimizer.stop_criteria.stagnation_absolute_floor =
+                std::numeric_limits<std::size_t>::max();
+            optimizer.stop_criteria.diversity_threshold = 1.0;
+            optimizer.stop_criteria.cataclysm_enabled = true;
+            optimizer.stop_criteria.max_cataclysm_count = 1;
+            optimizer.stop_criteria.cataclysm_survival_fraction = 0.5;
+            optimizer.target_fitness = -1;
+            for (int value = 0; value < 8; ++value) {
+                optimizer.inject_chromosome(
+                    std::tuple{ static_cast<double>(value) });
+            }
+            return optimizer;
+        };
+
+        auto tied_lhs = make_tied();
+        auto tied_rhs = make_tied();
+        const auto [tied_lhs_stats, tied_lhs_history] = tied_lhs.optimize(
+            deterministic_ga_options{ 82, 1, 12, 5s }, 8, 20);
+        const auto [tied_rhs_stats, tied_rhs_history] = tied_rhs.optimize(
+            deterministic_ga_options{ 82, 1, 12, 5s }, 8, 20);
+        gbassert(tied_lhs_stats.cataclysm_count == 1);
+        gbassert(tied_rhs_stats.cataclysm_count == 1);
+        gbassert(serialized_population_state(tied_lhs)
+            == serialized_population_state(tied_rhs));
+
+        tied_lhs.target_fitness = 0;
+        const auto [prefix_stats, prefix_history] = tied_lhs.optimize(
+            deterministic_ga_options{ 83, 1, 8, 5s }, 8, 20);
+        gbassert(prefix_stats.last_stop_reason == stop_reason::target_reached);
+        const auto prefix_entries = prefix_history.all();
+        gbassert(prefix_entries.size() == 8);
+        for (std::size_t offset = 0; offset < 4; ++offset) {
+            gbassert(std::get<0>(prefix_entries[prefix_entries.size() - 4 + offset].second)
+                == static_cast<double>(3 - offset));
+        }
+
+        auto history_order = genetic_optimization_t(
+            [](int) { return 0; }, std::less<int>{},
+            discrete_value_range<int>({ 0, 1, 2, 3, 4, 5, 6, 7 }));
+        history_order.config.memo_capacity = 0;
+        history_order.target_fitness = 0;
+        for (int value = 0; value < 8; ++value) {
+            history_order.inject_chromosome(std::tuple{ value });
+        }
+        const auto [history_stats, history] = history_order.optimize(
+            deterministic_ga_options{ 84, 1, 8, 5s }, 8, 20);
+        gbassert(history_stats.last_stop_reason == stop_reason::target_reached);
+        const auto entries = history.all();
+        gbassert(entries.size() == 8);
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            gbassert(std::get<0>(entries[index].second)
+                == static_cast<int>(entries.size() - 1 - index));
+        }
+    }
+
+    GB_TEST(algorithm, deterministic_genetic_optimization_terminal_reproducibility,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+
+        const auto normalize_stats = [](optimization_stats stats) {
+            stats.elapsed = {};
+            return stats;
+        };
+        const auto make_optimizer = [] {
+            auto optimizer = genetic_optimization_t(
+                [](double) { return 0; }, std::less<int>{},
+                min_max_value_range<double>{ 0.0, 99.0, 0.15, 2.0, 99.0 });
+            optimizer.config.memo_capacity = 0;
+            for (int value = 0; value < 4; ++value) {
+                optimizer.inject_chromosome(
+                    std::tuple{ static_cast<double>(value) });
+            }
+            return optimizer;
+        };
+        const auto run_pair = [&](stop_reason expected, std::size_t expected_gwi,
+            auto configure) {
+                auto lhs = make_optimizer();
+                auto rhs = make_optimizer();
+                configure(lhs);
+                configure(rhs);
+                const deterministic_ga_options options{ 91, 3, 20, 5s };
+                const auto [lhs_stats, lhs_history] = lhs.optimize(options, 4, 20);
+                const auto [rhs_stats, rhs_history] = rhs.optimize(options, 4, 20);
+                gbassert(lhs_stats.last_stop_reason == expected);
+                gbassert(lhs_stats.generations_without_improvement == expected_gwi);
+                gbassert(normalize_stats(lhs_stats) == normalize_stats(rhs_stats));
+                gbassert(lhs_history.all() == rhs_history.all());
+                gbassert(serialized_population_state(lhs)
+                    == serialized_population_state(rhs));
+            };
+
+        run_pair(stop_reason::target_reached, 0,
+            [](auto& optimizer) { optimizer.target_fitness = 0; });
+        run_pair(stop_reason::stagnation, 1,
+            [](auto& optimizer) {
+                optimizer.target_fitness = -1;
+                optimizer.stop_criteria.diversity_threshold = 0.0;
+                optimizer.stop_criteria.stagnation_absolute_floor = 1;
+                optimizer.stop_criteria.stagnation_fraction = 0.0;
+            });
+        run_pair(stop_reason::diversity, 0,
+            [](auto& optimizer) {
+                optimizer.target_fitness = -1;
+                optimizer.stop_criteria.diversity_threshold = 1.0;
+                optimizer.stop_criteria.cataclysm_enabled = false;
+            });
+        run_pair(stop_reason::elite_converged, 0,
+            [](auto& optimizer) {
+                optimizer.stop_criteria.diversity_threshold = 0.0;
+                optimizer.stop_criteria.elite_convergence_epsilon = 1.0;
+                optimizer.stop_criteria.max_elite_perturbation_count = 0;
+            });
+    }
+
     // Detection trait the optimizer uses to recognise container wrappers; must
     // key on the public tag, not a private member (finding 6.A).
     template<class W>
