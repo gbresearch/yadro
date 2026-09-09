@@ -1141,7 +1141,7 @@ fails.
 The final independent re-review reported no remaining critical, important, or
 minor findings after the stable-scan and accepted-task-drain corrections.
 
-- [ ] **Step 8: Commit the final documentation and verification adjustments**
+- [x] **Step 8: Commit the final documentation and verification adjustments**
 
 ```powershell
 git add -- algorithm/genetic_optimization.h container/lockfree_memo_table.h `
@@ -1152,3 +1152,78 @@ git commit -m "docs: document deterministic genetic optimization"
 ```
 
 If Step 1-7 leave no uncommitted source or documentation changes, do not create an empty commit. Record exact Debug/Release results, stress-run results, final commit hash, and any environment-only blocker in the execution handoff.
+
+
+## Execution Handoff
+
+All eight tasks are complete and committed; the working tree is clean and the
+branch is merged into `master`.
+
+### Verification (current `master`, all first-hand)
+
+| Check | Result |
+| --- | --- |
+| Debug x64 rebuild | 242 passed, 0 failed, 2 disabled |
+| Release x64 rebuild | 242 passed, 0 failed, 2 disabled |
+| Release stress run 1 | 242 passed, 0 failed, 2 disabled (exit 0) |
+| Release stress run 2 | 242 passed, 0 failed, 2 disabled (exit 0) |
+| Release stress run 3 | 242 passed, 0 failed, 2 disabled (exit 0) |
+| `git diff --check` | clean |
+
+No compiler errors and no warnings under Release warnings-as-errors. Twenty
+deterministic-GA test cases execute in the suite. The `disabled: 2` count is
+unchanged from the pre-feature baseline, so no test was disabled by this work.
+
+Commit `1022902` was additionally verified standalone, with the GA files
+reverted to `07a7eec`: 242 - 4 = 238 passed, 0 failed. The memo-table fix is
+therefore bisectable on its own.
+
+### Commits
+
+| Commit | Content |
+| --- | --- |
+| `7d3dff3` .. `ecd7a44` | Tasks 1-7, each feature commit followed by its plan-progress commit |
+| `07a7eec` | Task 8 documentation (`docs: document deterministic genetic optimization`) |
+| `1022902` | Post-review fix: memo probe chains preserved with tombstone reset |
+| `f100260` | Post-review fix: deterministic breeding dispatch and adaptive budget guards |
+
+Final deterministic-GA commit: **`f100260`**. Merged to `master` by fast-forward
+from `8c90f4a` (17 commits); `master` has since advanced with the unrelated
+`58fb8f7 fix rounding of seconds`, which is not part of this work.
+
+Step 8 created no separate commit for source or documentation adjustments
+because Steps 1-7 left nothing uncommitted, as the step's own guidance directs.
+
+### Deviations from the plan as written
+
+- Task 7 removed an unused `#include <scope>`; MSVC does not ship that header.
+- Task 7 guarded `apply_deterministic_phase_baseline` against `num_phases - 1`
+  when extracting it from `optimize_imp`. Outside the original function the
+  compiler can no longer prove `num_phases > 1`, and Release rejected the
+  division under warnings-as-errors (C4723).
+- The Task 7 carry test asserts budget conservation end to end (a four-phase
+  budget of 12 commits exactly 12 generations across `{5,4,2,1}` allocations
+  plus carry) rather than observing a single phase's carried share. The
+  per-phase carry value is not reachable through the public API, and the plan
+  forbids adding test-only accessors for it.
+- Post-review corrections landed as `1022902` and `f100260`, after the Step 8
+  documentation commit rather than before it. Step 7 anticipates applying
+  findings "before the final commit"; the ordering differs, but no source or
+  documentation change is left uncommitted.
+
+### Environment-only blockers
+
+None. The test executable has no per-test filter and is invoked by the Visual
+Studio project's post-build event, so every GREEN build runs the complete
+suite; `/p:RunPostBuildEvent=Never` remains the compile-only escape hatch.
+
+### Known follow-ups (deliberately out of scope)
+
+- The `void` memo-table specialization has the same notification-before-reset
+  defect the value-returning table fixed. It is unused by the GA and was left
+  unchanged; repairing it needs separate coverage for its fire-and-forget and
+  wait-for-completion modes.
+- The `saw_unstable` retry loop is bounded by one in-flight computation's
+  duration but does not say so in a comment.
+- The redundant `yadro-deterministic-ga` worktree and `codex/deterministic-ga`
+  branch now point at the merged commit and can be removed.
