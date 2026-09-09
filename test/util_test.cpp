@@ -238,6 +238,16 @@ namespace
         using namespace std::chrono_literals;
         gbassert(std::format("{}", datetime_to_chrono(14000 + 13. / 24 + 25. / 24 / 60 + 15. / 24 / 60 / 60)) == "1938-04-30 13:25:15");
 
+        // 2019-02-11 07:22:00 is 43507.306944444441, whose product with 86400 is
+        // 3759031319.9999995; truncating that reported the instant as 07:21:59.
+        static_assert((43507. + 26520. / 86400.) * 86400. < 3759031320.);
+        static_assert(datetime_to_chrono(43507. + 26520. / 86400.)
+            == std::chrono::sys_days{ std::chrono::February / 11 / 2019 } + 7h + 22min);
+        gbassert(std::format("{}", datetime_to_chrono(43507. + 26520. / 86400.)) == "2019-02-11 07:22:00");
+        // Serials before the epoch round away from zero too: truncating this one gave 16:38:01.
+        static_assert(datetime_to_chrono(-(43507. + 26520. / 86400.))
+            == std::chrono::sys_days{ std::chrono::November / 15 / 1780 } + 16h + 38min);
+
         static_assert(week_of_year(1977, 1, 1) == std::tuple{ 1976, 53, 6 });
         static_assert(week_of_year(1977, 1, 2) == std::tuple{ 1976, 53, 7 });
         static_assert(week_of_year(1977, 12, 31) == std::tuple{ 1977, 52, 6 });

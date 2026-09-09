@@ -70,9 +70,17 @@ namespace gb::yadro::util
     inline constexpr auto datetime_to_chrono(double datetime) 
     {
         using namespace std::chrono;
+        // A whole-second serial is rarely exact in binary: 2019-02-11 07:22:00 is
+        // 43507.306944444441, whose product with 86400 is 3759031319.9999995.  duration_cast
+        // truncates toward zero, so that instant used to convert to 07:21:59 and anything
+        // formatting or exporting it reported the wrong second (and, at a minute boundary, the
+        // wrong minute).  Round to the nearest second instead.  Written without std::llround so
+        // the function stays usable in a constant expression.
+        const auto seconds_since_epoch = datetime * 86400.;
+        const auto rounded = static_cast<seconds::rep>(seconds_since_epoch < 0.
+            ? seconds_since_epoch - .5 : seconds_since_epoch + .5);
         // Add the duration to the TDateTime epoch to get the system_clock time_point
-        return sys_days{ December / 30 / 1899 } +
-            duration_cast<seconds>(duration<double, std::ratio<86400>>(datetime));
+        return sys_days{ December / 30 / 1899 } + seconds{ rounded };
     }
 
     //-------------------------------------------------------------------------
