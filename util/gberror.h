@@ -33,9 +33,19 @@
 #include <concepts>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <sstream>
 #include <source_location>
 #include <stacktrace>
+
+// keeps a cold function out of line, so the code inlined at its call sites stays small
+#if defined(_MSC_VER)
+#define GB_YADRO_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define GB_YADRO_NOINLINE __attribute__((noinline, cold))
+#else
+#define GB_YADRO_NOINLINE
+#endif
 
 namespace gb::yadro::util
 {
@@ -156,19 +166,32 @@ namespace gb::yadro::util
     }
 
     //-------------------------------------------------------------------------
+    namespace detail
+    {
+        // gbassert's failure path, kept out of line so that a passing assertion costs only its test
+        template<class ErrorType>
+        [[noreturn]] GB_YADRO_NOINLINE void throw_failed_assertion(std::string_view msg, const std::source_location& location)
+        {
+            throw ErrorType(std::string(msg), " (", location.file_name(), ':', location.line(), ')');
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // msg is taken as a view: a passing assertion must not build a std::string, which
+    // heap-allocates once the text outgrows the small-string buffer (15 chars in MSVC)
     template<class ErrorType = generic_error>
-    inline void gbassert(const auto& cond, const std::string& msg, std::source_location location = std::source_location::current())
+    inline void gbassert(const auto& cond, std::string_view msg, std::source_location location = std::source_location::current())
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
         if constexpr (std::invocable<decltype(cond)>)
         {
-            if (!std::invoke(cond))
-                throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
+            if (!std::invoke(cond)) [[unlikely]]
+                detail::throw_failed_assertion<ErrorType>(msg, location);
         }
         else
         {
-            if (!cond)
-                throw ErrorType(msg, " (", location.file_name(), ':', location.line(), ')');
+            if (!cond) [[unlikely]]
+                detail::throw_failed_assertion<ErrorType>(msg, location);
         }
     }
 

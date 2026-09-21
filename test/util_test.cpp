@@ -38,6 +38,26 @@
 #include <atomic>
 #include <limits>
 #include <filesystem>
+#include <format>
+#include <source_location>
+#include <cstdlib>
+#include <new>
+
+// Counts the calling thread's heap allocations, for gbassert_passing_does_not_allocate.
+// Replacing the global operator new applies to this whole test executable; the counter
+// is thread_local, so tests running on other threads cannot disturb a reading.
+static thread_local std::size_t thread_allocation_count = 0;
+
+void* operator new(std::size_t size)
+{
+    ++thread_allocation_count;
+    if (auto p = std::malloc(size == 0 ? 1 : size))
+        return p;
+    throw std::bad_alloc{};
+}
+
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 namespace
 {
@@ -717,6 +737,74 @@ unset multiplot)*";
         // error_t formatting includes the [E<num>] tag
         try { throw generic_error("xyz"); }
         catch (const std::exception& e) { gbassert(std::string(e.what()).find("[E1000]") != std::string::npos); }
+    }
+
+    GB_TEST(util, gbassert_messages)
+    {
+        const std::string long_text = "a message longer than the small-string buffer";
+
+        // what() of the exception fun throws, or empty when it does not throw
+        const auto thrown = [](auto&& fun) -> std::string
+        {
+            try { fun(); }
+            catch (const std::exception& e) { return e.what(); }
+            return {};
+        };
+
+        // each failing gbassert shares a line with the current() passed beside it,
+        // so the expected " (file:line)" suffix comes from that location
+        const auto expect = [&](const std::string& text, const std::source_location& at, auto&& fun)
+        {
+            const auto what = thrown(fun);
+            gbassert(what == std::format("{} ({}:{})", text, at.file_name(), at.line()), what);
+        };
+
+        // passing assertions throw nothing, whatever the message type
+        gbassert(thrown([&]
+            {
+                gbassert(true);
+                gbassert([] { return true; });
+                gbassert(true, "a literal");
+                gbassert(true, long_text);
+                gbassert(true, std::format("formatted {}", 42));
+            }).empty());
+
+        // the thrown text is unchanged for every message type the call sites pass
+        expect("[E0] assertion failed", std::source_location::current(), [] { gbassert(false); });
+        expect("[E0] assertion failed", std::source_location::current(), [] { gbassert([] { return false; }); });
+        expect("[E1000] a literal", std::source_location::current(), [] { gbassert(false, "a literal"); });
+        expect("[E1000] " + long_text, std::source_location::current(), [&] { gbassert(false, long_text); });
+        expect("[E1000] formatted 42", std::source_location::current(), [] { gbassert(false, std::format("formatted {}", 42)); });
+        expect("[E1000] a view", std::source_location::current(), [] { gbassert(false, std::string_view{ "a view" }); });
+        expect("[E1] a custom type", std::source_location::current(), [] { gbassert<unreachable_error>(false, "a custom type"); });
+
+        // an explicit location is reported as given
+        const auto location = std::source_location::current();
+        expect("[E0] assertion failed", location, [&] { gbassert(false, location); });
+        expect("[E1000] located", location, [&] { gbassert(false, "located", location); });
+
+        // and the exception types are unchanged
+        must_throw<failed_assertion>([] { gbassert(false); });
+        must_throw<generic_error>([] { gbassert(false, "generic"); });
+        must_throw<unreachable_error>([] { gbassert<unreachable_error>(false); });
+    }
+
+    GB_TEST(util, gbassert_passing_does_not_allocate)
+    {
+        // "assertion failed" and most messages outgrow MSVC's 15-char small-string buffer,
+        // so a passing assertion that built its message as a std::string heap-allocated
+        const std::string long_text = "a message longer than the small-string buffer";
+        const auto before = thread_allocation_count;
+        for (std::size_t i = 0; i < 100; ++i)
+        {
+            gbassert(i < 100);
+            gbassert([i] { return i < 100; });
+            gbassert(i < 100, "a literal message longer than the small-string buffer");
+            gbassert(i < 100, long_text);
+            gbassert<unreachable_error>(i < 100, "a custom error type with a long message");
+        }
+        const auto allocations = thread_allocation_count - before;
+        gbassert(allocations == 0, std::to_string(allocations) + " heap allocations");
     }
 
     GB_TEST(util, gbwin_test)
