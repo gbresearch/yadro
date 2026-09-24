@@ -47,10 +47,11 @@
 //   never compared through a lossy conversion. NaN is unequal to everything.
 // - Other kinds are equal only to the same kind.
 //
-// Recursion
-// - Copying, destroying, comparing and writing a value recurse over its nesting. Parsed values
-//   are bounded by json_parse_options::max_depth; callers that build values programmatically own
-//   the depth of what they build.
+// Nesting and the stack
+// - Destroying, copying and comparing values use explicit worklists, so they take no stack in
+//   proportion to the nesting depth. Only the writer recurses, once per nesting level; parsed
+//   values are bounded by json_parse_options::max_depth, and callers that build values
+//   programmatically own the depth of what they write.
 //-----------------------------------------------------------------------------
 
 #include "json_parser.h"
@@ -69,6 +70,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -163,8 +165,8 @@ namespace gb::yadro::container
         bool erase(std::string_view key);
 
     private:
+        friend class json_value;
         friend class json_value_builder;
-        friend bool json_objects_equal(const json_object& a, const json_object& b);
 
         std::vector<json_member> _members;
     };
@@ -241,6 +243,7 @@ namespace gb::yadro::container
             json_array, json_object>;
 
         [[nodiscard]] json_access_error mismatch() const noexcept;
+        [[nodiscard]] static json_value shallow_copy(const json_value& source);
 
         storage _value;
     };
@@ -255,6 +258,7 @@ namespace gb::yadro::container
 
     private:
         friend class json_object;
+        friend class json_value;
         friend class json_value_builder;
 
         json_member(std::string key, json_value member_value) : value(std::move(member_value)), _key(std::move(key)) {}
@@ -338,11 +342,126 @@ namespace gb::yadro::container
     }
 
     inline json_value::json_value() noexcept = default;
-    inline json_value::json_value(const json_value&) = default;
     inline json_value::json_value(json_value&&) noexcept = default;
-    inline json_value& json_value::operator=(const json_value&) = default;
     inline json_value& json_value::operator=(json_value&&) noexcept = default;
-    inline json_value::~json_value() = default;
+
+    // a copy of a scalar, or an empty container of the same kind
+    inline json_value json_value::shallow_copy(const json_value& source)
+    {
+        json_value result;
+        switch (source.kind()) {
+        case json_kind::array:
+            result._value.emplace<json_array>();
+            break;
+        case json_kind::object:
+            result._value.emplace<json_object>();
+            break;
+        default:
+            result._value = source._value;
+            break;
+        }
+        return result;
+    }
+
+    // Copies one level at a time from a worklist, so copying a deeply nested value takes no stack
+    // in proportion to its depth. Each container reserves its exact size before its children are
+    // queued, so the queued target pointers stay valid.
+    inline json_value::json_value(const json_value& other)
+        : json_value(shallow_copy(other))
+    {
+        if (!other.is_array() && !other.is_object())
+            return;
+        std::vector<std::pair<const json_value*, json_value*>> pending{ { &other, this } };
+        while (!pending.empty()) {
+            auto [source, target] = pending.back();
+            pending.pop_back();
+            if (auto* from = source->get_if<json_array>()) {
+                auto& to = *target->get_if<json_array>();
+                to.reserve(from->size());
+                for (auto& element : *from)
+                    to.push_back(shallow_copy(element));
+                for (std::size_t i = 0; i < from->size(); ++i)
+                    if ((*from)[i].is_array() || (*from)[i].is_object())
+                        pending.emplace_back(&(*from)[i], &to[i]);
+            }
+            else {
+                auto& from_members = source->get_if<json_object>()->_members;
+                auto& to_members = target->get_if<json_object>()->_members;
+                to_members.reserve(from_members.size());
+                for (auto& member : from_members)
+                    to_members.push_back(json_member(member.key(), shallow_copy(member.value)));
+                for (std::size_t i = 0; i < from_members.size(); ++i)
+                    if (from_members[i].value.is_array() || from_members[i].value.is_object())
+                        pending.emplace_back(&from_members[i].value, &to_members[i].value);
+            }
+        }
+    }
+
+    inline json_value& json_value::operator=(const json_value& other)
+    {
+        if (this != &other) {
+            json_value copy(other);
+            *this = std::move(copy);
+        }
+        return *this;
+    }
+
+    namespace detail
+    {
+        [[nodiscard]] inline bool json_is_nonempty_container(const json_value& value) noexcept
+        {
+            if (auto* array = value.get_if<json_array>())
+                return !array->empty();
+            if (auto* object = value.get_if<json_object>())
+                return !object->empty();
+            return false;
+        }
+
+        [[nodiscard]] inline bool json_has_nested_container(const json_value& value) noexcept
+        {
+            if (auto* array = value.get_if<json_array>())
+                return std::any_of(array->begin(), array->end(), json_is_nonempty_container);
+            if (auto* object = value.get_if<json_object>())
+                return std::any_of(object->begin(), object->end(), [](const json_member& m) { return json_is_nonempty_container(m.value); });
+            return false;
+        }
+
+        // moves every non-empty container child of value to pending (a moved-from container is empty)
+        inline void json_detach_nested(json_value& value, std::vector<json_value>& pending)
+        {
+            if (auto* array = value.get_if<json_array>()) {
+                for (auto& element : *array)
+                    if (json_is_nonempty_container(element))
+                        pending.push_back(std::move(element));
+            }
+            else if (auto* object = value.get_if<json_object>()) {
+                for (auto& member : *object)
+                    if (json_is_nonempty_container(member.value))
+                        pending.push_back(std::move(member.value));
+            }
+        }
+    }
+
+    // Destroying nested containers recursively would take stack in proportion to the depth, several
+    // KB per level in an unoptimized build. Instead, containers nested in containers are detached
+    // into a worklist and destroyed one level at a time. If the worklist cannot be allocated, the
+    // rest of the value is destroyed recursively.
+    inline json_value::~json_value()
+    {
+        if (!detail::json_has_nested_container(*this))
+            return;
+        try {
+            std::vector<json_value> pending;
+            detail::json_detach_nested(*this, pending);
+            while (!pending.empty()) {
+                json_value current = std::move(pending.back());
+                pending.pop_back();
+                detail::json_detach_nested(current, pending);
+            }
+        }
+        catch (...) {
+        }
+    }
 
     inline json_value::json_value(std::nullptr_t) noexcept {}
     inline json_value::json_value(bool value) noexcept : _value(std::in_place_type<bool>, value) {}
@@ -508,60 +627,110 @@ namespace gb::yadro::container
         }
     }
 
-    inline bool json_objects_equal(const json_object& a, const json_object& b)
+    namespace detail
     {
-        if (a._members.size() != b._members.size())
-            return false;
-        if (a._members.size() <= 16) {
-            for (auto& member : a._members) {
-                auto* other = b.find(member.key());
-                if (!other || !(member.value == *other))
-                    return false;
+        using json_value_pairs = std::vector<std::pair<const json_value*, const json_value*>>;
+
+        // Compares two numbers of any numeric kinds exactly.
+        [[nodiscard]] inline bool json_numbers_equal(const json_value& a, const json_value& b) noexcept
+        {
+            if (auto* x = a.get_if<std::int64_t>()) {
+                if (auto* y = b.get_if<std::int64_t>())
+                    return *x == *y;
+                if (auto* y = b.get_if<std::uint64_t>())
+                    return json_equals(*x, *y);
+                return json_equals(*x, *b.get_if<double>());
             }
-            return true;
+            if (auto* x = a.get_if<std::uint64_t>()) {
+                if (auto* y = b.get_if<std::uint64_t>())
+                    return *x == *y;
+                if (auto* y = b.get_if<std::int64_t>())
+                    return json_equals(*y, *x);
+                return json_equals(*x, *b.get_if<double>());
+            }
+            const double x = *a.get_if<double>();
+            if (auto* y = b.get_if<double>())
+                return x == *y;
+            if (auto* y = b.get_if<std::int64_t>())
+                return json_equals(*y, x);
+            return json_equals(*b.get_if<std::uint64_t>(), x);
         }
-        auto sorted = [](const json_object& o) {
-            std::vector<const json_member*> members;
-            members.reserve(o._members.size());
-            for (auto& member : o._members)
-                members.push_back(&member);
-            std::sort(members.begin(), members.end(), [](const json_member* x, const json_member* y) { return x->key() < y->key(); });
-            return members;
-        };
-        auto sa = sorted(a);
-        auto sb = sorted(b);
-        for (std::size_t i = 0; i < sa.size(); ++i)
-            if (sa[i]->key() != sb[i]->key() || !(sa[i]->value == sb[i]->value))
+
+        // Compares a and b without descending: scalars are compared, and equal-sized containers
+        // queue their child pairs in pending (object members matched by key, order ignored).
+        [[nodiscard]] inline bool json_node_equal(const json_value& a, const json_value& b, json_value_pairs& pending)
+        {
+            if (a.is_number() || b.is_number())
+                return a.is_number() && b.is_number() && json_numbers_equal(a, b);
+            if (a.kind() != b.kind())
                 return false;
-        return true;
+            switch (a.kind()) {
+            case json_kind::null:
+                return true;
+            case json_kind::boolean:
+                return *a.get_if<bool>() == *b.get_if<bool>();
+            case json_kind::string:
+                return *a.get_if<std::string>() == *b.get_if<std::string>();
+            case json_kind::array: {
+                auto& x = *a.get_if<json_array>();
+                auto& y = *b.get_if<json_array>();
+                if (x.size() != y.size())
+                    return false;
+                for (std::size_t i = 0; i < x.size(); ++i)
+                    pending.emplace_back(&x[i], &y[i]);
+                return true;
+            }
+            case json_kind::object: {
+                auto& x = *a.get_if<json_object>();
+                auto& y = *b.get_if<json_object>();
+                if (x.size() != y.size())
+                    return false;
+                if (x.size() <= 16) {
+                    for (auto& member : x) {
+                        auto* other = y.find(member.key());
+                        if (!other)
+                            return false;
+                        pending.emplace_back(&member.value, other);
+                    }
+                    return true;
+                }
+                auto sorted = [](const json_object& o) {
+                    std::vector<const json_member*> members;
+                    members.reserve(o.size());
+                    for (auto& member : o)
+                        members.push_back(&member);
+                    std::sort(members.begin(), members.end(), [](const json_member* p, const json_member* q) { return p->key() < q->key(); });
+                    return members;
+                };
+                auto sx = sorted(x);
+                auto sy = sorted(y);
+                for (std::size_t i = 0; i < sx.size(); ++i) {
+                    if (sx[i]->key() != sy[i]->key())
+                        return false;
+                    pending.emplace_back(&sx[i]->value, &sy[i]->value);
+                }
+                return true;
+            }
+            default:
+                return false;
+            }
+        }
     }
 
+    // Iterative, so comparing deeply nested values takes no stack in proportion to their depth.
     inline bool operator==(const json_value& a, const json_value& b)
     {
-        return std::visit([&](const auto& x) -> bool {
-            using X = std::decay_t<decltype(x)>;
-            return std::visit([&](const auto& y) -> bool {
-                using Y = std::decay_t<decltype(y)>;
-                if constexpr (std::is_same_v<X, Y>) {
-                    if constexpr (std::is_same_v<X, json_object>)
-                        return json_objects_equal(x, y);
-                    else if constexpr (std::is_same_v<X, std::nullptr_t>)
-                        return true;
-                    else
-                        return x == y;
-                }
-                else if constexpr (std::is_same_v<X, std::int64_t> && std::is_same_v<Y, std::uint64_t>)
-                    return detail::json_equals(x, y);
-                else if constexpr (std::is_same_v<X, std::uint64_t> && std::is_same_v<Y, std::int64_t>)
-                    return detail::json_equals(y, x);
-                else if constexpr ((std::is_same_v<X, std::int64_t> || std::is_same_v<X, std::uint64_t>) && std::is_same_v<Y, double>)
-                    return detail::json_equals(x, y);
-                else if constexpr (std::is_same_v<X, double> && (std::is_same_v<Y, std::int64_t> || std::is_same_v<Y, std::uint64_t>))
-                    return detail::json_equals(y, x);
-                else
-                    return false;
-            }, b._value);
-        }, a._value);
+        detail::json_value_pairs pending;
+        const json_value* x = &a;
+        const json_value* y = &b;
+        for (;;) {
+            if (!detail::json_node_equal(*x, *y, pending))
+                return false;
+            if (pending.empty())
+                return true;
+            std::tie(x, y) = pending.back();
+            pending.pop_back();
+        }
     }
 
     static_assert(std::is_nothrow_move_constructible_v<json_value>);

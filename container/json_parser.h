@@ -572,13 +572,102 @@ namespace gb::yadro::container
                 }
             }
 
+            // The recursion runs container -> value -> depth wrapper -> container, so these two
+            // functions keep only the locals the recursion needs: in an unoptimized build every
+            // local of a function occupies its frame, and scalar and key handling live in
+            // separate, non-recursive functions.
+
             // i != _end; returns the position after the value
             iterator value(iterator i)
             {
-                switch (*i) {
-                case '{':
-                case '[':
+                if (*i == '{' || *i == '[')
                     return _limited(i, _end).position;
+                return scalar(i);
+            }
+
+            // *i is '{' or '['; returns the position after the closing bracket
+            iterator container(iterator i)
+            {
+                const bool is_object = *i == '{';
+                begin_container(i, is_object);
+                i = after_open(i);
+                if (*i == (is_object ? '}' : ']'))
+                    return end_container(i, is_object);
+                for (;;) {
+                    if (is_object)
+                        i = member_key(i);
+                    i = after_value(value(i), is_object);
+                    if (*i == ',') {
+                        i = next_element(i);
+                        continue;
+                    }
+                    return end_container(i, is_object);
+                }
+            }
+
+            void begin_container(iterator i, bool is_object)
+            {
+                emit(i, [&] { is_object ? _handler.begin_object() : _handler.begin_array(); });
+            }
+
+            // position of the first member or element, or of the closing bracket
+            iterator after_open(iterator i) const
+            {
+                i = skip_ws(i + 1);
+                if (i == _end)
+                    fail_end();
+                return i;
+            }
+
+            // parses "key" : and returns the position of the member value
+            iterator member_key(iterator i)
+            {
+                if (*i != '"')
+                    fail(i, json_parse_errc::syntax, "expected a JSON object key");
+                auto [key, next] = string(i);
+                emit(i, [&] { _handler.key(key); });
+                i = skip_ws(next);
+                if (i == _end)
+                    fail_end();
+                if (*i != ':')
+                    fail(i, json_parse_errc::syntax, "expected ':' after a JSON object key");
+                i = skip_ws(i + 1);
+                if (i == _end)
+                    fail_end();
+                return i;
+            }
+
+            // position of the ',' or closing bracket after a value
+            iterator after_value(iterator i, bool is_object) const
+            {
+                i = skip_ws(i);
+                if (i == _end)
+                    fail_end();
+                if (*i != ',' && *i != (is_object ? '}' : ']'))
+                    fail(i, json_parse_errc::syntax, is_object ? "expected ',' or '}' in a JSON object" : "expected ',' or ']' in a JSON array");
+                return i;
+            }
+
+            // *i is ','; position of the next member or element
+            iterator next_element(iterator i) const
+            {
+                i = skip_ws(i + 1);
+                if (i == _end)
+                    fail_end();
+                return i;
+            }
+
+            // *i is the closing bracket
+            iterator end_container(iterator i, bool is_object)
+            {
+                emit(i, [&] { is_object ? _handler.end_object() : _handler.end_array(); });
+                return i + 1;
+            }
+
+            // i != _end and *i opens no container; returns the position after the value
+            iterator scalar(iterator i)
+            {
+                switch (*i) {
                 case '"': {
                     auto [text, next] = string(i);
                     emit(i, [&] { _handler.string_value(text); });
@@ -594,51 +683,6 @@ namespace gb::yadro::container
                     if (*i == '-' || (*i >= '0' && *i <= '9'))
                         return number(i);
                     fail(i, json_parse_errc::syntax, "unexpected character where a JSON value is expected");
-                }
-            }
-
-            // *i is '{' or '['; returns the position after the closing bracket
-            iterator container(iterator i)
-            {
-                const bool is_object = *i == '{';
-                const char close = is_object ? '}' : ']';
-                emit(i, [&] { is_object ? _handler.begin_object() : _handler.begin_array(); });
-                i = skip_ws(i + 1);
-                if (i == _end)
-                    fail_end();
-                if (*i == close) {
-                    emit(i, [&] { is_object ? _handler.end_object() : _handler.end_array(); });
-                    return i + 1;
-                }
-                for (;;) {
-                    if (is_object) {
-                        if (*i != '"')
-                            fail(i, json_parse_errc::syntax, "expected a JSON object key");
-                        auto [key, next] = string(i);
-                        emit(i, [&] { _handler.key(key); });
-                        i = skip_ws(next);
-                        if (i == _end)
-                            fail_end();
-                        if (*i != ':')
-                            fail(i, json_parse_errc::syntax, "expected ':' after a JSON object key");
-                        i = skip_ws(i + 1);
-                        if (i == _end)
-                            fail_end();
-                    }
-                    i = skip_ws(value(i));
-                    if (i == _end)
-                        fail_end();
-                    if (*i == ',') {
-                        i = skip_ws(i + 1);
-                        if (i == _end)
-                            fail_end();
-                        continue;
-                    }
-                    if (*i == close) {
-                        emit(i, [&] { is_object ? _handler.end_object() : _handler.end_array(); });
-                        return i + 1;
-                    }
-                    fail(i, json_parse_errc::syntax, is_object ? "expected ',' or '}' in a JSON object" : "expected ',' or ']' in a JSON array");
                 }
             }
 
