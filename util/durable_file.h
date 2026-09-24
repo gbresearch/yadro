@@ -60,9 +60,11 @@
 //   * The rename is the commit point, and a flush that fails after it cannot be undone. The
 //     flush after the fallback rename below is a separate call, so its failure is known to be
 //     post-commit. MoveFileExW flushes inside the call, so when it fails the file at the target
-//     is identified: if it is the temp file (same volume and file ID, captured before the move)
-//     the rename committed. A missing temp path is not taken as proof, since another process
-//     may have removed it. If the target cannot be identified the outcome is reported as
+//     is identified: if it is the temp file (same volume and 128-bit FILE_ID_INFO file ID,
+//     captured before the move) the rename committed. A missing temp path is not taken as
+//     proof, since another process may have removed it, and neither is the 64-bit file index,
+//     which is not unique on ReFS and can change on FAT. Without both 128-bit IDs (FileIdInfo is
+//     unsupported on FAT/exFAT and some network shares) a failed MoveFileExW is reported as
 //     unknown. The classification assumes no other writer replaces the same target concurrently.
 //   * MoveFileExW fails with ERROR_ACCESS_DENIED whenever the target is open, even when every
 //     open handle allows FILE_SHARE_DELETE. In that case the rename is redone with
@@ -107,6 +109,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <span>
 #include <streambuf>
@@ -140,7 +143,8 @@ namespace gb::yadro::util
     };
 
     // atomic_replace_file cannot tell whether its rename committed (Windows: MoveFileExW failed and
-    // the target's file identity could not be read to check). The target holds either the complete
+    // the 128-bit file IDs of the temp file and the target could not both be read to check; always
+    // the case on file systems without FileIdInfo, such as FAT). The target holds either the complete
     // old content or the complete new content, never a mix; data() is the error that prevented the
     // check. Repeating the same atomic_replace_file is safe and, if it succeeds, settles it.
     struct replace_outcome_unknown_error : file_io_error
@@ -221,6 +225,8 @@ namespace gb::yadro::util
             os_error move_error_after_rename = 0;
             // Windows: runs after a failed MoveFileExW, before its outcome is classified
             void (*on_move_failed)(const std::filesystem::path& temp) = nullptr;
+            // Windows: reading the temp file's identity, before the move, fails with this error
+            os_error temp_identity_error = 0;
             // Windows: reading the target's file identity fails with this error
             os_error target_identity_error = 0;
         };
@@ -512,21 +518,21 @@ namespace gb::yadro::util
             friend bool operator==(const file_identity&, const file_identity&) = default;
         };
 
+        // Reads the 128-bit file ID (FILE_ID_INFO), the only identity trusted here. There is
+        // deliberately no fallback to the 64-bit index of GetFileInformationByHandle: it is not
+        // guaranteed unique on ReFS and can change on FAT, so equal indexes prove nothing. Where
+        // FileIdInfo is unsupported (FAT, exFAT, some redirectors) this fails, and an all-zero ID
+        // counts as unavailable too.
         [[nodiscard]] inline os_error query_file_identity(HANDLE handle, file_identity& identity) noexcept
         {
             identity = {};
-            // 128-bit ids (ReFS); falls back to the 64-bit file index where FileIdInfo is unsupported
-            if (FILE_ID_INFO info{}; GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info))) {
-                identity.volume = info.VolumeSerialNumber;
-                std::memcpy(identity.id.data(), &info.FileId, sizeof(info.FileId));
-                return 0;
-            }
-            BY_HANDLE_FILE_INFORMATION info{};
-            if (!GetFileInformationByHandle(handle, &info))
+            FILE_ID_INFO info{};
+            if (!GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info)))
                 return GetLastError();
-            identity.volume = info.dwVolumeSerialNumber;
-            auto index = static_cast<std::uint64_t>(info.nFileIndexHigh) << 32 | info.nFileIndexLow;
-            std::memcpy(identity.id.data(), &index, sizeof(index));
+            identity.volume = info.VolumeSerialNumber;
+            std::memcpy(identity.id.data(), &info.FileId, sizeof(info.FileId));
+            if (identity.id == std::array<std::byte, 16>{})
+                return ERROR_NOT_SUPPORTED;
             return 0;
         }
 
@@ -534,11 +540,18 @@ namespace gb::yadro::util
 
         // After MoveFileExW fails, whether it renamed temp over target anyway (its write-through
         // flush comes after the rename). The temp path being gone proves nothing, since another
-        // process may have removed it, so target's file identity is compared with temp's.
-        // Assumes no other writer replaces target concurrently.
+        // process may have removed it, so target's file ID is compared with temp's, read before
+        // the move. Without both IDs no trustworthy comparison exists and the outcome is unknown;
+        // identity_error then says why. Assumes no other writer replaces target concurrently.
         [[nodiscard]] inline move_outcome classify_failed_move(const std::filesystem::path& target,
-            const file_identity& temp_identity, os_error& identity_error) noexcept
+            const std::optional<file_identity>& temp_identity, os_error temp_identity_error,
+            os_error& identity_error) noexcept
         {
+            if (!temp_identity) {
+                identity_error = temp_identity_error;
+                return move_outcome::unknown;
+            }
+
             identity_error = std::exchange(replace_faults.target_identity_error, os_error{});
             if (identity_error)
                 return move_outcome::unknown;
@@ -558,7 +571,7 @@ namespace gb::yadro::util
             file_identity identity;
             if ((identity_error = query_file_identity(file, identity)) != 0)
                 return move_outcome::unknown;
-            return identity == temp_identity ? move_outcome::committed : move_outcome::not_committed;
+            return identity == *temp_identity ? move_outcome::committed : move_outcome::not_committed;
         }
 #endif
 
@@ -621,10 +634,13 @@ namespace gb::yadro::util
 #if defined(GBWINDOWS)
                 if (auto error = flush_file(handle()))
                     throw_file_io_error(error, "atomic_replace_file: FlushFileBuffers", _path);
-                // needed to recognize the file at target if MoveFileExW fails after renaming it
-                file_identity temp_identity;
-                if (auto error = query_file_identity(handle(), temp_identity))
-                    throw_file_io_error(error, "atomic_replace_file: file identity", _path);
+                // needed to recognize the file at target if MoveFileExW fails after renaming it;
+                // without it a successful move is still fine, but a failed one becomes unknown
+                std::optional<file_identity> temp_identity;
+                os_error temp_identity_error = std::exchange(replace_faults.temp_identity_error, os_error{});
+                if (file_identity identity; temp_identity_error == 0
+                    && (temp_identity_error = query_file_identity(handle(), identity)) == 0)
+                    temp_identity = identity;
                 if (!CloseHandle(_handle.release()))
                     throw_file_io_error(GetLastError(), "atomic_replace_file: CloseHandle", _path);
 
@@ -644,7 +660,7 @@ namespace gb::yadro::util
                         hook(_path);
 
                     os_error identity_error = 0;
-                    switch (classify_failed_move(target, temp_identity, identity_error)) {
+                    switch (classify_failed_move(target, temp_identity, temp_identity_error, identity_error)) {
                     case move_outcome::committed:
                         _installed = true;
                         throw_file_io_error<replace_not_durable_error>(error,
@@ -652,7 +668,7 @@ namespace gb::yadro::util
                     case move_outcome::unknown:
                         throw_file_io_error<replace_outcome_unknown_error>(identity_error,
                             to_string("atomic_replace_file: MoveFileExW failed (Win32 error ", error,
-                                "), then reading the target's file identity"), target);
+                                "); reading the file IDs that tell whether it renamed"), target);
                     case move_outcome::not_committed:
                         break;
                     }

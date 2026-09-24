@@ -353,11 +353,27 @@ namespace
         gbassert(read_whole_file(file) == "new"); // here it was in fact not committed
         gbassert(count_temp_files(directory) == 0);
 
+        // the temp file's ID was unavailable before the move (a file system without FileIdInfo):
+        // no trustworthy comparison exists, so a failed move is unknown, never inferred
+        detail::replace_faults.temp_identity_error = ERROR_INVALID_PARAMETER;
+        std::tie(outcome, code) = replace_result([&] { atomic_replace_file(file, "newer"); });
+        gbassert(detail::replace_faults.temp_identity_error == 0);
+        gbassert(outcome == replace_outcome::unknown);
+        gbassert(code.value() == ERROR_INVALID_PARAMETER);
+        gbassert(read_whole_file(file) == "new");
+        gbassert(count_temp_files(directory) == 0);
+
         // an ordinary refusal is still classified as not committed through the real identity check
         std::tie(outcome, code) = replace_result([&] { atomic_replace_file(file, "newer"); });
         gbassert(outcome == replace_outcome::not_committed);
         gbassert(code.value() == ERROR_SHARING_VIOLATION);
         reader.reset();
+
+        // an unavailable ID only matters when the move fails
+        detail::replace_faults.temp_identity_error = ERROR_INVALID_PARAMETER;
+        gbassert(replace_result([&] { atomic_replace_file(file, "newest"); }).first == replace_outcome::replaced);
+        gbassert(detail::replace_faults.temp_identity_error == 0);
+        gbassert(read_whole_file(file) == "newest");
         fs::remove_all(directory);
     }
 #endif
