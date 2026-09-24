@@ -33,5 +33,8 @@
     <ClCompile Include="..\test\durable_file_test.cpp">
       <Filter>test</Filter>
     </ClCompile>
+    <ClCompile Include="..\test\json_test.cpp">
+      <Filter>test</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

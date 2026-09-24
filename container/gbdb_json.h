@@ -29,6 +29,7 @@
 #pragma once
 
 #include "gbdb.h"
+#include "json_parser.h"
 #include "../util/durable_file.h"
 #include "../util/string_util.h"
 #include <algorithm>
@@ -58,17 +59,6 @@
 namespace gb::yadro::container
 {
     inline constexpr bool gbdb_json_axe_enabled = GB_YADRO_GBDB_JSON_HAS_AXE != 0;
-
-    struct json_parse_error : std::runtime_error
-    {
-        std::size_t offset = 0;
-        std::uint32_t line = 0;
-        std::uint32_t column = 0;
-
-        json_parse_error(std::string message, std::size_t offset, std::uint32_t line, std::uint32_t column)
-            : std::runtime_error(std::move(message)), offset(offset), line(line), column(column)
-        {}
-    };
 
     enum class json_table_mode
     {

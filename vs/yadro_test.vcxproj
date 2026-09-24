@@ -198,6 +198,7 @@
     <ClCompile Include="..\test\async_test.cpp" />
     <ClCompile Include="..\test\container_test.cpp" />
     <ClCompile Include="..\test\durable_file_test.cpp" />
+    <ClCompile Include="..\test\json_test.cpp" />
     <ClCompile Include="..\test\graph_test.cpp" />
     <ClCompile Include="..\test\simulator_test.cpp" />
     <ClCompile Include="..\test\util_test.cpp" />
