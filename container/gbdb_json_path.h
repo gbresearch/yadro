@@ -274,8 +274,17 @@ namespace gb::yadro::container
     inline void insert_json_at_path(json_db& target, std::string_view path, std::string_view text,
         json_merge_policy policy = json_merge_policy::replace_existing, const json_read_options& options = {})
     {
-        auto wrapped = detail::wrap_json_at_path(normalize_json_path(path), text);
-        insert_json(target, read_json(wrapped, options), policy);
+        // The path wrapper is not part of the caller's input: the size cap applies to text alone,
+        // and the wrapper objects do not consume the caller's depth budget.
+        if (options.max_input_bytes != 0 && text.size() > options.max_input_bytes)
+            detail::throw_parse_error(text, options.max_input_bytes, json_parse_errc::input_too_large,
+                "JSON input exceeds the maximum size of " + std::to_string(options.max_input_bytes) + " bytes");
+        auto normalized_path = normalize_json_path(path);
+        auto wrapped = detail::wrap_json_at_path(normalized_path, text);
+        auto wrapped_options = options;
+        wrapped_options.max_input_bytes = 0;
+        wrapped_options.max_depth = options.max_depth + split_json_path(normalized_path).size();
+        insert_json(target, read_json(wrapped, wrapped_options), policy);
     }
 
     inline void insert_json_file_at_path(json_db& target, std::string_view path, const std::filesystem::path& file,
@@ -284,7 +293,7 @@ namespace gb::yadro::container
         std::ifstream in(file, std::ios::binary);
         if (!in)
             throw std::runtime_error("failed to open JSON import file: " + file.string());
-        insert_json_at_path(target, path, detail::read_stream(in), policy, options);
+        insert_json_at_path(target, path, detail::read_capped(in, options.max_input_bytes), policy, options);
     }
 
     [[nodiscard]] inline std::optional<std::string> get_json_string(const json_db& db, json_db::path_view path)

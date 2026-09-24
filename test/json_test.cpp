@@ -30,15 +30,20 @@
 #include "../container/json_parser.h"
 #include "../container/json.h"
 #include "../container/gbdb_json.h"
+#include "../container/gbdb_json_path.h"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <istream>
 #include <limits>
+#include <random>
 #include <set>
 #include <source_location>
 #include <sstream>
@@ -746,5 +751,353 @@ namespace
         gbassert(error.code == json_parse_errc::syntax);
         gbassert(error.offset == 14);
         gbassert(error.line == 3 && error.column == 6);
+    }
+
+    //-------------------------------------------------------------------------
+    // json_db on the shared front end
+    //-------------------------------------------------------------------------
+
+    // n nested objects {"k":{"k":...leaf...}}; with an empty leaf the innermost object is {}.
+    [[nodiscard]] std::string nested_objects(std::size_t n, std::string_view leaf)
+    {
+        return nest(n, leaf, nest_shape::objects);
+    }
+
+    void expect_db_error(std::string_view text, json_parse_errc code, std::size_t offset, const json_read_options& options = {},
+        std::source_location location = std::source_location::current())
+    {
+        auto error = catch_parse_error([&] { (void)read_json(text, options); }, location);
+        if (error.code != code || error.offset != offset) {
+            std::cout << "expect_db_error mismatch: got " << gb::yadro::container::to_string(error.code) << " at " << error.offset
+                << ", expected " << gb::yadro::container::to_string(code) << " at " << offset << '\n';
+        }
+        gbassert(error.code == code, location);
+        gbassert(error.offset == offset, location);
+    }
+
+    // A unique temporary file, removed when the guard goes out of scope.
+    struct temp_json_file
+    {
+        std::filesystem::path path;
+
+        explicit temp_json_file(std::string_view contents)
+        {
+            static std::atomic<unsigned> counter{ 0 };
+            path = std::filesystem::temp_directory_path()
+                / ("yadro_json_test_" + std::to_string(std::random_device{}()) + "_" + std::to_string(counter++) + ".json");
+            std::ofstream out(path, std::ios::binary);
+            out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+            gbassert(static_cast<bool>(out));
+        }
+
+        ~temp_json_file()
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    };
+
+    GB_TEST(json, gbdb_read_rejects_hardened_inputs_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            expect_db_error("{\"a\":\"x\x01\"}", json_parse_errc::control_character, 7);
+            expect_db_error("{\"a\x01\":1}", json_parse_errc::control_character, 3);
+            expect_db_error("{\"a\":\"\xC0\xAF\"}", json_parse_errc::invalid_utf8, 6);
+            expect_db_error("{\"a\":\"\xED\xA0\x80\"}", json_parse_errc::invalid_utf8, 6);
+            expect_db_error("{\"a\":\"\xF4\x90\x80\x80\"}", json_parse_errc::invalid_utf8, 6);
+            expect_db_error("{\"a\":\"\xE2\x82\"}", json_parse_errc::invalid_utf8, 6);
+            expect_db_error("{\"a\":\"\x80\"}", json_parse_errc::invalid_utf8, 6);
+            expect_db_error("{\"a\":\"\xFF\"}", json_parse_errc::invalid_utf8, 6);
+            expect_db_error(R"({"a":"\ud800"})", json_parse_errc::lone_surrogate, 6);
+            expect_db_error(R"({"a":"\udc00"})", json_parse_errc::lone_surrogate, 6);
+
+            // depth: nested objects only, because json_db rejects nested arrays before the limit applies
+            (void)read_json(nested_objects(256, "1"));
+            (void)read_json(nested_objects(256, ""));
+            auto too_deep = nested_objects(257, "1");
+            expect_db_error(too_deep, json_parse_errc::depth_exceeded, nth_open(too_deep, 257));
+            json_read_options three;
+            three.max_depth = 3;
+            (void)read_json(nested_objects(3, "1"), three);
+            auto four = nested_objects(4, "1");
+            expect_db_error(four, json_parse_errc::depth_exceeded, nth_open(four, 4), three);
+
+            std::string hostile;
+            for (int i = 0; i < 1'000'000; ++i)
+                hostile += "{\"a\":";
+            expect_db_error(hostile, json_parse_errc::depth_exceeded, 1280);
+
+            // json_db still rejects a root array with std::logic_error at the first '[', before any depth limit
+            must_throw<std::logic_error>([] { (void)read_json(std::string(1'000'000, '[')); });
+            {
+                bool parse_error = false;
+                try {
+                    (void)read_json(std::string(1'000'000, '['));
+                }
+                catch (const json_parse_error&) {
+                    parse_error = true;
+                }
+                catch (const std::logic_error&) {
+                }
+                gbassert(!parse_error);
+            }
+
+            const std::string text = R"({"a":{"b":[1,2,3]}})";
+            json_read_options capped;
+            capped.max_input_bytes = text.size();
+            (void)read_json(text, capped);
+            capped.max_input_bytes = text.size() - 1;
+            expect_db_error(text, json_parse_errc::input_too_large, text.size() - 1, capped);
+        }
+    }
+
+    GB_TEST(json, gbdb_read_surrogate_pair_stored_as_utf8_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            auto db = read_json("{\"s\":\"\\ud83d\\ude00\",\"t\":\"\\u00e9\"}");
+            gbassert(db.string(std::get<json_db::string_ref>(*db.get({ "s" }))) == "\xF0\x9F\x98\x80");
+            gbassert(db.string(std::get<json_db::string_ref>(*db.get({ "t" }))) == "\xC3\xA9");
+        }
+    }
+
+    GB_TEST(json, gbdb_read_underflow_and_overflow_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            auto db = read_json(R"({"p":1e-400,"n":-1e-400,"d":2.5})");
+            gbassert(std::bit_cast<std::uint64_t>(std::get<double>(*db.get({ "p" }))) == 0);
+            gbassert(std::bit_cast<std::uint64_t>(std::get<double>(*db.get({ "n" }))) == 0x8000'0000'0000'0000ull);
+            gbassert(std::get<double>(*db.get({ "d" })) == 2.5);
+            expect_db_error(R"({"d":1e309})", json_parse_errc::number_out_of_range, 5);
+            expect_db_error(R"({"i":18446744073709551616})", json_parse_errc::number_out_of_range, 5);
+        }
+    }
+
+    GB_TEST(json, gbdb_read_unchanged_contracts_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            expect_db_error("1", json_parse_errc::syntax, 0);
+            expect_db_error("\"s\"", json_parse_errc::syntax, 0);
+            expect_db_error("\xEF\xBB\xBF{}", json_parse_errc::syntax, 0);
+
+            auto logic_error_only = [](std::string_view text) {
+                bool logic = false;
+                try {
+                    (void)read_json(text);
+                }
+                catch (const json_parse_error&) {
+                }
+                catch (const std::logic_error&) {
+                    logic = true;
+                }
+                gbassert(logic);
+            };
+            logic_error_only(R"({"a":true,"a":false})");
+            logic_error_only(R"({"a":[true]})");
+
+            auto db = read_json(R"({"a":[1,2]})");
+            gbassert(std::holds_alternative<json_db::uint_array_ref>(*db.get({ "a" })));
+        }
+    }
+
+    GB_TEST(json, gbdb_stream_caps_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            const std::string document = "{\n  \"market\": {\n    \"symbol\": \"AAPL\",\n    \"price\": 193.25\n  },\n  \"note\": \"x\"\n}\n";
+            const auto size = document.size();
+
+            {
+                extraction_streambuf buffer(document);
+                std::istream in(&buffer);
+                json_read_options options;
+                options.max_input_bytes = size;
+                (void)read_json(in, options);
+                gbassert(buffer.extracted() == size);
+            }
+            {
+                extraction_streambuf buffer(document);
+                std::istream in(&buffer);
+                json_read_options options;
+                options.max_input_bytes = size - 1;
+                auto error = catch_parse_error([&] { (void)read_json(in, options); });
+                auto expected = jd::position_of(document, size - 1);
+                gbassert(error.code == json_parse_errc::input_too_large);
+                gbassert(error.offset == size - 1);
+                gbassert(error.line == expected.line && error.column == expected.column);
+                gbassert(buffer.extracted() <= size);
+            }
+
+            // The defaults overload rejects the input while buffering, before the manifest pass: the manifest
+            // below conflicts with the defaults, so a manifest pass would throw a conflict logic_error instead.
+            const std::string with_manifest = R"({"$gbdb_manifest":{"table_format":"object_rows"},"x":{"a":1}})";
+            json_db_defaults defaults;
+            defaults.conflict_policy = json_defaults_conflict_policy::fail_on_conflict;
+            defaults.write.table_format = json_table_write_format::columns_data;
+            {
+                std::istringstream in(with_manifest);
+                must_throw<std::logic_error>([&] { (void)read_json(in, defaults); });
+            }
+            {
+                extraction_streambuf buffer(with_manifest);
+                std::istream in(&buffer);
+                auto capped = defaults;
+                capped.read.max_input_bytes = with_manifest.size() - 1;
+                auto error = catch_parse_error([&] { (void)read_json(in, capped); });
+                gbassert(error.code == json_parse_errc::input_too_large);
+                gbassert(error.offset == with_manifest.size() - 1);
+                gbassert(buffer.extracted() <= with_manifest.size());
+            }
+
+            temp_json_file file(document);
+            {
+                json_read_options options;
+                options.max_input_bytes = size;
+                (void)read_json_file(file.path, options);
+                json_db target;
+                insert_json_file(target, file.path, json_merge_policy::replace_existing, options);
+                gbassert(target.contains({ "market", "symbol" }));
+            }
+            for (std::size_t cap : { size - 1, std::size_t{ 20 } }) {
+                json_read_options options;
+                options.max_input_bytes = cap;
+                auto expected = jd::position_of(document, cap);
+                for (int overload = 0; overload < 2; ++overload) {
+                    auto error = catch_parse_error([&] {
+                        if (overload == 0) {
+                            (void)read_json_file(file.path, options);
+                        }
+                        else {
+                            json_db target;
+                            insert_json_file(target, file.path, json_merge_policy::replace_existing, options);
+                        }
+                    });
+                    gbassert(error.code == json_parse_errc::input_too_large);
+                    gbassert(error.offset == cap);
+                    gbassert(error.line == expected.line && error.column == expected.column);
+                }
+            }
+        }
+    }
+
+    GB_TEST(json, gbdb_manifest_cannot_loosen_limits_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            const std::string manifest =
+                R"("$gbdb_manifest":{"read":{"max_depth":100000,"max_input_bytes":0,"big_integers":"to_double"},"table_format":"columns_data"})";
+            const std::string deep = "{" + manifest + R"(,"x":{"a":{"a":{"a":{}}}}})";
+            const std::string big = "{" + manifest + R"(,"x":{"a":1},"n":18446744073709551616})";
+            const std::string plain = "{" + manifest + R"(,"x":{"a":1}})";
+
+            for (auto policy : { json_defaults_conflict_policy::file_manifest_wins, json_defaults_conflict_policy::user_defaults_win,
+                     json_defaults_conflict_policy::fail_on_conflict }) {
+                json_db_defaults defaults;
+                defaults.conflict_policy = policy;
+                defaults.write.table_format = json_table_write_format::columns_data;
+                auto read_with = [&](const std::string& text, json_db_defaults d) {
+                    std::istringstream in(text);
+                    return read_json(in, d);
+                };
+
+                defaults.read.max_depth = 4;
+                auto error = catch_parse_error([&] { (void)read_with(deep, defaults); });
+                gbassert(error.code == json_parse_errc::depth_exceeded);
+                gbassert(error.offset == deep.rfind('{'));
+                defaults.read.max_depth = 5;
+                (void)read_with(deep, defaults);
+
+                defaults.read.max_depth = 4;
+                error = catch_parse_error([&] { (void)read_with(big, defaults); });
+                gbassert(error.code == json_parse_errc::number_out_of_range);
+
+                auto capped = defaults;
+                capped.read.max_input_bytes = plain.size() - 1;
+                error = catch_parse_error([&] { (void)read_with(plain, capped); });
+                gbassert(error.code == json_parse_errc::input_too_large);
+
+                // the manifest differs from the defaults only in read limits: never a conflict
+                auto db = read_with(plain, defaults);
+                gbassert(db.contains({ "x", "a" }));
+            }
+        }
+    }
+
+    GB_TEST(json, gbdb_defaults_persist_new_read_options_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            json_db_defaults defaults;
+            defaults.read.max_depth = 17;
+            defaults.read.max_input_bytes = 12345;
+            defaults.read.big_integers = json_big_integer_policy::to_double;
+            auto restored = read_json_defaults(write_json_defaults(defaults));
+            gbassert(restored.read.max_depth == 17);
+            gbassert(restored.read.max_input_bytes == 12345);
+            gbassert(restored.read.big_integers == json_big_integer_policy::to_double);
+
+            auto absent = read_json_defaults(R"({"schema_version":1,"read":{"reject_duplicate_keys":true}})");
+            gbassert(absent.read.max_depth == 256);
+            gbassert(absent.read.max_input_bytes == 0);
+            gbassert(absent.read.big_integers == json_big_integer_policy::error);
+        }
+    }
+
+    GB_TEST(json, gbdb_writer_uses_shared_escaper_test)
+    {
+        json_db db;
+        db.set({ "s" }, std::string_view{ "\xC3\xA9\xF0\x9F\x98\x80" });
+        json_write_options ascii;
+        ascii.pretty = false;
+        ascii.ascii_only = true;
+        auto text = write_json(db, ascii);
+        gbassert(text.find("\\u00e9\\ud83d\\ude00") != std::string::npos);
+        for (unsigned char c : text)
+            gbassert(c < 0x80);
+        if constexpr (gbdb_json_axe_enabled) {
+            auto restored = read_json(text);
+            gbassert(restored.string(std::get<json_db::string_ref>(*restored.get({ "s" }))) == "\xC3\xA9\xF0\x9F\x98\x80");
+        }
+
+        json_db bad;
+        bad.set({ "s" }, std::string_view{ "\xC0\xAF" });
+        for (bool ascii_only : { false, true }) {
+            json_write_options options;
+            options.ascii_only = ascii_only;
+            must_throw<std::logic_error>([&] { (void)write_json(bad, options); });
+        }
+
+        json_db nan;
+        nan.set({ "d" }, std::numeric_limits<double>::quiet_NaN());
+        must_throw<std::logic_error>([&] { (void)write_json(nan); });
+    }
+
+    GB_TEST(json, gbdb_json_path_insert_limits_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            const std::string text = R"({"k":1})";
+            json_read_options options;
+            options.max_input_bytes = text.size();
+            json_db target;
+            insert_json_at_path(target, "a/b", text, json_merge_policy::replace_existing, options);
+            gbassert(target.contains({ "a", "b", "k" }));
+
+            options.max_input_bytes = text.size() - 1;
+            auto error = catch_parse_error([&] { insert_json_at_path(target, "a/b", text, json_merge_policy::replace_existing, options); });
+            gbassert(error.code == json_parse_errc::input_too_large);
+            gbassert(error.offset == text.size() - 1);
+
+            // the path wrapper does not consume the caller's depth budget
+            json_db deep;
+            insert_json_at_path(deep, "a/b/c", nested_objects(256, "1"));
+            auto error2 = catch_parse_error([&] { insert_json_at_path(deep, "a/b/c", nested_objects(257, "1")); });
+            gbassert(error2.code == json_parse_errc::depth_exceeded);
+
+            temp_json_file file(text);
+            options.max_input_bytes = text.size();
+            json_db from_file;
+            insert_json_file_at_path(from_file, "p", file.path, json_merge_policy::replace_existing, options);
+            gbassert(from_file.contains({ "p", "k" }));
+            options.max_input_bytes = 3;
+            auto error3 = catch_parse_error([&] { insert_json_file_at_path(from_file, "p", file.path, json_merge_policy::replace_existing, options); });
+            gbassert(error3.code == json_parse_errc::input_too_large);
+            gbassert(error3.offset == 3);
+        }
     }
 }
