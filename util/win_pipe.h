@@ -138,7 +138,10 @@ namespace gb::yadro::util
     // so an account granted only these rights can use the server but cannot host instances of it.
     inline constexpr DWORD pipe_client_access = FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
 
-    // SDDL allow-ACE granting pipe_client_access to a SID string or SDDL alias (e.g. L"IU")
+    // SDDL allow-ACE granting pipe_client_access to a SID string or SDDL alias (e.g. L"IU").
+    // It cannot take rights away: an account gets the union of every allow ACE it matches,
+    // directly or through a group, so if another ACE grants it GA or GW (e.g. to IU or BU), it
+    // can still create pipe instances.
     inline std::wstring pipe_client_ace(std::wstring_view sid)
     {
         return std::format(L"(A;;{:#x};;;{})", pipe_client_access, sid);
