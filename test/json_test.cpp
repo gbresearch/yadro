@@ -1649,4 +1649,482 @@ namespace
             gbassert(parse_json_value(format_json(review)) == review);
         }
     }
+
+    //-------------------------------------------------------------------------
+    // conformance corpus
+    //
+    // These cases were written for this suite. They follow the y_ (must accept), n_ (must reject)
+    // and i_ (implementation-defined; the outcome pinned here is Yadro's documented decision)
+    // naming scheme of JSONTestSuite, but no case was copied from it.
+    //-------------------------------------------------------------------------
+
+    struct conformance_case
+    {
+        std::string name;
+        std::string input;
+        bool accept = true;
+        json_parse_errc code = json_parse_errc::syntax;
+        bool json_db_code_required = false;     // json_db's builder cannot object before the parser does
+    };
+
+    [[nodiscard]] std::vector<conformance_case> conformance_cases()
+    {
+        using namespace std::literals;
+        std::vector<conformance_case> cases;
+        auto y = [&](std::string name, std::string_view input) { cases.push_back({ std::move(name), std::string{ input }, true }); };
+        auto n = [&](std::string name, std::string_view input, json_parse_errc code, bool required = false) {
+            cases.push_back({ std::move(name), std::string{ input }, false, code, required });
+        };
+        auto i_accept = y;
+        auto i_reject = n;
+        using enum json_parse_errc;
+
+        // y_ structure
+        y("y_structure_empty_array", "[]");
+        y("y_structure_empty_object", "{}");
+        y("y_structure_nested_empty", "[[],{}]");
+        y("y_object_nested", R"({"a":{"b":[]}})");
+        y("y_array_nested_numbers", "[1,[2,[3]]]");
+        y("y_structure_whitespace_everywhere", " \t\n\r[ \t\n\r1 \t\n\r, \t\n\r{ \t\n\r\"k\" \t\n\r: \t\n\rnull \t\n\r} \t\n\r] \t\n\r");
+        y("y_object_empty_key", R"({"":0})");
+        y("y_structure_root_number", "1");
+        y("y_structure_root_string", "\"s\"");
+        y("y_structure_root_true", "true");
+        y("y_structure_root_false", "false");
+        y("y_structure_root_null", "null");
+        y("y_structure_256_nested_arrays", std::string(256, '[') + std::string(256, ']'));
+        y("y_structure_256_nested_objects", nest(256, "1", nest_shape::objects));
+        y("y_structure_trailing_newline", "[1]\n");
+        y("y_structure_leading_whitespace", " [1]");
+        y("y_structure_nested_mixed", R"({"a":[{"b":[{"c":{}}]}]})");
+        y("y_object_multiple_members", R"({"a":1,"b":2,"c":3})");
+        y("y_object_same_key_nested", R"({"a":{"a":{"a":1}}})");
+        y("y_object_with_array", R"({"a":[1,2]})");
+        y("y_object_whitespace_around_colon", R"({"a" : 1 })");
+        y("y_object_long_key", "{\"" + std::string(1000, 'k') + "\":1}");
+        y("y_array_mixed", R"([1,"a",true,null,{},[]])");
+        y("y_array_heterogeneous_numbers", "[1,-1,1.5,1e3]");
+        y("y_literal_in_array", "[true,false,null]");
+
+        // y_ numbers
+        y("y_number_zero", "[0]");
+        y("y_number_negative_zero", "[-0]");
+        y("y_number_zero_fraction", "[0.0]");
+        y("y_number_exponent", "[1e1]");
+        y("y_number_capital_exponent_plus", "[1E+1]");
+        y("y_number_negative_exponent", "[1e-1]");
+        y("y_number_negative_fraction_exponent", "[-1.5e-3]");
+        y("y_number_integer", "[123456789]");
+        y("y_number_int64_min", "[-9223372036854775808]");
+        y("y_number_uint64_max", "[18446744073709551615]");
+        y("y_number_underflow", "[1e-400]");
+        y("y_number_fraction_zero_exponent", "[1.0e0]");
+        y("y_number_exponent_leading_zeros", "[1e007]");
+        y("y_number_double_max", "[1.7976931348623157e308]");
+        y("y_number_minus_zero_exponent", "[-0e0]");
+        y("y_number_capital_e_negative", "[1E-2]");
+        y("y_number_long_fraction", "[0.1234567890123456789012345678901234567890]");
+        y("y_number_capital_e_plus_integer", "[2E+2]");
+
+        // y_ strings
+        y("y_string_escapes", R"(["\"\\\/\b\f\n\r\t"])");
+        y("y_string_u0000", R"(["\u0000"])");
+        y("y_string_u001f", R"(["\u001f"])");
+        y("y_string_del_raw", "[\"\x7f\"]");
+        y("y_string_uffff_raw", "[\"\xEF\xBF\xBF\"]");
+        y("y_string_ufdd0_raw", "[\"\xEF\xB7\x90\"]");
+        y("y_string_c1_control_raw", "[\"\xC2\x85\"]");
+        y("y_string_surrogate_pair", "[\"\\ud83d\\ude00\"]");
+        y("y_string_last_surrogate_pair", "[\"\\uDBFF\\uDFFF\"]");
+        y("y_string_utf8_1byte", R"(["a"])");
+        y("y_string_utf8_2byte", "[\"\xC3\xA9\"]");
+        y("y_string_utf8_3byte", "[\"\xE2\x82\xAC\"]");
+        y("y_string_utf8_4byte", "[\"\xF0\x9F\x98\x80\"]");
+        y("y_string_escaped_solidus", R"(["\/"])");
+        y("y_string_empty", R"([""])");
+        y("y_string_space", R"([" "])");
+        y("y_string_u_escape_uppercase", "[\"\\u00E9\"]");
+        y("y_string_u_escape_bmp", "[\"\\u20ac\"]");
+        y("y_string_u_escape_ascii", "[\"\\u0041\"]");
+        y("y_string_escaped_backslash_then_u", R"(["\\u0041"])");
+        y("y_string_escaped_quote_inside", R"(["a\"b"])");
+        y("y_string_nul_escape_in_key", R"({"\u0000":1})");
+        {
+            std::string big = "[\"";
+            for (int k = 0; k < 64 * 1024; ++k)
+                big += "abc\\n\xC3\xA9xyz\\u20acqrs";
+            big += "\"]";
+            y("y_string_1mib", big);
+        }
+
+        // n_ structure
+        n("n_structure_unclosed_array", "[", unexpected_end);
+        n("n_structure_unclosed_array_value", "[1", unexpected_end);
+        n("n_structure_unclosed_object", "{", unexpected_end);
+        n("n_structure_unclosed_object_key", R"({"a")", unexpected_end);
+        n("n_structure_unclosed_object_colon", R"({"a":)", unexpected_end);
+        n("n_structure_unclosed_key_string", R"({"a)", unexpected_end);
+        n("n_structure_extra_close", "[1]]", syntax);
+        n("n_array_trailing_comma", "[1,]", syntax);
+        n("n_array_leading_comma", "[,1]", syntax);
+        n("n_array_double_comma", "[1,,2]", syntax);
+        n("n_array_missing_comma", "[1 2]", syntax);
+        n("n_array_colon", "[1:2]", syntax);
+        n("n_array_close_mismatch", "[1}", syntax);
+        n("n_object_trailing_comma", R"({"a":1,})", syntax);
+        n("n_object_empty_member", "{,}", syntax);
+        n("n_object_key_without_value", R"({"a"})", syntax);
+        n("n_object_missing_value", R"({"a":})", syntax);
+        n("n_object_missing_key", "{:1}", syntax);
+        n("n_object_numeric_key", "{1:1}", syntax);
+        n("n_object_unquoted_key", "{a:1}", syntax);
+        n("n_object_object_key", "{{}:1}", syntax);
+        n("n_object_close_mismatch", R"({"a":1])", syntax);
+        n("n_object_missing_colon", R"({"a" 1})", syntax);
+        n("n_object_double_colon", R"({"a"::1})", syntax);
+        n("n_object_comma_instead_of_colon", R"({"a",1})", syntax);
+        n("n_object_in_array_missing_value", R"([{"a":}])", syntax);
+        n("n_structure_two_roots", "[][]", syntax);
+        n("n_structure_line_comment", "[1]//c", syntax);
+        n("n_structure_block_comment", "/*c*/[1]", syntax);
+        n("n_structure_single_quotes", "['a']", syntax);
+        n("n_structure_nan", "[NaN]", syntax);
+        n("n_structure_infinity", "[Infinity]", syntax);
+        n("n_structure_negative_infinity", "[-Infinity]", syntax);
+        n("n_structure_capital_true", "[True]", syntax);
+        n("n_structure_truncated_null", "nul", unexpected_end);
+        n("n_structure_long_null", "nulll", syntax);
+        n("n_structure_utf8_bom", "\xEF\xBB\xBF[]", syntax);
+        n("n_structure_vertical_tab", "[\v1]", syntax);
+        n("n_structure_form_feed", "[\f1]", syntax);
+        n("n_structure_nbsp", "[\xC2\xA0" "1]", syntax);
+        n("n_structure_empty", "", unexpected_end);
+        n("n_structure_only_whitespace", "  ", unexpected_end);
+        n("n_structure_lone_comma", ",", syntax);
+        n("n_structure_trailing_garbage", "[1]x", syntax);
+        n("n_structure_nul_after_document", "[1]\0"sv, syntax);
+        n("n_structure_257_nested_arrays", std::string(257, '[') + std::string(257, ']'), depth_exceeded);
+        n("n_structure_257_nested_objects", nest(257, "1", nest_shape::objects), depth_exceeded, true);
+
+        // n_ numbers
+        n("n_number_leading_zero", "[01]", syntax, true);
+        n("n_number_negative_leading_zero", "[-01]", syntax, true);
+        n("n_number_double_zero", "[00]", syntax, true);
+        n("n_number_trailing_point", "[1.]", syntax, true);
+        n("n_number_leading_point", "[.1]", syntax, true);
+        n("n_number_empty_exponent", "[1e]", syntax, true);
+        n("n_number_empty_signed_exponent", "[1e+]", syntax, true);
+        n("n_number_plus", "[+1]", syntax, true);
+        n("n_number_double_minus", "[--1]", syntax, true);
+        n("n_number_hex", "[0x10]", syntax, true);
+        n("n_number_underscore", "[1_000]", syntax, true);
+        n("n_number_fraction_empty_exponent", "[1.5e]", syntax, true);
+        n("n_number_inf", "[Inf]", syntax, true);
+        n("n_number_fullwidth_digit", "[\xEF\xBC\x91]", syntax, true);
+        n("n_number_minus_only", "[-]", syntax, true);
+        n("n_number_point_exponent", "[1.e1]", syntax, true);
+        n("n_number_minus_point", "[-.1]", syntax, true);
+        n("n_number_fractional_exponent", "[1e1.5]", syntax, true);
+        n("n_number_two_points", "[0.1.2]", syntax, true);
+        n("n_number_space_inside", "[1 000]", syntax, true);
+        n("n_number_trailing_letter", "[-1x]", syntax, true);
+        n("n_number_double_overflow", "[1e309]", number_out_of_range, true);
+        n("n_number_uint64_overflow", "[18446744073709551616]", number_out_of_range, true);
+        n("n_number_int64_underflow", "[-9223372036854775809]", number_out_of_range, true);
+
+        // n_ strings
+        n("n_string_raw_nul", "[\"\0\"]"sv, control_character, true);
+        n("n_string_raw_soh", "[\"\x01\"]", control_character, true);
+        n("n_string_raw_newline", "[\"\n\"]", control_character, true);
+        n("n_string_raw_unit_separator", "[\"\x1f\"]", control_character, true);
+        n("n_string_raw_tab_in_key", "{\"a\tb\":1}", control_character, true);
+        n("n_string_escape_x", R"(["\x"])", invalid_escape, true);
+        n("n_string_escape_capital_u", R"(["\U0041"])", invalid_escape, true);
+        n("n_string_escape_short_u", R"(["\u12"])", invalid_escape, true);
+        n("n_string_escape_bad_hex", R"(["\u12G4"])", invalid_escape, true);
+        n("n_string_escape_bell", R"(["\a"])", invalid_escape, true);
+        n("n_string_escape_apostrophe", R"(["\'"])", invalid_escape, true);
+        n("n_string_unterminated", R"(["abc)", unexpected_end, true);
+        n("n_string_unterminated_escape", "[\"\\", unexpected_end, true);
+        n("n_string_unescaped_quote", R"(["a"b"])", syntax, true);
+        n("n_string_overlong_2byte", "[\"\xC0\xAF\"]", invalid_utf8, true);
+        n("n_string_overlong_3byte", "[\"\xE0\x80\xAF\"]", invalid_utf8, true);
+        n("n_string_overlong_4byte", "[\"\xF0\x80\x80\xAF\"]", invalid_utf8, true);
+        n("n_string_encoded_surrogate", "[\"\xED\xA0\x80\"]", invalid_utf8, true);
+        n("n_string_above_max_code_point", "[\"\xF4\x90\x80\x80\"]", invalid_utf8, true);
+        n("n_string_byte_f5", "[\"\xF5\x80\x80\x80\"]", invalid_utf8, true);
+        n("n_string_byte_ff", "[\"\xFF\"]", invalid_utf8, true);
+        n("n_string_stray_continuation", "[\"\x80\"]", invalid_utf8, true);
+        n("n_string_truncated_3byte", "[\"\xE2\x82\"]", invalid_utf8, true);
+        n("n_string_truncated_4byte_at_end", "[\"\xF0\x9F\x98", invalid_utf8, true);
+        n("n_string_invalid_utf8_in_key", "{\"\xFF\":1}", invalid_utf8, true);
+        n("n_string_lone_high_surrogate", R"(["\ud800"])", lone_surrogate, true);
+        n("n_string_lone_low_surrogate", R"(["\udc00"])", lone_surrogate, true);
+        n("n_string_two_high_surrogates", R"(["\ud800\ud800"])", lone_surrogate, true);
+        n("n_string_high_surrogate_then_ascii", "[\"\\ud800\\u0041\"]", lone_surrogate, true);
+        n("n_string_reversed_surrogates", R"(["\ude00\ud83d"])", lone_surrogate, true);
+        n("n_string_high_surrogate_then_raw", R"(["\ud800x"])", lone_surrogate, true);
+
+        // i_ (implementation-defined; outcome pinned)
+        i_accept("i_number_huge_negative_exponent", "[123.456e-789]");
+        i_accept("i_number_negative_underflow", "[-1e-400]");
+        i_accept("i_number_below_half_denorm_min", "[2.4703282292062327e-324]");
+        i_accept("i_number_denorm_min", "[4.9406564584124654e-324]");
+        i_accept("i_number_long_negative_exponent", "[1e-" + std::string(400, '9') + "]");
+        i_accept("i_number_uint64_above_int64", "[9223372036854775808]");
+        i_accept("i_number_integral_double", "[1.0]");
+        i_reject("i_number_huge_exponent", "[1e400]", number_out_of_range, true);
+        i_reject("i_number_just_above_double_max", "[1.7976931348623159e308]", number_out_of_range, true);
+        i_reject("i_number_long_positive_exponent", "[0.4e" + std::string(400, '9') + "]", number_out_of_range, true);
+        i_reject("i_number_too_big_positive_int", "[100000000000000000000]", number_out_of_range, true);
+        i_reject("i_number_too_big_negative_int", "[-123123123123123123123123123123]", number_out_of_range, true);
+        i_reject("i_number_thousand_digit_double", "[1" + std::string(1000, '0') + ".0]", number_out_of_range, true);
+        i_reject("i_structure_utf8_bom", "\xEF\xBB\xBF{}", syntax);
+        i_reject("i_structure_utf16le_bom", "\xFF\xFE[\0]\0"sv, syntax);
+        i_reject("i_structure_utf16be_bom", "\xFE\xFF\0[\0]"sv, syntax);
+        i_reject("i_string_lone_surrogate_dada", R"(["\uDADA"])", lone_surrogate, true);
+        i_reject("i_string_high_then_bmp", "[\"\\uD888\\u1234\"]", lone_surrogate, true);
+        i_reject("i_string_invalid_byte", "[\"\xFF\"]", invalid_utf8, true);
+        i_reject("i_string_overlong_solidus", "[\"\xC0\xAF\"]", invalid_utf8, true);
+        i_accept("i_string_ufffe_raw", "[\"\xEF\xBF\xBE\"]");
+        i_accept("i_string_uffff_escape", "[\"\\uFFFF\"]");
+        i_accept("i_string_ufdd0_escape", "[\"\\uFDD0\"]");
+        i_accept("i_object_nul_escape_key", R"({"\u0000":1})");
+        i_reject("i_structure_257_nested_arrays", std::string(257, '[') + std::string(257, ']'), depth_exceeded);
+        i_accept("i_structure_root_scalar", "2");
+        i_accept("i_structure_root_scalar_whitespace", " 7 ");
+        i_reject("i_object_duplicate_key", R"({"a":1,"a":2})", duplicate_key);
+        {
+            std::string wide = "{";
+            for (int k = 0; k < 1000; ++k)
+                wide += (k ? ",\"k" : "\"k") + std::to_string(k) + "\":" + std::to_string(k);
+            wide += "}";
+            i_accept("i_object_1000_members", wide);
+        }
+        return cases;
+    }
+
+    GB_TEST(json, json_conformance_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            auto cases = conformance_cases();
+            std::size_t y_count = 0, n_count = 0, i_count = 0;
+            for (auto& c : cases) {
+                y_count += c.name.starts_with("y_");
+                n_count += c.name.starts_with("n_");
+                i_count += c.name.starts_with("i_");
+            }
+            gbassert(y_count >= 60 && n_count >= 90 && i_count >= 25);
+
+            json_read_options db_options;
+            db_options.table_mode = json_table_mode::infer_tables;
+
+            for (auto& c : cases) {
+                auto report = [&](std::string_view what) {
+                    std::cout << "conformance case " << c.name << ": " << what << '\n';
+                };
+                for (int path = 0; path < 2; ++path) {
+                    // duplicate keys are a handler policy: the no-op SAX handler accepts them
+                    const bool accept = c.accept || (path == 1 && c.code == json_parse_errc::duplicate_key);
+                    try {
+                        if (path == 0) {
+                            (void)parse_json_value(c.input);
+                        }
+                        else {
+                            null_handler handler;
+                            parse_json_events(c.input, handler);
+                        }
+                        if (!accept)
+                            report(path == 0 ? "DOM accepted" : "SAX accepted");
+                        gbassert(accept);
+                    }
+                    catch (const json_parse_error& e) {
+                        if (accept || e.code != c.code)
+                            report(std::string{ path == 0 ? "DOM " : "SAX " } + "rejected with " + std::string{ gb::yadro::container::to_string(e.code) });
+                        gbassert(!accept && e.code == c.code);
+                    }
+                }
+
+                auto first = c.input.find_first_not_of(" \t\n\r");
+                if (first == std::string::npos || (c.input[first] != '{' && c.input[first] != '['))
+                    continue;
+                try {
+                    (void)read_json(c.input, db_options);
+                    if (!c.accept)
+                        report("json_db accepted");
+                    gbassert(c.accept);
+                }
+                catch (const json_parse_error& e) {
+                    if (c.accept || e.code != c.code)
+                        report("json_db rejected with " + std::string{ gb::yadro::container::to_string(e.code) });
+                    gbassert(!c.accept && e.code == c.code);
+                }
+                catch (const std::logic_error&) {
+                    if (c.json_db_code_required)
+                        report("json_db threw std::logic_error before the parser error");
+                    gbassert(!c.json_db_code_required);
+                }
+            }
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // round trips
+    //-------------------------------------------------------------------------
+
+    // Same kind at every node, same member order, and bitwise-equal doubles.
+    [[nodiscard]] bool identical(const json_value& a, const json_value& b)
+    {
+        if (a.kind() != b.kind())
+            return false;
+        switch (a.kind()) {
+        case json_kind::null: return true;
+        case json_kind::boolean: return *a.get_if<bool>() == *b.get_if<bool>();
+        case json_kind::int64: return *a.get_if<std::int64_t>() == *b.get_if<std::int64_t>();
+        case json_kind::uint64: return *a.get_if<std::uint64_t>() == *b.get_if<std::uint64_t>();
+        case json_kind::number: return std::bit_cast<std::uint64_t>(*a.get_if<double>()) == std::bit_cast<std::uint64_t>(*b.get_if<double>());
+        case json_kind::string: return *a.get_if<std::string>() == *b.get_if<std::string>();
+        case json_kind::array: {
+            auto& x = *a.get_if<json_array>();
+            auto& y = *b.get_if<json_array>();
+            if (x.size() != y.size())
+                return false;
+            for (std::size_t i = 0; i < x.size(); ++i)
+                if (!identical(x[i], y[i]))
+                    return false;
+            return true;
+        }
+        case json_kind::object: {
+            auto& x = *a.get_if<json_object>();
+            auto& y = *b.get_if<json_object>();
+            if (x.size() != y.size())
+                return false;
+            for (auto px = x.begin(), py = y.begin(); px != x.end(); ++px, ++py)
+                if (px->key() != py->key() || !identical(px->value, py->value))
+                    return false;
+            return true;
+        }
+        }
+        return false;
+    }
+
+    class random_json
+    {
+    public:
+        explicit random_json(std::uint64_t seed) : _rng(seed) {}
+
+        json_value value(int depth)
+        {
+            const int kinds = depth >= 6 ? 6 : 8;
+            switch (pick(kinds)) {
+            case 0: return json_value();
+            case 1: return json_value(pick(2) == 1);
+            case 2: return json_value(integer());
+            case 3: return json_value((std::uint64_t{ 1 } << 63) + (_rng() >> 1));
+            case 4: return json_value(real());
+            case 5: return json_value(text());
+            case 6: {
+                json_array array;
+                for (int i = pick(7); i > 0; --i)
+                    array.push_back(value(depth + 1));
+                return array;
+            }
+            default: {
+                json_object object;
+                for (int i = pick(7); i > 0; --i)
+                    object.insert(text(), value(depth + 1));
+                return object;
+            }
+            }
+        }
+
+    private:
+        int pick(int n) { return static_cast<int>(_rng() % static_cast<std::uint64_t>(n)); }
+
+        std::int64_t integer()
+        {
+            constexpr std::int64_t edges[] = { 0, 1, -1, std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max(),
+                9007199254740993, -9007199254740993, 9007199254740991 };
+            if (pick(2) == 0)
+                return edges[pick(static_cast<int>(std::size(edges)))];
+            return static_cast<std::int64_t>(_rng());
+        }
+
+        double real()
+        {
+            const double edges[] = { std::numeric_limits<double>::denorm_min(), std::numeric_limits<double>::max(), -0.0, 0.1, 1e16, 0.0, -1.5 };
+            if (pick(2) == 0)
+                return edges[pick(static_cast<int>(std::size(edges)))];
+            for (;;) {
+                auto d = std::bit_cast<double>(_rng());
+                if (std::isfinite(d))
+                    return d;
+            }
+        }
+
+        std::string text()
+        {
+            constexpr char32_t pool[] = { U'a', U'Z', U'0', U' ', U'~', 0x01, 0x1F, U'\n', U'"', U'\\', U'/', 0x7F, 0x80, 0x7FF, 0x800, 0xFFFD, 0xFFFF,
+                0x10000, 0x10FFFF, 0xE9, 0x20AC, 0x1F600 };
+            std::string result;
+            for (int i = pick(25); i > 0; --i) {
+                char32_t cp;
+                if (pick(4) == 0) {
+                    do {
+                        cp = static_cast<char32_t>(_rng() % 0x10000);
+                    } while (cp >= 0xD800 && cp <= 0xDFFF);
+                }
+                else {
+                    cp = pool[pick(static_cast<int>(std::size(pool)))];
+                }
+                jd::append_utf8(cp, result);
+            }
+            return result;
+        }
+
+        std::mt19937_64 _rng;
+    };
+
+    GB_TEST(json, json_round_trip_property_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            json_format compact;
+            json_format pretty;
+            pretty.pretty = true;
+            json_format ascii;
+            ascii.ascii_only = true;
+            const json_format* formats[] = { &compact, &pretty, &ascii };
+
+            random_json generator(0x5eed'1234'abcd'0001ull);
+            for (int i = 0; i < 2000; ++i) {
+                auto value = generator.value(0);
+                for (auto* format : formats) {
+                    auto text = format_json(value, *format);
+                    auto parsed = parse_json_value(text);
+                    gbassert(identical(parsed, value));
+                    gbassert(parsed == value);
+                    gbassert(format_json(parsed, *format) == text);
+                }
+            }
+        }
+    }
+
+    GB_TEST(json, json_format_fixed_point_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            json_format formats[2];
+            formats[1].pretty = true;
+            for (auto& c : conformance_cases()) {
+                if (!c.accept || c.name.starts_with("n_"))
+                    continue;
+                for (auto& f : formats) {
+                    auto once = format_json(parse_json_value(c.input), f);
+                    auto twice = format_json(parse_json_value(once), f);
+                    if (once != twice)
+                        std::cout << "fixed point failed for " << c.name << '\n';
+                    gbassert(once == twice);
+                }
+            }
+        }
+    }
 }
