@@ -27,6 +27,7 @@
 //-----------------------------------------------------------------------------
 
 #include "../util/gbtest.h"
+#include "../util/gbwin.h"
 #include "../container/json_parser.h"
 #include "../container/json.h"
 #include "../container/gbdb_json.h"
@@ -35,15 +36,19 @@
 #include <atomic>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <istream>
 #include <limits>
+#include <optional>
 #include <random>
 #include <set>
 #include <source_location>
@@ -2125,6 +2130,253 @@ namespace
                     gbassert(once == twice);
                 }
             }
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // stack budget
+    //-------------------------------------------------------------------------
+#if defined(GBWINDOWS)
+    [[nodiscard]] constexpr std::string_view build_configuration() noexcept
+    {
+#if defined(_WIN64)
+#   if defined(NDEBUG)
+        return "x64 Release";
+#   else
+        return "x64 Debug";
+#   endif
+#else
+#   if defined(NDEBUG)
+        return "Win32 Release";
+#   else
+        return "Win32 Debug";
+#   endif
+#endif
+    }
+
+    struct stack_measurement
+    {
+        std::function<void()> work;
+        std::exception_ptr error;
+        std::size_t peak = 0;
+    };
+
+    DWORD WINAPI measure_stack_thunk(void* parameter)
+    {
+        auto& measurement = *static_cast<stack_measurement*>(parameter);
+        ULONG_PTR low = 0, high = 0;
+        GetCurrentThreadStackLimits(&low, &high);
+        try {
+            measurement.work();
+        }
+        catch (...) {
+            measurement.error = std::current_exception();
+        }
+        // the lowest committed page of the stack (including the guard page) marks the deepest
+        // point the thread reached, because stack pages are committed on demand and never released
+        MEMORY_BASIC_INFORMATION info{};
+        for (auto address = low; address < high; address = reinterpret_cast<ULONG_PTR>(info.BaseAddress) + info.RegionSize) {
+            if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info) == 0)
+                return 1;
+            if (info.State == MEM_COMMIT) {
+                measurement.peak = high - reinterpret_cast<ULONG_PTR>(info.BaseAddress);
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    // Runs work on a fresh thread with a 1 MiB stack reservation and returns the thread's peak stack
+    // displacement in bytes; an exception thrown by work is rethrown here.
+    std::size_t measure_peak_stack(std::function<void()> work)
+    {
+        stack_measurement measurement{ std::move(work) };
+        unique_win_handle thread{ CreateThread(nullptr, 1u << 20, measure_stack_thunk, &measurement, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr) };
+        gbassert(thread.valid());
+        gbassert(WaitForSingleObject(thread.get(), INFINITE) == WAIT_OBJECT_0);
+        DWORD exit_code = 1;
+        gbassert(GetExitCodeThread(thread.get(), &exit_code) && exit_code == 0);
+        if (measurement.error)
+            std::rethrow_exception(measurement.error);
+        return measurement.peak;
+    }
+
+    GB_TEST(json, json_stack_peak_gate_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            constexpr std::size_t gate = 640 * 1024;
+            const auto baseline = measure_peak_stack([] {});
+            std::cout << "json stack peak: " << build_configuration() << " baseline " << baseline / 1024 << " KiB\n";
+            gbassert(baseline <= 64 * 1024);
+
+            auto expect_code = [](json_parse_errc code, auto&& parse) {
+                try {
+                    parse();
+                }
+                catch (const json_parse_error& e) {
+                    gbassert(e.code == code);
+                    return;
+                }
+                gbassert(false);
+            };
+
+            std::string duplicate_at_depth = nest(255, "{\"d\":1,\"d\":2}", nest_shape::objects);
+            std::string control_at_depth = nest(256, "\"a\x01\"", nest_shape::arrays);
+            std::string decoded_at_depth = nest(256, "\"a\\n\\ud83d\\ude00\xC3\xA9\"", nest_shape::arrays);
+            const auto deep_arrays = nest(256, "1", nest_shape::arrays);
+            const auto deep_objects = nest(256, "true", nest_shape::objects);
+
+            struct workload
+            {
+                std::string_view name;
+                std::function<void()> run;
+            };
+            const workload workloads[] = {
+                { "SAX arrays(256)", [&] { null_handler h; parse_json_events(deep_arrays, h); } },
+                { "DOM arrays(256)", [&] { (void)parse_json_value(deep_arrays); } },
+                { "DOM objects(256)", [&] { (void)parse_json_value(deep_objects); } },
+                { "DOM alternating(256)", [&] { (void)parse_json_value(nest(256, "\"s\"", nest_shape::alternating)); } },
+                { "DOM siblings(256) double leaf", [&] { (void)parse_json_value(nest(256, "-1.5e-300", nest_shape::objects, true)); } },
+                { "DOM arrays(256) decoded string leaf", [&] { (void)parse_json_value(decoded_at_depth); } },
+                { "json_db objects(256)", [&] { (void)read_json(nested_objects(256, "1")); } },
+                { "json_db objects(256) string leaf", [&] { (void)read_json(nested_objects(256, "\"s\"")); } },
+                { "arrays(257) depth_exceeded", [&] { expect_code(json_parse_errc::depth_exceeded, [&] { (void)parse_json_value(nest(257, "1", nest_shape::arrays)); }); } },
+                { "objects(257) depth_exceeded", [&] { expect_code(json_parse_errc::depth_exceeded, [&] { (void)parse_json_value(nest(257, "1", nest_shape::objects)); }); } },
+                { "1,000,000 [ depth_exceeded", [&] { expect_code(json_parse_errc::depth_exceeded, [&] { (void)parse_json_value(std::string(1'000'000, '[')); }); } },
+                { "duplicate key at depth 256", [&] { expect_code(json_parse_errc::duplicate_key, [&] { (void)parse_json_value(duplicate_at_depth); }); } },
+                { "control character at depth 256", [&] { expect_code(json_parse_errc::control_character, [&] { (void)parse_json_value(control_at_depth); }); } },
+                { "copy, compare, write objects(256)", [&] {
+                    auto value = parse_json_value(deep_objects);
+                    auto copy = value;
+                    gbassert(copy == value);
+                    gbassert(parse_json_value(format_json(copy)) == value);
+                } },
+            };
+            for (auto& w : workloads) {
+                const auto peak = measure_peak_stack(w.run);
+                std::cout << "json stack peak: " << build_configuration() << " " << w.name << " " << peak / 1024 << " KiB\n";
+                gbassert(peak <= gate);
+            }
+        }
+    }
+
+    struct stack_slope_recorder : null_handler
+    {
+        std::vector<std::uintptr_t> addresses;
+
+        __declspec(noinline) void record()
+        {
+            volatile char local = 0;
+            addresses.push_back(reinterpret_cast<std::uintptr_t>(&local));
+        }
+
+        void begin_array() { record(); }
+        void begin_object() { record(); }
+    };
+
+    GB_TEST(json, json_stack_per_level_slope_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            for (auto shape : { nest_shape::arrays, nest_shape::objects }) {
+                stack_slope_recorder recorder;
+                parse_json_events(nest(200, "1", shape), recorder);
+                gbassert(recorder.addresses.size() == 200);
+                const auto slope = static_cast<double>(recorder.addresses.front() - recorder.addresses.back()) / 199.0;
+                std::cout << "json stack slope: " << build_configuration() << (shape == nest_shape::arrays ? " arrays " : " objects ")
+                    << static_cast<long long>(slope) << " bytes/level\n";
+                gbassert(std::isfinite(slope) && slope > 0.0);
+            }
+        }
+    }
+#endif
+
+    //-------------------------------------------------------------------------
+    // performance smoke test: parse time must grow linearly with the input size
+    //-------------------------------------------------------------------------
+
+    [[nodiscard]] std::string synthetic_records(std::size_t target_bytes)
+    {
+        std::string text = "[";
+        for (std::size_t id = 0; text.size() < target_bytes; ++id) {
+            if (id != 0)
+                text += ',';
+            text += "{\"id\":" + std::to_string(id) + ",\"name\":\"record\\nname\xC3\xA9x\",\"vals\":[1.5,-2,3e10],\"ok\":true,\"nested\":{\"k\":null}}";
+        }
+        text += "]";
+        return text;
+    }
+
+    [[nodiscard]] std::string synthetic_long_string(std::size_t target_bytes)
+    {
+        std::string text = "[\"";
+        while (text.size() < target_bytes)
+            text += "abcdefghijklm\\n\xE2\x82\xAC" "nopqrstuvwxyz\\t";
+        text += "\"]";
+        return text;
+    }
+
+    [[nodiscard]] std::string synthetic_wide_object(std::size_t keys)
+    {
+        std::string text = "{";
+        for (std::size_t k = 0; k < keys; ++k) {
+            if (k != 0)
+                text += ',';
+            text += "\"k" + std::to_string(k) + "\":" + std::to_string(k);
+        }
+        text += "}";
+        return text;
+    }
+
+    template<class F>
+    [[nodiscard]] double seconds_of(F&& f)
+    {
+        auto start = std::chrono::steady_clock::now();
+        f();
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+
+    // t(4x) / min of two t(1x) must stay below 8: linear growth gives about 4, quadratic about 16.
+    // cleanup runs after each timed parse, outside the timed region (it destroys a DOM result).
+    template<class Parse, class Cleanup>
+    void check_linear(std::string_view name, const std::string& quarter, const std::string& full, Parse&& parse, Cleanup&& cleanup)
+    {
+        auto timed = [&](const std::string& text) {
+            const double t = seconds_of([&] { parse(text); });
+            cleanup();
+            return t;
+        };
+        const double t1 = std::min(timed(quarter), timed(quarter));
+        const double t4 = timed(full);
+        const double ratio = t4 / std::max(t1, 1e-9);
+        const double mib_per_s = static_cast<double>(full.size()) / (1024.0 * 1024.0) / std::max(t4, 1e-9);
+        std::cout << "json performance: " << name << ": " << full.size() / (1024 * 1024) << " MiB in " << t4 << " s ("
+            << mib_per_s << " MiB/s), ratio to 1/4 size " << ratio << '\n';
+        gbassert(ratio < 8.0);
+    }
+
+    GB_TEST(json, json_performance_smoke_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+#if defined(NDEBUG)
+            std::size_t size = 50 * 1024 * 1024;
+            std::size_t keys = 500'000;
+#else
+            std::size_t size = 50 * 1024 * 1024 / 8;
+            std::size_t keys = 500'000 / 8;
+#endif
+            auto sax = [](const std::string& text) { null_handler h; parse_json_events(text, h); };
+            auto nothing = [] {};
+            // the DOM result is kept past the timed parse and destroyed by the cleanup step
+            std::optional<json_value> kept;
+            auto dom = [&](const std::string& text) { kept.emplace(parse_json_value(text)); };
+            auto destroy = [&] { kept.reset(); };
+
+            const auto records_quarter = synthetic_records(size / 4);
+            const auto records_full = synthetic_records(size);
+            check_linear("records SAX", records_quarter, records_full, sax, nothing);
+            check_linear("records DOM", records_quarter, records_full, dom, destroy);
+            check_linear("long string SAX", synthetic_long_string(size / 16), synthetic_long_string(size / 4), sax, nothing);
+            check_linear("wide object DOM", synthetic_wide_object(keys / 4), synthetic_wide_object(keys), dom, destroy);
         }
     }
 }

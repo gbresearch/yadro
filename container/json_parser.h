@@ -411,7 +411,11 @@ namespace gb::yadro::container
     // bracket. The wrapper keys its count on its own address, so it must never be copied per
     // call or embedded in an AXE composite: AXE composites before c602171 returned their
     // sub-rules by value from r_binary_fn_t::get(), which silently reset such a nested limit.
-    // max_depth levels must fit the stack of the parsing thread.
+    // max_depth levels must fit the stack of the parsing thread. Measured whole-parse peak stack
+    // for 256 levels on a fresh thread, including thread start-up, error paths and the json_value
+    // and json_db builders (2026-09-24, MSVC v145): x64 Debug at most 388 KiB (392 KiB with
+    // _ITERATOR_DEBUG_LEVEL=2), Win32 Debug at most 312 KiB, x64 Release at most 132 KiB, Win32
+    // Release at most 72 KiB; about 1344, 1112, 352 and 208 bytes per level respectively.
     //
     // Strings. A view passed to the handler points into the input when the string has no
     // escapes, and into a reused scratch buffer otherwise; it is valid only during the call.
