@@ -29,7 +29,8 @@ namespace gb::yadro::container
     // Writes db to file durably and atomically (see util/durable_file.h): after a crash, file
     // holds the complete previous database or the complete new one. Failures propagate: a
     // util::replace_not_durable_error means the new database is already in place but its
-    // durability is unconfirmed; any other exception means the previous file is untouched.
+    // durability is unconfirmed, a util::replace_outcome_unknown_error means it may or may not
+    // be, and any other exception means the previous file is untouched.
     inline void save_json_db_file(const json_db& db, const std::filesystem::path& file)
     {
         if (auto parent = file.parent_path(); !parent.empty())

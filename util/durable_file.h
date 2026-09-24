@@ -40,10 +40,10 @@
 //       size()/truncate_to() for torn-tail recovery.
 //
 // Errors are thrown as file_io_error (exception_t<std::error_code>); data() carries the OS
-// error: the Win32 error code on Windows (std::system_category), errno elsewhere. The one
-// failure of atomic_replace_file that happens after its rename has committed (the flush that
-// confirms durability) is thrown as replace_not_durable_error, derived from file_io_error, so
-// callers can tell "old content kept" from "new content in place, durability unconfirmed".
+// error: the Win32 error code on Windows (std::system_category), errno elsewhere. Two
+// subclasses let callers of atomic_replace_file tell "old content kept" (plain file_io_error)
+// from "new content in place, durability unconfirmed" (replace_not_durable_error) and from
+// "cannot tell which" (replace_outcome_unknown_error).
 //
 // What the platform guarantees
 // ----------------------------
@@ -57,9 +57,13 @@
 //     on one volume, which NTFS logs as a single journaled metadata operation: after a crash the
 //     name refers to the old file or to the new file. Microsoft documents MOVEFILE_WRITE_THROUGH
 //     as not returning until the move is on disk.
-//   * The rename is the commit point. A flush that fails after it (the one after the fallback
-//     rename below, or MoveFileExW failing although the temp file is already gone) cannot be
-//     undone, so it is reported as replace_not_durable_error, not as an untouched target.
+//   * The rename is the commit point, and a flush that fails after it cannot be undone. The
+//     flush after the fallback rename below is a separate call, so its failure is known to be
+//     post-commit. MoveFileExW flushes inside the call, so when it fails the file at the target
+//     is identified: if it is the temp file (same volume and file ID, captured before the move)
+//     the rename committed. A missing temp path is not taken as proof, since another process
+//     may have removed it. If the target cannot be identified the outcome is reported as
+//     unknown. The classification assumes no other writer replaces the same target concurrently.
 //   * MoveFileExW fails with ERROR_ACCESS_DENIED whenever the target is open, even when every
 //     open handle allows FILE_SHARE_DELETE. In that case the rename is redone with
 //     SetFileInformationByHandle(FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
@@ -93,6 +97,7 @@
 #include "gbwin.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -130,6 +135,15 @@ namespace gb::yadro::util
     // reached stable storage failed. After a crash the target may hold either version. Repeating
     // the same atomic_replace_file is safe and, if it succeeds, confirms the new content.
     struct replace_not_durable_error : file_io_error
+    {
+        using file_io_error::file_io_error;
+    };
+
+    // atomic_replace_file cannot tell whether its rename committed (Windows: MoveFileExW failed and
+    // the target's file identity could not be read to check). The target holds either the complete
+    // old content or the complete new content, never a mix; data() is the error that prevented the
+    // check. Repeating the same atomic_replace_file is safe and, if it succeeds, settles it.
+    struct replace_outcome_unknown_error : file_io_error
     {
         using file_io_error::file_io_error;
     };
@@ -196,13 +210,26 @@ namespace gb::yadro::util
                 ec.message(), " (", os_error_kind, ' ', code, ')'), ec);
         }
 
-        // Test hook: when nonzero, the next post-rename durability confirmation made by
-        // atomic_replace_file on this thread reports this error instead of its real result.
-        inline thread_local os_error injected_commit_flush_error = 0;
+        // Test hooks for atomic_replace_file's outcome classification. Thread-local; each field is
+        // consumed (reset) by the first operation it affects on this thread.
+        struct replace_fault_injection
+        {
+            // the flush that confirms a committed rename reports this error instead of its result
+            os_error commit_flush_error = 0;
+            // Windows: MoveFileExW succeeds, then is reported as failed with this error
+            // (a rename followed by a failed write-through flush)
+            os_error move_error_after_rename = 0;
+            // Windows: runs after a failed MoveFileExW, before its outcome is classified
+            void (*on_move_failed)(const std::filesystem::path& temp) = nullptr;
+            // Windows: reading the target's file identity fails with this error
+            os_error target_identity_error = 0;
+        };
+
+        inline thread_local replace_fault_injection replace_faults{};
 
         [[nodiscard]] inline os_error commit_flush_result(os_error actual) noexcept
         {
-            if (auto injected = std::exchange(injected_commit_flush_error, os_error{}))
+            if (auto injected = std::exchange(replace_faults.commit_flush_error, os_error{}))
                 return injected;
             return actual;
         }
@@ -475,17 +502,63 @@ namespace gb::yadro::util
 #endif
         }
 
-        // after a failed MoveFileExW: whether the temp file is certainly gone, i.e. the rename
-        // itself happened and only the write-through flush that follows it failed
-        [[nodiscard]] inline bool temp_was_renamed(const std::filesystem::path& temp, os_error move_error) noexcept
+        //---------------------------------------------------------------------
+        // a file's identity on its volume; a rename keeps it
+        struct file_identity
         {
-            // the temp missing *before* the move (deleted by someone else) is not a commit
-            if (move_error == ERROR_FILE_NOT_FOUND || move_error == ERROR_PATH_NOT_FOUND)
-                return false;
-            if (GetFileAttributesW(temp.c_str()) != INVALID_FILE_ATTRIBUTES)
-                return false;
-            auto error = GetLastError();
-            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+            std::uint64_t volume = 0;
+            std::array<std::byte, 16> id{};
+
+            friend bool operator==(const file_identity&, const file_identity&) = default;
+        };
+
+        [[nodiscard]] inline os_error query_file_identity(HANDLE handle, file_identity& identity) noexcept
+        {
+            identity = {};
+            // 128-bit ids (ReFS); falls back to the 64-bit file index where FileIdInfo is unsupported
+            if (FILE_ID_INFO info{}; GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info))) {
+                identity.volume = info.VolumeSerialNumber;
+                std::memcpy(identity.id.data(), &info.FileId, sizeof(info.FileId));
+                return 0;
+            }
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (!GetFileInformationByHandle(handle, &info))
+                return GetLastError();
+            identity.volume = info.dwVolumeSerialNumber;
+            auto index = static_cast<std::uint64_t>(info.nFileIndexHigh) << 32 | info.nFileIndexLow;
+            std::memcpy(identity.id.data(), &index, sizeof(index));
+            return 0;
+        }
+
+        enum class move_outcome { committed, not_committed, unknown };
+
+        // After MoveFileExW fails, whether it renamed temp over target anyway (its write-through
+        // flush comes after the rename). The temp path being gone proves nothing, since another
+        // process may have removed it, so target's file identity is compared with temp's.
+        // Assumes no other writer replaces target concurrently.
+        [[nodiscard]] inline move_outcome classify_failed_move(const std::filesystem::path& target,
+            const file_identity& temp_identity, os_error& identity_error) noexcept
+        {
+            identity_error = std::exchange(replace_faults.target_identity_error, os_error{});
+            if (identity_error)
+                return move_outcome::unknown;
+
+            // attribute-only access is not subject to other handles' share modes
+            unique_win_handle file{ CreateFileW(target.c_str(), FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr) };
+            if (!file.valid()) {
+                identity_error = GetLastError();
+                // a committed move leaves temp's file at target, so no file there means no commit
+                if (identity_error == ERROR_FILE_NOT_FOUND || identity_error == ERROR_PATH_NOT_FOUND)
+                    return move_outcome::not_committed;
+                return move_outcome::unknown;
+            }
+
+            file_identity identity;
+            if ((identity_error = query_file_identity(file, identity)) != 0)
+                return move_outcome::unknown;
+            return identity == temp_identity ? move_outcome::committed : move_outcome::not_committed;
         }
 #endif
 
@@ -548,23 +621,44 @@ namespace gb::yadro::util
 #if defined(GBWINDOWS)
                 if (auto error = flush_file(handle()))
                     throw_file_io_error(error, "atomic_replace_file: FlushFileBuffers", _path);
+                // needed to recognize the file at target if MoveFileExW fails after renaming it
+                file_identity temp_identity;
+                if (auto error = query_file_identity(handle(), temp_identity))
+                    throw_file_io_error(error, "atomic_replace_file: file identity", _path);
                 if (!CloseHandle(_handle.release()))
                     throw_file_io_error(GetLastError(), "atomic_replace_file: CloseHandle", _path);
 
                 auto deadline = std::chrono::steady_clock::now() + sharing_retry_timeout;
                 for (;;) {
-                    if (MoveFileExW(_path.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                    os_error error = 0;
+                    if (MoveFileExW(_path.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                        error = std::exchange(replace_faults.move_error_after_rename, os_error{});
+                    else
+                        error = GetLastError();
+                    if (error == 0) {
                         _installed = true;
                         return;
                     }
 
-                    auto error = GetLastError();
-                    if (temp_was_renamed(_path, error)) {
+                    if (auto hook = std::exchange(replace_faults.on_move_failed, nullptr))
+                        hook(_path);
+
+                    os_error identity_error = 0;
+                    switch (classify_failed_move(target, temp_identity, identity_error)) {
+                    case move_outcome::committed:
                         _installed = true;
                         throw_file_io_error<replace_not_durable_error>(error,
-                            "atomic_replace_file: MoveFileExW write-through after the rename", target);
+                            "atomic_replace_file: MoveFileExW (after renaming)", target);
+                    case move_outcome::unknown:
+                        throw_file_io_error<replace_outcome_unknown_error>(identity_error,
+                            to_string("atomic_replace_file: MoveFileExW failed (Win32 error ", error,
+                                "), then reading the target's file identity"), target);
+                    case move_outcome::not_committed:
+                        break;
                     }
 
+                    // from here on nothing has been renamed; SetFileInformationByHandle below
+                    // either renames or fails without renaming
                     std::string_view operation = "atomic_replace_file: MoveFileExW";
                     if (error == ERROR_ACCESS_DENIED) {
                         // MoveFileExW will not replace an open target even if it is shared for delete
@@ -627,11 +721,14 @@ namespace gb::yadro::util
     // the same directory, which is flushed to stable storage and then renamed over file. The
     // parent directory must exist. Outcomes:
     //   * returns normally: file holds the new content, durably.
-    //   * the writer's exception, or file_io_error (other than the next case): nothing was
+    //   * the writer's exception, or a file_io_error not of the two types below: nothing was
     //     committed; file is left as it was and the temp file is removed.
-    //   * replace_not_durable_error (derived from file_io_error): the rename committed, so file
-    //     already holds the new content, but confirming durability failed; see that type.
-    //     Catch it before file_io_error when the difference matters.
+    //   * replace_not_durable_error: the rename committed, so file already holds the new content,
+    //     but confirming durability failed.
+    //   * replace_outcome_unknown_error (Windows): whether the rename committed could not be
+    //     determined; file holds the complete old or the complete new content.
+    // Both derive from file_io_error; catch them first when the difference matters. Repeating
+    // the call is safe after either.
     template<class Writer>
         requires std::invocable<Writer&, std::ostream&>
     void atomic_replace_file(const std::filesystem::path& file, Writer&& writer, const atomic_replace_options& options = {})

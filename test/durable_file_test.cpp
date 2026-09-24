@@ -93,7 +93,7 @@ namespace
     }
 
     // how an atomic_replace_file call ended, and with which error code
-    enum class replace_outcome { replaced, not_committed, committed_not_durable };
+    enum class replace_outcome { replaced, not_committed, committed_not_durable, unknown };
 
     template<class Fn>
     std::pair<replace_outcome, std::error_code> replace_result(Fn&& fn)
@@ -103,6 +103,9 @@ namespace
         }
         catch (const replace_not_durable_error& e) {
             return { replace_outcome::committed_not_durable, e.data() };
+        }
+        catch (const replace_outcome_unknown_error& e) {
+            return { replace_outcome::unknown, e.data() };
         }
         catch (const file_io_error& e) {
             return { replace_outcome::not_committed, e.data() };
@@ -286,9 +289,9 @@ namespace
         // the fallback rename commits, then the flush confirming it fails
         auto reader = open_for_read(file, FILE_SHARE_READ | FILE_SHARE_DELETE);
         gbassert(reader.valid());
-        detail::injected_commit_flush_error = ERROR_IO_DEVICE;
+        detail::replace_faults.commit_flush_error = ERROR_IO_DEVICE;
         auto [outcome, code] = replace_result([&] { atomic_replace_file(file, "new"); });
-        gbassert(detail::injected_commit_flush_error == 0);
+        gbassert(detail::replace_faults.commit_flush_error == 0);
         gbassert(outcome == replace_outcome::committed_not_durable);
         gbassert(code.value() == ERROR_IO_DEVICE);
         gbassert(read_whole_file(file) == "new"); // not "left as it was"
@@ -296,7 +299,7 @@ namespace
         reader.reset();
 
         // still a file_io_error for callers that do not care about the distinction
-        detail::injected_commit_flush_error = ERROR_IO_DEVICE;
+        detail::replace_faults.commit_flush_error = ERROR_IO_DEVICE;
         reader = open_for_read(file, FILE_SHARE_READ | FILE_SHARE_DELETE);
         gbassert(file_io_error_code([&] { atomic_replace_file(file, "newer"); }).value() == ERROR_IO_DEVICE);
         gbassert(read_whole_file(file) == "newer");
@@ -307,11 +310,54 @@ namespace
         gbassert(read_whole_file(file) == "newer");
 
         // MoveFileExW's own write-through confirms a plain replacement, so nothing is left to fail
-        detail::injected_commit_flush_error = ERROR_IO_DEVICE;
+        detail::replace_faults.commit_flush_error = ERROR_IO_DEVICE;
         gbassert(replace_result([&] { atomic_replace_file(file, "plain"); }).first == replace_outcome::replaced);
-        detail::injected_commit_flush_error = 0;
+        detail::replace_faults.commit_flush_error = 0;
         gbassert(read_whole_file(file) == "plain");
         gbassert(count_temp_files(directory) == 0);
+        fs::remove_all(directory);
+    }
+
+    GB_TEST(durable_file, atomic_replace_classifies_failed_move_by_target_identity)
+    {
+        auto directory = fresh_test_directory("failed_move");
+        auto file = directory / "state.json";
+        write_whole_file(file, "old");
+
+        // MoveFileExW renames, then fails (its write-through flush): the target is the temp file
+        detail::replace_faults.move_error_after_rename = ERROR_IO_DEVICE;
+        auto [outcome, code] = replace_result([&] { atomic_replace_file(file, "new"); });
+        gbassert(outcome == replace_outcome::committed_not_durable);
+        gbassert(code.value() == ERROR_IO_DEVICE);
+        gbassert(read_whole_file(file) == "new");
+        gbassert(count_temp_files(directory) == 0);
+
+        // MoveFileExW fails without renaming (the target is held without FILE_SHARE_DELETE) and
+        // another process deletes the temp file before the outcome is classified: the temp path
+        // is gone, yet nothing was committed
+        auto reader = open_for_read(file, FILE_SHARE_READ);
+        gbassert(reader.valid());
+        detail::replace_faults.on_move_failed = [](const fs::path& temp) { fs::remove(temp); };
+        std::tie(outcome, code) = replace_result([&] { atomic_replace_file(file, "newer"); });
+        gbassert(detail::replace_faults.on_move_failed == nullptr);
+        gbassert(outcome == replace_outcome::not_committed);
+        gbassert(read_whole_file(file) == "new");
+        gbassert(count_temp_files(directory) == 0);
+
+        // the target cannot be identified: reported as unknown, never guessed
+        detail::replace_faults.target_identity_error = ERROR_ACCESS_DENIED;
+        std::tie(outcome, code) = replace_result([&] { atomic_replace_file(file, "newer"); });
+        gbassert(detail::replace_faults.target_identity_error == 0);
+        gbassert(outcome == replace_outcome::unknown);
+        gbassert(code.value() == ERROR_ACCESS_DENIED);
+        gbassert(read_whole_file(file) == "new"); // here it was in fact not committed
+        gbassert(count_temp_files(directory) == 0);
+
+        // an ordinary refusal is still classified as not committed through the real identity check
+        std::tie(outcome, code) = replace_result([&] { atomic_replace_file(file, "newer"); });
+        gbassert(outcome == replace_outcome::not_committed);
+        gbassert(code.value() == ERROR_SHARING_VIOLATION);
+        reader.reset();
         fs::remove_all(directory);
     }
 #endif
