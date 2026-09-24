@@ -1482,21 +1482,30 @@ namespace
         opt.stop_criteria.elite_convergence_fraction = 0.10;
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
-        // first optimization run to populate history and test multithreading
+        // Wall-clock runs seed their RNG from std::random_device and depend on machine
+        // speed, so the target check below failed intermittently. Seeded, budget-driven
+        // runs are reproducible; seed 20 reaches the target on x64 and Win32 after 15 of
+        // the 1'000 generations the second run allows.
+        constexpr std::uint64_t seed = 20;
+
+        // first optimization run to populate history and test multithreading;
+        // its 10-generation budget stops it short of the target
         gb::yadro::async::threadpool tp(4);
-        opt.optimize(tp,
-            /* time budget */    15ms,
+        const auto first_run = opt.optimize(tp,
+            conv::deterministic_ga_options{ seed, /*generation_budget=*/ 10,
+                /*evaluation_budget=*/ 200'000, /*failure_timeout=*/ 10s },
             /*population_size=*/ 100,
-            /*max_history=*/     5,
-            /*max_tries=*/       200'000
+            /*max_history=*/     5
         );
+        gbassert(first_run.first.last_stop_reason == stop_reason::generation_budget);
 #if defined(GB_DEBUGGING)
         SetConsoleOutputCP(CP_UTF8);
         opt.report(std::cout);
 #endif
         // second optimization run to test history and stopping criteria
         auto [stats, history] = opt.optimize(
-            /* time budget */    100ms,
+            conv::deterministic_ga_options{ seed + 1, /*generation_budget=*/ 1'000,
+                /*evaluation_budget=*/ 200'000, /*failure_timeout=*/ 10s },
             /*population_size=*/ 100,
             /*max_history=*/     5
         );
@@ -1504,10 +1513,9 @@ namespace
         SetConsoleOutputCP(CP_UTF8);
         opt.report(std::cout);
 #endif
-#if defined(NDEBUG)
         gbassert(history.size() == 5);
+        gbassert(stats.last_stop_reason == stop_reason::target_reached);
         gbassert(history.best().first <= opt.target_fitness);
-#endif
         // serialize to memory archive
         gb::yadro::archive::omem_archive<> oma;
         oma(opt);
@@ -1549,15 +1557,20 @@ namespace
         opt.stop_criteria.elite_convergence_fraction = 0.10;
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
+        // Seeded, budget-driven runs for the same reason as genetic_optimization_test_conv;
+        // seed 20 converges to about 1e-29 on x64 and Win32, well within the budgets.
+        constexpr std::uint64_t seed = 20;
+
         // first optimization run to populate history and test multithreading
         gb::yadro::async::threadpool tp(4);
-        opt.optimize(tp,
+        const auto first_run = opt.optimize(tp,
             /* phases*/          4,
-            /* time budget */    10ms,
+            conv::deterministic_ga_options{ seed, /*generation_budget=*/ 10,
+                /*evaluation_budget=*/ 200'000, /*failure_timeout=*/ 10s },
             /*population_size=*/ 100,
-            /*max_history=*/     5,
-            /*max_tries=*/       200'000
+            /*max_history=*/     5
         );
+        gbassert(first_run.first.last_stop_reason == stop_reason::generation_budget);
 #if defined(GB_DEBUGGING)
         SetConsoleOutputCP(CP_UTF8);
         opt.report(std::cout);
@@ -1565,7 +1578,8 @@ namespace
         // second optimization run to test history and stopping criteria
         auto [stats, history] = opt.optimize(
             /* phases*/          4,
-            /* time budget */    10ms,
+            conv::deterministic_ga_options{ seed + 1, /*generation_budget=*/ 1'000,
+                /*evaluation_budget=*/ 200'000, /*failure_timeout=*/ 10s },
             /*population_size=*/ 100,
             /*max_history=*/     5
         );
@@ -1573,10 +1587,9 @@ namespace
         SetConsoleOutputCP(CP_UTF8);
         opt.report(std::cout);
 #endif
-#if defined(NDEBUG)
         gbassert(history.size() == 5);
+        gbassert(stats.last_stop_reason == stop_reason::elite_converged);
         gbassert(history.best().first <= 1e-6);
-#endif
         // serialize to memory archive
         gb::yadro::archive::omem_archive<> oma;
         oma(opt);
@@ -1586,6 +1599,22 @@ namespace
         ima(opt);
         std::stringstream restored_report_stream;
         gbassert(stats == opt.stats());
+
+        // The wall-clock phase overloads (and the threadpool and serial generation loops
+        // they drive) are not reproducible, so check only that they run and respect the
+        // history limit, not how far they converge.
+        {
+            auto legacy = conv::genetic_optimization_t(
+                [](int x, double y) { return static_cast<double>(x) * x + y * y; },
+                std::less<double>{},
+                min_max_value_range<int>{ -10, 10 },
+                min_max_value_range<double>{ -10.0, 10.0 });
+            (void)legacy.optimize(tp, 4, 10ms, 50, 5, 20'000);
+            const auto [legacy_stats, legacy_history] = legacy.optimize(4, 10ms, 50, 5);
+            gbassert(legacy_stats.total_evaluations > 0);
+            gbassert(!legacy_history.empty());
+            gbassert(legacy_history.size() <= 5);
+        }
     }
 
     //--------------------------------------------------------------------------------------------
