@@ -2000,7 +2000,10 @@ unset multiplot)*";
         // accept published the next instance before returning the connection
         gbassert(listener.listening_handle() != INVALID_HANDLE_VALUE);
 
-        // the connection ends, but the listening instance still owns the name
+        // the connection ends, but the listening instance keeps the pipe alive, so nobody can
+        // re-create it with a descriptor of their own (FILE_FLAG_FIRST_PIPE_INSTANCE fails while
+        // any instance exists). Adding an instance to the live pipe is governed by the DACL
+        // instead: see win_pipe_client_ace_admits_use_but_not_instances.
         server.reset();
         client.reset();
         auto squatter = create_squatting_pipe(pipename, FILE_FLAG_FIRST_PIPE_INSTANCE);
@@ -2044,6 +2047,79 @@ unset multiplot)*";
 
         winpipe_client_t client(pipename, "sqos client", 10);
         gbassert(client.request<int>(0).value() == static_cast<int>(SecurityIdentification));
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_can_opt_into_impersonation)
+    {
+#if defined(GBWINDOWS)
+        const auto pipename = unique_test_pipe_name(L"client_impersonation");
+        auto server = std::async(std::launch::async, [&]
+            {
+                winpipe_server_t server(pipename);
+                server.run([&]
+                    {
+                        if (!ImpersonateNamedPipeClient(server.get_handle()))
+                            return -1;
+
+                        auto level = -2;
+                        HANDLE raw_token{};
+                        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &raw_token))
+                        {
+                            unique_win_handle token{ raw_token };
+                            SECURITY_IMPERSONATION_LEVEL token_level{};
+                            DWORD size{};
+                            if (GetTokenInformation(token, TokenImpersonationLevel, &token_level, sizeof(token_level), &size))
+                                level = static_cast<int>(token_level);
+                        }
+                        RevertToSelf();
+                        return level;
+                    });
+            });
+
+        winpipe_client_t client(pipename, pipe_client_options{ .allow_impersonation = true }, "impersonation client", 10);
+        gbassert(client.request<int>(0).value() == static_cast<int>(SecurityImpersonation));
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_ace_admits_use_but_not_instances)
+    {
+#if defined(GBWINDOWS)
+        gbassert(pipe_client_access == 0x12018bu);
+        gbassert((pipe_client_access & FILE_CREATE_PIPE_INSTANCE) == 0);
+        // why clients must not be granted GW: on a pipe it maps to FILE_GENERIC_WRITE, which
+        // includes FILE_CREATE_PIPE_INSTANCE (FILE_APPEND_DATA)
+        gbassert((FILE_GENERIC_WRITE & FILE_CREATE_PIPE_INSTANCE) != 0);
+        gbassert(pipe_client_ace(L"IU") == L"(A;;0x12018b;;;IU)");
+
+        // The process user stands in for a client account: the DACL grants it only the client
+        // rights. Creating the pipe needs no right on it, so the single-instance server starts,
+        // and winpipe_client_t can connect and call, but adding a rogue instance to the live pipe
+        // is refused.
+        const auto user_sid = current_process_user_sid();
+        const auto pipename = unique_test_pipe_name(L"client_ace");
+        const pipe_server_options options{ .sddl = L"D:P" + pipe_client_ace(user_sid) };
+        auto server = std::async(std::launch::async, [&]
+            {
+                winpipe_server_t server(pipename, options);
+                server.run([] { return 4; });
+            });
+
+        winpipe_client_t client(pipename, "client ace client", 10);
+        const auto dacl = read_pipe_dacl(client.get_handle());
+        std::map<std::wstring, ACCESS_MASK> expected{ { user_sid, pipe_client_access } };
+        gbassert(dacl.allowed == expected);
+
+        auto rogue = create_squatting_pipe(pipename); // no FILE_FLAG_FIRST_PIPE_INSTANCE
+        const auto rogue_error = GetLastError();
+        gbassert(!rogue.valid());
+        gbassert(rogue_error == ERROR_ACCESS_DENIED);
+
+        gbassert(client.request<int>(0).value() == 4);
         client.disconnect();
         server.get();
 #endif

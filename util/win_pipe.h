@@ -83,25 +83,37 @@ namespace gb::yadro::util
     //
     // The first instance a server creates is flagged FILE_FLAG_FIRST_PIPE_INSTANCE: if another
     // process already owns the pipe name (name squatting), the server fails to start instead of
-    // adding instances to a pipe whose security descriptor that process chose.
+    // adding instances to a pipe whose security descriptor that process chose. pipe_listener_t
+    // also never lets the name lapse while the server runs, so nobody can re-create the pipe
+    // with a descriptor of their own choosing between connections.
     //
-    // Clients connect with identification-level SQOS, so a server (or a process squatting on the
-    // name) can learn who connected but cannot impersonate the client.
+    // Limit: this does not stop a process that the pipe's DACL grants FILE_CREATE_PIPE_INSTANCE
+    // from adding its own instance to the running pipe and receiving some of the clients. On a
+    // pipe GENERIC_ALL and GENERIC_WRITE both include that right (it is FILE_APPEND_DATA). The
+    // server's own account must keep it to create its later instances, so any process of that
+    // user can do this, including a medium-integrity process of a user whose server runs
+    // elevated. A same-user process at the same integrity level can already tamper with the
+    // server directly, so Windows offers no boundary to defend there. Admit every other account
+    // with pipe_client_ace(), which grants pipe_client_access and so leaves the right out.
+    //
+    // Clients connect with identification-level SQOS by default (pipe_client_options), so a
+    // server, or a rogue instance as described above, can learn who connected but cannot
+    // impersonate the client.
     //
     // Who is refused compared with lpSecurityAttributes == nullptr, and how to admit them again:
     //  - clients running as another account, e.g. a service account (LocalService, NetworkService,
     //    a virtual or domain service account) talking to a server run by an interactive user, or
-    //    another user's client of a shared server: pass pipe_server_options::sddl with an ACE for
-    //    that account or group, e.g. L"D:P(A;;GA;;;<server user SID>)(A;;GRGW;;;<client SID>)"
-    //    (GRGW is the least a winpipe_client_t needs, it opens the pipe for read and write);
+    //    another user's client of a shared server: pass pipe_server_options::sddl with a client
+    //    ACE for that account or group, e.g. default_pipe_sddl() + pipe_client_ace(L"<client SID>");
     //  - elevated administrators running as another account (the Windows default DACL admits
-    //    Administrators): add (A;;GRGW;;;BA);
+    //    Administrators): add pipe_client_ace(L"BA");
     //  - a server running as a service: its process user is the service account, so interactive
-    //    users' clients are refused unless the SDDL names them (e.g. (A;;GRGW;;;IU) for all
-    //    interactive users);
+    //    users' clients are refused unless the SDDL names them, e.g. pipe_client_ace(L"IU");
     //  - clients on other machines: set allow_remote_clients and admit their accounts in the DACL;
     //  - several independent server processes sharing one pipe name: set first_pipe_instance =
-    //    false (each must be admitted by the pipe's DACL with FILE_CREATE_PIPE_INSTANCE).
+    //    false (each must be admitted by the pipe's DACL with FILE_CREATE_PIPE_INSTANCE);
+    //  - servers that call ImpersonateNamedPipeClient to act as a winpipe_client_t: construct the
+    //    client with pipe_client_options{ .allow_impersonation = true }.
     // Clients running as the server's own user, in any logon session and at medium or higher
     // integrity, are unaffected.
     struct pipe_server_options
@@ -119,6 +131,26 @@ namespace gb::yadro::util
         // Opt-out of FILE_FLAG_FIRST_PIPE_INSTANCE, for a deployment that deliberately runs several
         // independent server processes on one pipe name.
         bool first_pipe_instance = true;
+    };
+
+    // Rights a winpipe_client_t requests: read, write data, and write attributes (for
+    // SetNamedPipeHandleState). Unlike GENERIC_WRITE this leaves out FILE_CREATE_PIPE_INSTANCE,
+    // so an account granted only these rights can use the server but cannot host instances of it.
+    inline constexpr DWORD pipe_client_access = FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
+
+    // SDDL allow-ACE granting pipe_client_access to a SID string or SDDL alias (e.g. L"IU")
+    inline std::wstring pipe_client_ace(std::wstring_view sid)
+    {
+        return std::format(L"(A;;{:#x};;;{})", pipe_client_access, sid);
+    }
+
+    struct pipe_client_options
+    {
+        // Clients connect with SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: the server can
+        // identify the client (ImpersonateNamedPipeClient yields an identification token) but
+        // cannot act as it. Set this to restore the Windows default (full impersonation) for a
+        // trusted server that accesses resources on the client's behalf.
+        bool allow_impersonation = false;
     };
 
     // single-instance server
@@ -704,8 +736,24 @@ namespace gb::yadro::util
         template<class Rep, class Period>
         winpipe_client_t(const std::wstring& pipename, std::string client_name, std::chrono::duration<Rep, Period> timeout,
             unsigned connection_attempts, auto&&... log_args)
+            : winpipe_client_t(pipename, pipe_client_options{}, std::move(client_name), timeout, connection_attempts,
+                std::forward<decltype(log_args)>(log_args)...)
+        {}
+
+        // named client with explicit options, see pipe_client_options
+        winpipe_client_t(const std::wstring& pipename, const pipe_client_options& options, std::string client_name,
+            unsigned connection_attempts, auto&& ...log_args)
+            : winpipe_client_t(pipename, options, std::move(client_name), std::chrono::milliseconds(pipe_io_timeout_ms),
+                connection_attempts, std::forward<decltype(log_args)>(log_args)...)
+        {}
+
+        template<class Rep, class Period>
+        winpipe_client_t(const std::wstring& pipename, const pipe_client_options& options, std::string client_name,
+            std::chrono::duration<Rep, Period> timeout, unsigned connection_attempts, auto&&... log_args)
             : winpipe_base_t(timeout, std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
         {
+            // Windows' default without SECURITY_SQOS_PRESENT is full impersonation
+            const DWORD sqos_flags = options.allow_impersonation ? 0 : SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
             using namespace std::chrono_literals;
             auto attempt = 0u;
             for (; _pipe == INVALID_HANDLE_VALUE && attempt < connection_attempts; ++attempt)
@@ -719,14 +767,11 @@ namespace gb::yadro::util
                     // try to grab a pipe, other client can frontrun, so CreateFile can fail
                     _pipe = CreateFile(
                         pipename.c_str(),
-                        GENERIC_READ |  // read and write access 
-                        GENERIC_WRITE,
+                        pipe_client_access, // read, write data and attributes; not GENERIC_WRITE
                         0,              // no sharing 
                         nullptr,        // default security attributes
                         OPEN_EXISTING,  // opens existing pipe 
-                        // identification-level SQOS: a process squatting on the pipe name can
-                        // learn who connected but cannot impersonate the client
-                        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                        FILE_FLAG_OVERLAPPED | sqos_flags,
                         nullptr);       // no template file 
                 }
             }
@@ -1072,8 +1117,10 @@ namespace gb::yadro::util
     // replacement for an instance whose client left before accept is created before the dead one
     // is closed, and a multi-instance server calls prepare() while it still holds the connection it
     // just accepted. The name therefore never lapses between connections, so
-    // FILE_FLAG_FIRST_PIPE_INSTANCE on the first creation is enough to keep another process from
-    // taking the name over.
+    // FILE_FLAG_FIRST_PIPE_INSTANCE on the first creation keeps another process from creating the
+    // pipe with its own security descriptor, before or during the server's lifetime. It does not
+    // keep a process that the DACL grants FILE_CREATE_PIPE_INSTANCE from adding instances to this
+    // pipe; see the note above pipe_server_options.
     struct pipe_listener_t
     {
         explicit pipe_listener_t(std::wstring pipename, const pipe_server_options& options = {}, std::shared_ptr<util::logger> log = nullptr)
