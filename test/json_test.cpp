@@ -1270,4 +1270,96 @@ namespace
         json_value nested_b = json_object{ { "x", json_array{ json_object{ { "y", 1.0 } } } } };
         gbassert(nested_a == nested_b);
     }
+
+    //-------------------------------------------------------------------------
+    // JSON pointer (RFC 6901)
+    //-------------------------------------------------------------------------
+
+    [[nodiscard]] json_value pointer_document()
+    {
+        return json_object{
+            { "list", json_array{ "x", "y" } },
+            { "", 1 },
+            { "s/l", 2 },
+            { "p%c", 3 },
+            { "c^f", 4 },
+            { "b|r", 5 },
+            { "b\\s", 6 },
+            { "q\"t", 7 },
+            { " ", 8 },
+            { "t~n", 9 },
+            { "obj", json_object{ { "a", json_object{ { "b", 10 } } } } },
+        };
+    }
+
+    GB_TEST(json, json_pointer_lookup_test)
+    {
+        const auto document = pointer_document();
+        auto at = [&](std::string_view pointer) {
+            auto result = document.at_pointer(pointer);
+            gbassert(result.has_value());
+            return *result.value();
+        };
+        gbassert(document.at_pointer("").value() == &document);
+        gbassert(at("/list") == json_value(json_array{ "x", "y" }));
+        gbassert(at("/list/0") == json_value("x"));
+        gbassert(at("/list/1") == json_value("y"));
+        gbassert(at("/") == json_value(1));
+        gbassert(at("/s~1l") == json_value(2));
+        gbassert(at("/p%c") == json_value(3));
+        gbassert(at("/c^f") == json_value(4));
+        gbassert(at("/b|r") == json_value(5));
+        gbassert(at("/b\\s") == json_value(6));
+        gbassert(at("/q\"t") == json_value(7));
+        gbassert(at("/ ") == json_value(8));
+        gbassert(at("/t~0n") == json_value(9));
+        gbassert(at("/obj/a/b") == json_value(10));
+    }
+
+    GB_TEST(json, json_pointer_error_test)
+    {
+        const auto document = pointer_document();
+        auto error = [&](std::string_view pointer) {
+            auto result = document.at_pointer(pointer);
+            gbassert(!result.has_value());
+            return result.error();
+        };
+        using reason = json_pointer_error::reason;
+        gbassert(error("list").code == reason::syntax && error("list").token_index == 0);
+        gbassert(error("/t~2n").code == reason::syntax && error("/t~2n").token_index == 0);
+        gbassert(error("/t~").code == reason::syntax);
+        gbassert(error("/obj/a~").code == reason::syntax && error("/obj/a~").token_index == 1);
+        gbassert(error("/missing").code == reason::not_found && error("/missing").token_index == 0);
+        gbassert(error("/list/2").code == reason::invalid_index && error("/list/2").token_index == 1);
+        for (auto bad : { "/list/01", "/list/-1", "/list/+1", "/list/x", "/list/", "/list/1a", "/list/99999999999999999999999" })
+            gbassert(error(bad).code == reason::invalid_index);
+        gbassert(error("/list/-").code == reason::not_found);
+        gbassert(error("/obj/a/b/c").code == reason::not_a_container && error("/obj/a/b/c").token_index == 3);
+        gbassert(error("/list/0/x").code == reason::not_a_container && error("/list/0/x").token_index == 2);
+    }
+
+    GB_TEST(json, json_pointer_mutable_and_builders_test)
+    {
+        auto document = pointer_document();
+        auto target = document.at_pointer("/obj/a/b");
+        gbassert(target.has_value());
+        *target.value() = json_value("changed");
+        gbassert(*std::as_const(document).at_pointer("/obj/a/b").value() == json_value("changed"));
+
+        std::string pointer;
+        append_json_pointer_token(pointer, "a/b~c");
+        gbassert(pointer == "/a~1b~0c");
+        append_json_pointer_index(pointer, 3);
+        gbassert(pointer == "/a~1b~0c/3");
+
+        json_value tricky = json_object{ { "a/b~c", json_array{ 0, 1, 2, json_object{ { "~", true } } } } };
+        std::string built;
+        append_json_pointer_token(built, "a/b~c");
+        append_json_pointer_index(built, 3);
+        append_json_pointer_token(built, "~");
+        gbassert(*tricky.at_pointer(built).value() == json_value(true));
+        std::string empty_key;
+        append_json_pointer_token(empty_key, "");
+        gbassert(empty_key == "/");
+    }
 }

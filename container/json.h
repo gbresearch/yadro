@@ -55,6 +55,7 @@
 
 #include "json_parser.h"
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -93,6 +94,20 @@ namespace gb::yadro::container
 
         reason code = reason::type_mismatch;
         json_kind actual = json_kind::null;
+    };
+
+    struct json_pointer_error
+    {
+        enum class reason
+        {
+            syntax,             // not empty and not starting with '/', or '~' not followed by '0' or '1'
+            not_found,          // no such member, or "-" (one past the end of an array)
+            not_a_container,    // a reference token applied to a scalar
+            invalid_index       // not 0 or [1-9][0-9]*, or out of range
+        };
+
+        reason code = reason::syntax;
+        std::size_t token_index = 0;    // 0-based index of the failing reference token
     };
 
     // (1) forward declarations; json_array only names the vector specialization here
@@ -207,6 +222,10 @@ namespace gb::yadro::container
         [[nodiscard]] std::expected<json_array*, json_access_error> as_array() noexcept;
         [[nodiscard]] std::expected<const json_object*, json_access_error> as_object() const noexcept;
         [[nodiscard]] std::expected<json_object*, json_access_error> as_object() noexcept;
+
+        // RFC 6901 JSON pointer lookup; "" is this value. The pointer is UTF-8 text, not a URI fragment.
+        [[nodiscard]] std::expected<const json_value*, json_pointer_error> at_pointer(std::string_view pointer) const;
+        [[nodiscard]] std::expected<json_value*, json_pointer_error> at_pointer(std::string_view pointer);
 
         // structural equality (see the header notes); not noexcept because comparing large
         // objects allocates
@@ -543,4 +562,97 @@ namespace gb::yadro::container
     static_assert(std::is_nothrow_move_constructible_v<json_value>);
     static_assert(std::is_nothrow_move_constructible_v<json_object>);
     static_assert(std::is_copy_constructible_v<json_value>);
+
+    //-------------------------------------------------------------------------
+    // JSON pointer (RFC 6901)
+    //-------------------------------------------------------------------------
+    namespace detail
+    {
+        template<class Value>
+        [[nodiscard]] std::expected<Value*, json_pointer_error> resolve_json_pointer(Value& root, std::string_view pointer)
+        {
+            using reason = json_pointer_error::reason;
+            if (pointer.empty())
+                return &root;
+            if (pointer.front() != '/')
+                return std::unexpected(json_pointer_error{ reason::syntax, 0 });
+
+            Value* current = &root;
+            std::string unescaped;
+            std::size_t start = 1;
+            for (std::size_t index = 0;; ++index) {
+                const auto slash = pointer.find('/', start);
+                const auto raw = pointer.substr(start, slash == std::string_view::npos ? std::string_view::npos : slash - start);
+
+                std::string_view token = raw;
+                if (raw.find('~') != std::string_view::npos) {
+                    unescaped.clear();
+                    for (std::size_t k = 0; k < raw.size(); ++k) {
+                        if (raw[k] != '~') {
+                            unescaped.push_back(raw[k]);
+                            continue;
+                        }
+                        if (k + 1 == raw.size() || (raw[k + 1] != '0' && raw[k + 1] != '1'))
+                            return std::unexpected(json_pointer_error{ reason::syntax, index });
+                        unescaped.push_back(raw[++k] == '0' ? '~' : '/');
+                    }
+                    token = unescaped;
+                }
+
+                if (auto* object = current->template get_if<json_object>()) {
+                    auto* member = object->find(token);
+                    if (!member)
+                        return std::unexpected(json_pointer_error{ reason::not_found, index });
+                    current = member;
+                }
+                else if (auto* array = current->template get_if<json_array>()) {
+                    if (token == "-")
+                        return std::unexpected(json_pointer_error{ reason::not_found, index });
+                    std::size_t position = 0;
+                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), position);
+                    const bool canonical = !token.empty() && (token.size() == 1 || token.front() != '0');
+                    if (!canonical || ec != std::errc{} || ptr != token.data() + token.size() || position >= array->size())
+                        return std::unexpected(json_pointer_error{ reason::invalid_index, index });
+                    current = &(*array)[position];
+                }
+                else {
+                    return std::unexpected(json_pointer_error{ reason::not_a_container, index });
+                }
+
+                if (slash == std::string_view::npos)
+                    return current;
+                start = slash + 1;
+            }
+        }
+    }
+
+    inline std::expected<const json_value*, json_pointer_error> json_value::at_pointer(std::string_view pointer) const
+    {
+        return detail::resolve_json_pointer(*this, pointer);
+    }
+
+    inline std::expected<json_value*, json_pointer_error> json_value::at_pointer(std::string_view pointer)
+    {
+        return detail::resolve_json_pointer(*this, pointer);
+    }
+
+    // Appends "/" and the escaped reference token ('~' -> "~0", '/' -> "~1").
+    inline void append_json_pointer_token(std::string& pointer, std::string_view key)
+    {
+        pointer.push_back('/');
+        for (auto c : key) {
+            if (c == '~')
+                pointer.append("~0");
+            else if (c == '/')
+                pointer.append("~1");
+            else
+                pointer.push_back(c);
+        }
+    }
+
+    inline void append_json_pointer_index(std::string& pointer, std::size_t index)
+    {
+        pointer.push_back('/');
+        pointer.append(std::to_string(index));
+    }
 }
