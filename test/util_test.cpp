@@ -1808,6 +1808,75 @@ unset multiplot)*";
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | extra_open_mode, pipe_mode,
             PIPE_UNLIMITED_INSTANCES, pipe_chunk_size, pipe_chunk_size, NMPWAIT_WAIT_FOREVER, nullptr) };
     }
+
+    // This test executable in its `--pipe-server` child mode, running as this process's user at low
+    // integrity: a server whose process and token differ from the client's. The child is killed
+    // if it is still running when this object goes away, and by its job if this process dies.
+    struct low_integrity_pipe_server
+    {
+        explicit low_integrity_pipe_server(const std::wstring& pipename)
+        {
+            HANDLE raw_token{};
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE, &raw_token))
+                throw exception_t("OpenProcessToken failed: ", GetLastError());
+            unique_win_handle own_token{ raw_token };
+
+            if (!DuplicateTokenEx(own_token, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY,
+                nullptr, SecurityImpersonation, TokenPrimary, &raw_token))
+                throw exception_t("DuplicateTokenEx failed: ", GetLastError());
+            unique_win_handle low_token{ raw_token };
+
+            PSID low_sid{};
+            if (!ConvertStringSidToSidW(L"S-1-16-4096", &low_sid)) // SECURITY_MANDATORY_LOW_RID
+                throw exception_t("ConvertStringSidToSidW failed: ", GetLastError());
+            std::unique_ptr<void, local_free_deleter> owned_low_sid{ low_sid };
+            TOKEN_MANDATORY_LABEL label{ { low_sid, SE_GROUP_INTEGRITY } };
+            if (!SetTokenInformation(low_token, TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid(low_sid)))
+                throw exception_t("SetTokenInformation failed: ", GetLastError());
+
+            wchar_t exe_path[MAX_PATH]{};
+            if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) == 0)
+                throw exception_t("GetModuleFileNameW failed: ", GetLastError());
+            auto command = L'"' + std::wstring{ exe_path } + L"\" --pipe-server " + pipename;
+
+            STARTUPINFOW startup{ .cb = sizeof(STARTUPINFOW) };
+            PROCESS_INFORMATION info{};
+            if (!CreateProcessAsUserW(low_token, exe_path, command.data(), nullptr, nullptr, FALSE,
+                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &info))
+                throw exception_t("CreateProcessAsUserW failed: ", GetLastError());
+            unique_win_handle thread{ info.hThread };
+            process = info.hProcess;
+            pid = info.dwProcessId;
+
+            job = CreateJobObjectW(nullptr, nullptr);
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!job.valid() || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))
+                || !AssignProcessToJobObject(job, process))
+                job.reset(); // best effort: the destructor still kills the child
+
+            if (ResumeThread(thread) == static_cast<DWORD>(-1))
+            {
+                const auto last_error = GetLastError();
+                TerminateProcess(process, 1);
+                throw exception_t("ResumeThread failed: ", last_error);
+            }
+        }
+
+        low_integrity_pipe_server(const low_integrity_pipe_server&) = delete;
+        auto operator=(const low_integrity_pipe_server&) -> low_integrity_pipe_server& = delete;
+
+        ~low_integrity_pipe_server()
+        {
+            if (process.valid() && WaitForSingleObject(process, 0) == WAIT_TIMEOUT)
+                TerminateProcess(process, 1);
+        }
+
+        unique_win_handle process;
+        DWORD pid{};
+    private:
+        unique_win_handle job;
+    };
 #endif
 
     GB_TEST(util, win_pipe_default_dacl_admits_only_process_user_and_system)
@@ -2201,6 +2270,51 @@ unset multiplot)*";
         }
         gbassert(shutdown_server(pipename, 10));
         server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_checks_the_server_process_not_its_own)
+    {
+#if defined(GBWINDOWS)
+        // The server is a child process of this user at low integrity, so the outcome below
+        // depends on the check reading the server's process and token rather than the client's.
+        const auto own_integrity = token_integrity_rid(GetCurrentProcessToken());
+        gbassert(own_integrity.has_value());
+        if (*own_integrity <= SECURITY_MANDATORY_LOW_RID)
+            return; // no lower level to start the server at
+
+        const auto pipename = unique_test_pipe_name(L"low_integrity_server");
+        low_integrity_pipe_server child{ pipename };
+        gbassert(child.pid != GetCurrentProcessId());
+        constexpr auto startup_attempts = 1000u; // the child creates the pipe after it starts
+
+        // the same user at a level the client accepts: admitted, and the connection reaches the child
+        {
+            winpipe_client_t client(pipename, pipe_client_options{ .verify_server_user = true,
+                .min_server_integrity = SECURITY_MANDATORY_LOW_RID }, "low server client", startup_attempts);
+            gbassert(client.request<std::uint32_t>(0).value() == child.pid);
+        }
+
+        // requiring the client's own level rejects the child, and the error names the child's PID
+        std::string error;
+        try
+        {
+            winpipe_client_t client(pipename, pipe_client_options{ .min_server_integrity = *own_integrity }, "own level client", 10);
+        }
+        catch (std::exception& e)
+        {
+            error = e.what();
+        }
+        gbassert(error.find("identity check failed") != std::string::npos);
+        gbassert(error.find(pipe_name_for_error(pipename)) != std::string::npos);
+        gbassert(error.find(std::format("server process {} integrity level {:#x} is below the required {:#x}",
+            child.pid, SECURITY_MANDATORY_LOW_RID, *own_integrity)) != std::string::npos);
+
+        winpipe_client_t(pipename, "low server shutdown", 10).shutdown();
+        gbassert(WaitForSingleObject(child.process, 30'000) == WAIT_OBJECT_0);
+        DWORD exit_code{};
+        gbassert(GetExitCodeProcess(child.process, &exit_code));
+        gbassert(exit_code == 0);
 #endif
     }
 }
