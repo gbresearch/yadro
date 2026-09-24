@@ -2874,6 +2874,37 @@ namespace
         std::filesystem::remove_all(export_dir);
     }
 
+    GB_TEST(container, gbdb_json_external_blob_relocation_md5_mismatch_installs_nothing_test)
+    {
+        auto source_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_relocation_mismatch_source";
+        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_relocation_mismatch_export";
+        reset_test_directory(source_dir);
+        reset_test_directory(export_dir);
+
+        // the source has the declared size but not the declared MD5
+        write_test_file(source_dir / "payload.bin", bytes_from_text("0123456789"));
+
+        json_db db;
+        db.set_external_blob_base_directory(source_dir);
+        db.set_deferred_serialized_object({ "assets", "payload" }, "payload.bin", 10, "00000000000000000000000000000000", "asset", 1);
+
+        json_write_options options;
+        options.pretty = false;
+        options.external_blobs.relocation = json_external_blob_relocation::copy_to_export_directory;
+
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto result = export_json_file(db, export_dir / "database.json", options);
+        });
+
+        gbassert(!std::filesystem::exists(export_dir / "database.json"));
+        auto blob_dir = export_dir / "blobs";
+        if (std::filesystem::exists(blob_dir))
+            gbassert(std::filesystem::is_empty(blob_dir)); // neither the blob nor its temp file
+
+        std::filesystem::remove_all(source_dir);
+        std::filesystem::remove_all(export_dir);
+    }
+
     GB_TEST(container, gbdb_json_reader_is_opt_in_test)
     {
         if constexpr (gbdb_json_axe_enabled) {

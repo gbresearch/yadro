@@ -29,6 +29,7 @@
 #pragma once
 
 #include "gbdb.h"
+#include "../util/durable_file.h"
 #include "../util/string_util.h"
 #include <algorithm>
 #include <cctype>
@@ -370,37 +371,6 @@ namespace gb::yadro::container
                 return false;
 
             return md5_bytes(std::as_bytes(std::span{ data })) == md5;
-        }
-
-        inline void replace_file_with_temp(const std::filesystem::path& temp_file, const std::filesystem::path& file)
-        {
-            std::error_code ec;
-            std::filesystem::rename(temp_file, file, ec);
-            if (!ec)
-                return;
-
-            if (!std::filesystem::exists(file))
-                throw std::runtime_error("Failed to commit temporary file");
-
-            auto backup = file;
-            backup += ".bak";
-            ec.clear();
-            std::filesystem::remove(backup, ec);
-            ec.clear();
-            std::filesystem::rename(file, backup, ec);
-            if (ec)
-                throw std::runtime_error("Failed to preserve existing file before replacement");
-
-            ec.clear();
-            std::filesystem::rename(temp_file, file, ec);
-            if (ec) {
-                std::error_code restore_ec;
-                std::filesystem::rename(backup, file, restore_ec);
-                throw std::runtime_error("Failed to commit temporary file");
-            }
-
-            ec.clear();
-            std::filesystem::remove(backup, ec);
         }
     }
 
@@ -1486,24 +1456,27 @@ namespace gb::yadro::container
                     ++_result.reused_blob_count;
                 }
                 else {
-                    auto temp_directory = blob_directory / ".tmp";
-                    std::filesystem::create_directories(temp_directory);
-                    auto temp_file = temp_directory / (file_name + ".tmp");
+                    // the copy is verified while it streams; a mismatch aborts it before it is installed
+                    gb::yadro::util::atomic_replace_file(final_file, [&](std::ostream& out) {
+                        std::ifstream in(source, std::ios::binary);
+                        if (!in)
+                            throw std::runtime_error("Failed to open external gbdb archive blob for relocation");
 
-                    try {
-                        std::filesystem::copy_file(source, temp_file, std::filesystem::copy_options::overwrite_existing);
-                        if (!detail::file_bytes_match(temp_file, blob.size_bytes, blob.md5))
-                            throw std::runtime_error("Relocated gbdb archive blob MD5 mismatch");
-                        detail::replace_file_with_temp(temp_file, final_file);
-                        ++_result.copied_blob_count;
-                    }
-                    catch (...) {
-                        if (_options.external_blobs.remove_temp_files_on_failure) {
-                            std::error_code ec;
-                            std::filesystem::remove(temp_file, ec);
+                        gb::yadro::util::md5 hash;
+                        std::uint64_t size = 0;
+                        std::vector<char> buffer(64 * 1024);
+                        while (in.read(buffer.data(), static_cast<std::streamsize>(buffer.size())) || in.gcount() > 0) {
+                            auto count = in.gcount();
+                            hash.update(reinterpret_cast<const std::uint8_t*>(buffer.data()), static_cast<std::size_t>(count));
+                            out.write(buffer.data(), count);
+                            size += static_cast<std::uint64_t>(count);
                         }
-                        throw;
-                    }
+                        if (in.bad())
+                            throw std::runtime_error("Failed to read external gbdb archive blob for relocation");
+                        if (size != blob.size_bytes || hash.finalize().to_string() != blob.md5)
+                            throw std::runtime_error("Relocated gbdb archive blob MD5 mismatch");
+                    }, blob_replace_options());
+                    ++_result.copied_blob_count;
                 }
 
                 auto uri = external_blob_uri(file_name);
@@ -1595,32 +1568,14 @@ namespace gb::yadro::container
                     return;
                 }
 
-                auto temp_directory = file.parent_path() / ".tmp";
-                std::filesystem::create_directories(temp_directory);
-                auto temp_file = temp_directory / (file.filename().generic_string() + ".tmp");
+                // md5 was computed from these same bytes, and the write is flushed before it is installed
+                gb::yadro::util::atomic_replace_file(file, bytes, blob_replace_options());
+                ++_result.copied_blob_count;
+            }
 
-                try {
-                    std::ofstream out(temp_file, std::ios::binary);
-                    if (!out)
-                        throw std::runtime_error("Failed to open external gbdb archive blob for writing");
-                    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-                    if (!out)
-                        throw std::runtime_error("Failed to write external gbdb archive blob");
-                    out.close();
-
-                    if (!detail::file_bytes_match(temp_file, static_cast<std::uint64_t>(bytes.size()), md5))
-                        throw std::runtime_error("External gbdb archive blob MD5 mismatch after writing");
-
-                    detail::replace_file_with_temp(temp_file, file);
-                    ++_result.copied_blob_count;
-                }
-                catch (...) {
-                    if (_options.external_blobs.remove_temp_files_on_failure) {
-                        std::error_code ec;
-                        std::filesystem::remove(temp_file, ec);
-                    }
-                    throw;
-                }
+            [[nodiscard]] gb::yadro::util::atomic_replace_options blob_replace_options() const
+            {
+                return { .remove_temp_on_failure = _options.external_blobs.remove_temp_files_on_failure };
             }
 
             void remember_live_uri(json_db::string_view uri)
@@ -2301,6 +2256,9 @@ namespace gb::yadro::container
         for (auto const& entry : std::filesystem::recursive_directory_iterator(blob_directory)) {
             if (!entry.is_regular_file())
                 continue;
+            // older blob writers staged files in a ".tmp" subdirectory, which is still skipped; they
+            // now stage next to the blob (util/durable_file.h), so a temp file left there by a
+            // crash is unreferenced and collected like any other stale blob
             if (entry.path().parent_path().filename() == ".tmp")
                 continue;
 
@@ -2318,18 +2276,7 @@ namespace gb::yadro::container
         if (auto parent = file.parent_path(); !parent.empty())
             std::filesystem::create_directories(parent);
 
-        auto temp_file = file;
-        temp_file += ".tmp";
-
-        std::ofstream out(temp_file, std::ios::binary);
-        if (!out)
-            throw std::runtime_error("Failed to open JSON file for writing");
-        out.write(text.data(), static_cast<std::streamsize>(text.size()));
-        if (!out)
-            throw std::runtime_error("Failed to write JSON file");
-        out.close();
-
-        detail::replace_file_with_temp(temp_file, file);
+        gb::yadro::util::atomic_replace_file(file, text);
     }
 
     [[nodiscard]] inline json_external_blob_export_result export_json_file(const json_db& db, const std::filesystem::path& file, const json_write_options& options = {})

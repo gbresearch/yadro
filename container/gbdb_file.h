@@ -7,9 +7,11 @@
 #pragma once
 
 #include "gbdb.h"
+#include "../util/durable_file.h"
 
 #include <filesystem>
 #include <fstream>
+#include <ostream>
 #include <stdexcept>
 
 namespace gb::yadro::container
@@ -24,30 +26,16 @@ namespace gb::yadro::container
         return db;
     }
 
+    // Writes db to file durably and atomically (see util/durable_file.h): after a crash, file
+    // holds the complete previous database or the complete new one. On failure the previous
+    // file is untouched and the exception propagates (I/O failures as util::file_io_error).
     inline void save_json_db_file(const json_db& db, const std::filesystem::path& file)
     {
-        auto temp = file;
-        temp += ".tmp";
         if (auto parent = file.parent_path(); !parent.empty())
             std::filesystem::create_directories(parent);
 
-        {
-            std::ofstream out(temp, std::ios::binary);
-            if (!out)
-                throw std::runtime_error("failed to open database file for writing: " + temp.string());
+        gb::yadro::util::atomic_replace_file(file, [&db](std::ostream& out) {
             const_cast<json_db&>(db).serialize(gb::yadro::archive::bin_archive{ out });
-            if (!out)
-                throw std::runtime_error("failed to write database file: " + temp.string());
-        }
-
-        std::error_code ec;
-        std::filesystem::rename(temp, file, ec);
-        if (ec) {
-            std::filesystem::remove(file, ec);
-            ec.clear();
-            std::filesystem::rename(temp, file, ec);
-            if (ec)
-                throw std::runtime_error("failed to replace database file: " + file.string());
-        }
+        });
     }
 }
