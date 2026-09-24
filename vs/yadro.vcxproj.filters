@@ -124,6 +124,12 @@
     <ClInclude Include="..\util\win_service.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\durable_file.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\sha256.h">
+      <Filter>util</Filter>
+    </ClInclude>
     <ClInclude Include="..\simulator\signal.h">
       <Filter>simulator</Filter>
     </ClInclude>

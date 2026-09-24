@@ -192,66 +192,6 @@ namespace gb::yadro::util
     inline constexpr std::uint32_t server_shutdown = -2;
     inline constexpr auto pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
 
-    //----------------------------------------------------------------------------------------------
-    struct unique_win_handle
-    {
-        unique_win_handle() noexcept = default;
-        explicit unique_win_handle(HANDLE handle) noexcept : _handle(handle) {}
-        unique_win_handle(const unique_win_handle&) = delete;
-        auto operator=(const unique_win_handle&) -> unique_win_handle& = delete;
-
-        unique_win_handle(unique_win_handle&& other) noexcept
-            : _handle(std::exchange(other._handle, INVALID_HANDLE_VALUE))
-        {}
-
-        auto operator=(unique_win_handle&& other) noexcept -> unique_win_handle&
-        {
-            if (this != &other)
-                reset(std::exchange(other._handle, INVALID_HANDLE_VALUE));
-            return *this;
-        }
-
-        ~unique_win_handle() noexcept { reset(); }
-
-        auto operator=(HANDLE handle) noexcept -> unique_win_handle&
-        {
-            reset(handle);
-            return *this;
-        }
-
-        [[nodiscard]] auto get() const noexcept { return _handle; }
-        [[nodiscard]] auto valid() const noexcept { return _handle != INVALID_HANDLE_VALUE && _handle != nullptr; }
-        operator HANDLE() const noexcept { return _handle; }
-
-        void reset(HANDLE handle = INVALID_HANDLE_VALUE) noexcept
-        {
-            if (handle == _handle)
-                return;
-
-            auto old_handle = std::exchange(_handle, handle);
-            if (old_handle != INVALID_HANDLE_VALUE && old_handle != nullptr)
-                CloseHandle(old_handle);
-        }
-
-        [[nodiscard]] auto release() noexcept
-        {
-            return std::exchange(_handle, INVALID_HANDLE_VALUE);
-        }
-
-        friend auto operator==(const unique_win_handle& handle, HANDLE value) noexcept
-        {
-            return handle.get() == value;
-        }
-
-        friend auto operator!=(const unique_win_handle& handle, HANDLE value) noexcept
-        {
-            return !(handle == value);
-        }
-
-    private:
-        HANDLE _handle = INVALID_HANDLE_VALUE;
-    };
-
     template<class Rep, class Period>
     inline auto pipe_timeout_milliseconds(const std::chrono::duration<Rep, Period>& timeout)
     {
