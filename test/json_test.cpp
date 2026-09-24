@@ -35,6 +35,7 @@
 #include <atomic>
 #include <bit>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1361,5 +1362,126 @@ namespace
         std::string empty_key;
         append_json_pointer_token(empty_key, "");
         gbassert(empty_key == "/");
+    }
+
+    //-------------------------------------------------------------------------
+    // json_value writer
+    //-------------------------------------------------------------------------
+
+    template<class F>
+    std::string catch_write_error(F&& f, std::source_location location = std::source_location::current())
+    {
+        try {
+            f();
+        }
+        catch (const json_write_error& e) {
+            return e.what();
+        }
+        gbassert(false, location);
+        return {};
+    }
+
+    GB_TEST(json, json_format_compact_test)
+    {
+        json_value value = json_object{
+            { "a", json_array{ 1, -2, 3.5, "x", true, false, nullptr } },
+            { "b", json_object{} },
+            { "c", json_array{} },
+            { "d", 1.0 },
+            { "e", -0.0 },
+            { "f", 1e300 },
+            { "g", std::numeric_limits<std::uint64_t>::max() },
+        };
+        gbassert(format_json(value) == R"({"a":[1,-2,3.5,"x",true,false,null],"b":{},"c":[],"d":1.0,"e":-0.0,"f":1e+300,"g":18446744073709551615})");
+        gbassert(format_json(json_value{}) == "null");
+        gbassert(format_json(json_value("s\n")) == "\"s\\n\"");
+        gbassert(format_json(json_value(std::numeric_limits<std::int64_t>::min())) == "-9223372036854775808");
+    }
+
+    GB_TEST(json, json_format_pretty_test)
+    {
+        json_value value = json_object{ { "a", json_array{ 1, json_object{} } }, { "b", "x" } };
+        json_format pretty;
+        pretty.pretty = true;
+        gbassert(format_json(value, pretty) == "{\n  \"a\": [\n    1,\n    {}\n  ],\n  \"b\": \"x\"\n}");
+        pretty.indent = 4;
+        gbassert(format_json(value, pretty) == "{\n    \"a\": [\n        1,\n        {}\n    ],\n    \"b\": \"x\"\n}");
+        pretty.indent = 0;
+        gbassert(format_json(value, pretty) == "{\n\"a\": [\n1,\n{}\n],\n\"b\": \"x\"\n}");
+        pretty.indent = 2;
+        gbassert(format_json(json_value(json_array{}), pretty) == "[]");
+        gbassert(format_json(json_value(json_object{}), pretty) == "{}");
+        gbassert(format_json(json_value(7), pretty) == "7");
+    }
+
+    GB_TEST(json, json_format_double_test)
+    {
+        gbassert(format_json(json_value(0.1)) == "0.1");
+        gbassert(format_json(json_value(5e-324)) == "5e-324");
+        gbassert(format_json(json_value(1e16)) == "1e+16");
+        gbassert(format_json(json_value(123456789012345680.0)) == "123456789012345680.0");
+        gbassert(format_json(json_value(-2.0)) == "-2.0");
+        gbassert(format_json(json_value(std::numeric_limits<double>::max())) == "1.7976931348623157e+308");
+
+        std::mt19937_64 rng{ 0x5eed'0006'0000'0001ull };
+        for (int i = 0; i < 100'000; ++i) {
+            auto bits = rng();
+            auto d = std::bit_cast<double>(bits);
+            if (!std::isfinite(d))
+                continue;
+            auto text = format_json(json_value(d));
+            double back{};
+            auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), back);
+            gbassert(ec == std::errc{} && ptr == text.data() + text.size());
+            gbassert(std::bit_cast<std::uint64_t>(back) == bits);
+        }
+    }
+
+    GB_TEST(json, json_format_ascii_only_test)
+    {
+        json_value value = json_object{ { "\xC3\xA9", "\xF0\x9F\x98\x80 \xE2\x82\xAC" } };
+        json_format ascii;
+        ascii.ascii_only = true;
+        auto text = format_json(value, ascii);
+        gbassert(text == "{\"\\u00e9\":\"\\ud83d\\ude00 \\u20ac\"}");
+        for (unsigned char c : text)
+            gbassert(c < 0x80);
+        gbassert(format_json(value) == "{\"\xC3\xA9\":\"\xF0\x9F\x98\x80 \xE2\x82\xAC\"}");
+    }
+
+    GB_TEST(json, json_format_errors_test)
+    {
+        for (double bad : { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+                 -std::numeric_limits<double>::infinity() }) {
+            json_value value = json_object{ { "list", json_array{ 1, bad } } };
+            auto message = catch_write_error([&] { (void)format_json(value); });
+            gbassert(message.find("/list/1") != std::string::npos);
+        }
+
+        json_value bad_value = json_object{ { "k", "ok\xC0\xAF" } };
+        auto message = catch_write_error([&] { (void)format_json(bad_value); });
+        gbassert(message.find("/k") != std::string::npos);
+        gbassert(message.find("byte 2") != std::string::npos);
+
+        json_value bad_key = json_object{ { "outer", json_object{ { "\xFF", 1 } } } };
+        message = catch_write_error([&] { (void)format_json(bad_key); });
+        gbassert(message.find("/outer (key)") != std::string::npos);
+
+        json_format replace;
+        replace.invalid_utf8 = json_invalid_utf8::replace;
+        gbassert(format_json(bad_value, replace) == "{\"k\":\"ok\xEF\xBF\xBD\xEF\xBF\xBD\"}");
+        replace.ascii_only = true;
+        gbassert(format_json(bad_value, replace) == "{\"k\":\"ok\\ufffd\\ufffd\"}");
+
+        // append_json keeps existing content, and leaves it unchanged when writing fails
+        std::string out = "prefix ";
+        append_json(out, json_value(json_array{ 1 }));
+        gbassert(out == "prefix [1]");
+        must_throw<json_write_error>([&] { append_json(out, bad_value); });
+        gbassert(out == "prefix [1]");
+
+        std::ostringstream stream;
+        format_json(stream, json_value(json_object{ { "x", true } }));
+        gbassert(stream.str() == "{\"x\":true}");
     }
 }

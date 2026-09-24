@@ -62,6 +62,7 @@
 #include <expected>
 #include <initializer_list>
 #include <limits>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -654,5 +655,201 @@ namespace gb::yadro::container
     {
         pointer.push_back('/');
         pointer.append(std::to_string(index));
+    }
+
+    //-------------------------------------------------------------------------
+    // writer
+    //
+    // Compact output has no whitespace. Pretty output puts each member or element on its own
+    // line, writes "key": value, writes empty containers as [] and {}, and adds no trailing
+    // newline. Strings are escaped by append_json_string (json_parser.h). Doubles use the
+    // shortest round-trip form of std::to_chars, with ".0" appended when that form has no '.' or
+    // exponent, so a double always reads back as a double.
+    //-------------------------------------------------------------------------
+    struct json_format
+    {
+        bool pretty = false;
+        std::uint32_t indent = 2;
+        bool ascii_only = false;    // escape every code point above U+007F; non-BMP as surrogate pairs
+        json_invalid_utf8 invalid_utf8 = json_invalid_utf8::error;
+    };
+
+    // A value the writer cannot represent: a non-finite double, or invalid UTF-8 when
+    // json_format::invalid_utf8 is error. The message names the JSON pointer of the value.
+    struct json_write_error : std::runtime_error
+    {
+        using std::runtime_error::runtime_error;
+    };
+
+    namespace detail
+    {
+        class json_value_writer
+        {
+        public:
+            json_value_writer(std::string& out, const json_format& format) : _out(out), _format(format) {}
+
+            void write(const json_value& value, std::uint32_t level)
+            {
+                switch (value.kind()) {
+                case json_kind::null:
+                    _out.append("null");
+                    break;
+                case json_kind::boolean:
+                    _out.append(*value.get_if<bool>() ? "true" : "false");
+                    break;
+                case json_kind::int64:
+                    write_integer(*value.get_if<std::int64_t>());
+                    break;
+                case json_kind::uint64:
+                    write_integer(*value.get_if<std::uint64_t>());
+                    break;
+                case json_kind::number:
+                    write_double(*value.get_if<double>());
+                    break;
+                case json_kind::string:
+                    write_string(*value.get_if<std::string>(), false);
+                    break;
+                case json_kind::array:
+                    write_array(*value.get_if<json_array>(), level);
+                    break;
+                case json_kind::object:
+                    write_object(*value.get_if<json_object>(), level);
+                    break;
+                }
+            }
+
+        private:
+            struct path_entry
+            {
+                const std::string* key = nullptr;   // null for an array element
+                std::size_t index = 0;
+            };
+
+            template<class Integer>
+            void write_integer(Integer value)
+            {
+                char buffer[24];
+                auto [ptr, ec] = std::to_chars(buffer, buffer + sizeof buffer, value);
+                _out.append(buffer, ptr);
+            }
+
+            void write_double(double value)
+            {
+                if (!std::isfinite(value))
+                    throw json_write_error("JSON cannot represent NaN or infinity at " + pointer());
+                char buffer[32];
+                auto [ptr, ec] = std::to_chars(buffer, buffer + sizeof buffer, value);
+                std::string_view text{ buffer, static_cast<std::size_t>(ptr - buffer) };
+                _out.append(text);
+                if (text.find_first_of(".eE") == std::string_view::npos)
+                    _out.append(".0");
+            }
+
+            void write_string(std::string_view text, bool is_key)
+            {
+                auto result = append_json_string(_out, text, _format.ascii_only, _format.invalid_utf8);
+                if (!result.ok)
+                    throw json_write_error("JSON writer cannot represent invalid UTF-8 at byte " + std::to_string(result.invalid_offset)
+                        + " of the string at " + pointer() + (is_key ? " (key)" : ""));
+            }
+
+            void write_array(const json_array& array, std::uint32_t level)
+            {
+                if (array.empty()) {
+                    _out.append("[]");
+                    return;
+                }
+                _out.push_back('[');
+                _path.push_back({});
+                for (std::size_t i = 0; i < array.size(); ++i) {
+                    if (i != 0)
+                        _out.push_back(',');
+                    new_line(level + 1);
+                    _path.back().index = i;
+                    write(array[i], level + 1);
+                }
+                _path.pop_back();
+                new_line(level);
+                _out.push_back(']');
+            }
+
+            void write_object(const json_object& object, std::uint32_t level)
+            {
+                if (object.empty()) {
+                    _out.append("{}");
+                    return;
+                }
+                _out.push_back('{');
+                bool first = true;
+                for (auto& member : object) {
+                    if (!first)
+                        _out.push_back(',');
+                    first = false;
+                    new_line(level + 1);
+                    write_string(member.key(), true);
+                    _out.push_back(':');
+                    if (_format.pretty)
+                        _out.push_back(' ');
+                    _path.push_back({ &member.key(), 0 });
+                    write(member.value, level + 1);
+                    _path.pop_back();
+                }
+                new_line(level);
+                _out.push_back('}');
+            }
+
+            void new_line(std::uint32_t level)
+            {
+                if (!_format.pretty)
+                    return;
+                _out.push_back('\n');
+                _out.append(static_cast<std::size_t>(level) * _format.indent, ' ');
+            }
+
+            // the JSON pointer of the value being written; built only for error messages
+            [[nodiscard]] std::string pointer() const
+            {
+                std::string result;
+                for (auto& entry : _path) {
+                    if (entry.key)
+                        append_json_pointer_token(result, *entry.key);
+                    else
+                        append_json_pointer_index(result, entry.index);
+                }
+                return result.empty() ? std::string{ "\"\" (the root)" } : result;
+            }
+
+            std::string& _out;
+            const json_format& _format;
+            std::vector<path_entry> _path;
+        };
+    }
+
+    // Appends the JSON text of value to out. On json_write_error, out is left unchanged.
+    inline void append_json(std::string& out, const json_value& value, const json_format& format = {})
+    {
+        const auto original_size = out.size();
+        try {
+            detail::json_value_writer(out, format).write(value, 0);
+        }
+        catch (...) {
+            out.resize(original_size);
+            throw;
+        }
+    }
+
+    [[nodiscard]] inline std::string format_json(const json_value& value, const json_format& format = {})
+    {
+        std::string out;
+        append_json(out, value, format);
+        return out;
+    }
+
+    inline void format_json(std::ostream& out, const json_value& value, const json_format& format = {})
+    {
+        auto text = format_json(value, format);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!out)
+            throw std::runtime_error("Failed to write JSON stream");
     }
 }
