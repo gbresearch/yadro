@@ -2124,4 +2124,83 @@ unset multiplot)*";
         server.get();
 #endif
     }
+
+    GB_TEST(util, win_pipe_client_verifies_same_user_server)
+    {
+#if defined(GBWINDOWS)
+        // the test server runs in this process, so it matches this process's user and integrity
+        const auto own_integrity = token_integrity_rid(GetCurrentProcessToken());
+        gbassert(own_integrity.has_value());
+        gbassert(*own_integrity >= SECURITY_MANDATORY_LOW_RID);
+
+        const auto pipename = unique_test_pipe_name(L"verify_server");
+        auto server = std::async(std::launch::async, [&]
+            {
+                start_server(pipename, nullptr, std::tuple{ "ping", [] { return 5; } });
+            });
+
+        {
+            winpipe_client_t client(pipename, pipe_client_options{ .verify_server_user = true }, "same user client", 10);
+            gbassert(client.request<int>("ping").value() == 5);
+        }
+        {
+            winpipe_client_t client(pipename, pipe_client_options{ .expected_server_sid = current_process_user_sid(),
+                .min_server_integrity = *own_integrity }, "explicit sid client", 10);
+            gbassert(client.request<int>("ping").value() == 5);
+        }
+        gbassert(shutdown_server(pipename, 10));
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_rejects_unexpected_server)
+    {
+#if defined(GBWINDOWS)
+        const auto connect_error = [](const std::wstring& pipename, const pipe_client_options& options)
+            {
+                try
+                {
+                    winpipe_client_t client(pipename, options, "verifying client", 10);
+                }
+                catch (std::exception& e)
+                {
+                    return std::string{ e.what() };
+                }
+                return std::string{};
+            };
+
+        // a malformed expected SID is refused before any connection is attempted
+        gbassert(connect_error(L"\\\\.\\pipe\\yadro\\unused", pipe_client_options{ .expected_server_sid = L"not a sid" })
+            .find("invalid expected pipe server SID") != std::string::npos);
+
+        const auto pipename = unique_test_pipe_name(L"reject_server");
+        auto server = std::async(std::launch::async, [&]
+            {
+                start_server(pipename, nullptr, std::tuple{ "ping", [] { return 6; } });
+            });
+
+        const auto expected_name = pipe_name_for_error(pipename);
+        if (current_process_user_sid() != local_system_sid)
+        {
+            const auto error = connect_error(pipename, pipe_client_options{ .expected_server_sid = std::wstring{ local_system_sid } });
+            gbassert(error.find("identity check failed") != std::string::npos);
+            gbassert(error.find(expected_name) != std::string::npos);
+            gbassert(error.find("expected S-1-5-18") != std::string::npos);
+        }
+
+        // no ordinary process runs at protected-process integrity
+        const auto error = connect_error(pipename, pipe_client_options{ .min_server_integrity = SECURITY_MANDATORY_PROTECTED_PROCESS_RID });
+        gbassert(error.find("identity check failed") != std::string::npos);
+        gbassert(error.find(expected_name) != std::string::npos);
+        gbassert(error.find("below the required") != std::string::npos);
+
+        // the rejected connections left the server serving
+        {
+            winpipe_client_t client(pipename, pipe_client_options{ .verify_server_user = true }, "accepted client", 10);
+            gbassert(client.request<int>("ping").value() == 6);
+        }
+        gbassert(shutdown_server(pipename, 10));
+        server.get();
+#endif
+    }
 }

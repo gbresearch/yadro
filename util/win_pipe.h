@@ -57,6 +57,8 @@
 #include <optional>
 #include <condition_variable>
 #include <string_view>
+#include <expected>
+#include <format>
 
 #ifdef GBWINDOWS
 #include <sddl.h>
@@ -95,6 +97,9 @@ namespace gb::yadro::util
     // elevated. A same-user process at the same integrity level can already tamper with the
     // server directly, so Windows offers no boundary to defend there. Admit every other account
     // with pipe_client_ace(), which grants pipe_client_access and so leaves the right out.
+    // A client that must not talk to such an instance can verify the server process after it
+    // connects: pipe_client_options::verify_server_user, expected_server_sid and
+    // min_server_integrity (e.g. SECURITY_MANDATORY_HIGH_RID for an elevated server).
     //
     // Clients connect with identification-level SQOS by default (pipe_client_options), so a
     // server, or a rogue instance as described above, can learn who connected but cannot
@@ -151,6 +156,39 @@ namespace gb::yadro::util
         // cannot act as it. Set this to restore the Windows default (full impersonation) for a
         // trusted server that accesses resources on the client's behalf.
         bool allow_impersonation = false;
+
+        // Opt-in server identity verification. Once connected, and before sending anything, the
+        // client looks up the process that created the pipe instance (GetNamedPipeServerProcessId)
+        // and checks its token: TokenUser against the expected SID and TokenIntegrityLevel against
+        // the minimum. On a mismatch, or if the process or its token cannot be queried, the client
+        // closes the pipe and its constructor throws an error naming the pipe.
+        //
+        // Check that the server runs as the user of the client's own process
+        bool verify_server_user = false;
+        // Check that the server runs as this account instead, a SID string or SDDL alias (e.g.
+        // L"S-1-5-18" or L"SY"); setting it implies the user check. Validated before connecting.
+        std::wstring expected_server_sid;
+        // Lowest acceptable mandatory integrity RID of the server process, e.g.
+        // SECURITY_MANDATORY_HIGH_RID to refuse a medium-integrity instance of an elevated
+        // server's user. The default, SECURITY_MANDATORY_UNTRUSTED_RID, checks nothing.
+        DWORD min_server_integrity = SECURITY_MANDATORY_UNTRUSTED_RID;
+        //
+        // Limits of the check:
+        //  - It runs after the connection is made. By then the server end already holds the
+        //    client's identity at the SQOS level, so keep allow_impersonation off when relying on
+        //    it: an unverified server can identify the client but not act as it. No request data
+        //    reaches a server that fails the check.
+        //  - A failed check throws instead of retrying; a caller that expects a rogue instance
+        //    among genuine ones can retry, since each connection lands on some listening instance.
+        //  - GetNamedPipeServerProcessId reports the process that created the instance, looked up
+        //    by process ID. If that process has exited while another holds the instance (an
+        //    inherited or duplicated handle), the ID can be reused by an unrelated process, which
+        //    is then the one checked. The same holds if the creator handed its handle on. Treat the
+        //    check as defense against a rogue instance created by a weaker process, not as proof
+        //    of who holds the server end.
+        //  - Opening the server's token needs TOKEN_QUERY under the token's DACL. That works for a
+        //    server of the client's own user (elevated or not), but a standard user usually cannot
+        //    query a LocalSystem or other account's server, and the check then fails closed.
     };
 
     // single-instance server
@@ -282,24 +320,53 @@ namespace gb::yadro::util
 
     inline constexpr std::wstring_view local_system_sid = L"S-1-5-18";
 
-    // SID of the user the process token belongs to (not an impersonation token), in string form
-    inline std::wstring current_process_user_sid()
+    // Variable-length token information such as TokenUser or TokenIntegrityLevel, or the error
+    inline std::expected<std::vector<std::byte>, DWORD> token_information(HANDLE token, TOKEN_INFORMATION_CLASS info_class)
     {
-        const auto token = GetCurrentProcessToken();
         DWORD size{};
-        if (GetTokenInformation(token, TokenUser, nullptr, 0, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-            throw util::exception_t("failed to query process token user size: ", GetLastError());
+        if (GetTokenInformation(token, info_class, nullptr, 0, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+            return std::unexpected{ GetLastError() };
 
         std::vector<std::byte> buffer(size);
-        if (!GetTokenInformation(token, TokenUser, buffer.data(), size, &size))
-            throw util::exception_t("failed to query process token user: ", GetLastError());
+        if (!GetTokenInformation(token, info_class, buffer.data(), size, &size))
+            return std::unexpected{ GetLastError() };
 
+        return buffer;
+    }
+
+    inline std::wstring sid_to_string(PSID sid)
+    {
         LPWSTR sid_string{};
-        if (!ConvertSidToStringSidW(reinterpret_cast<const TOKEN_USER*>(buffer.data())->User.Sid, &sid_string))
-            throw util::exception_t("failed to convert process user SID to string: ", GetLastError());
+        if (!ConvertSidToStringSidW(sid, &sid_string))
+            throw util::exception_t("failed to convert SID to string: ", GetLastError());
 
         std::unique_ptr<wchar_t, local_free_deleter> owned_sid_string{ sid_string };
         return std::wstring{ sid_string };
+    }
+
+    // SID of the user the process token belongs to (not an impersonation token), in string form
+    inline std::wstring current_process_user_sid()
+    {
+        const auto user = token_information(GetCurrentProcessToken(), TokenUser);
+        if (!user)
+            throw util::exception_t("failed to query process token user: ", user.error());
+
+        return sid_to_string(reinterpret_cast<const TOKEN_USER*>(user->data())->User.Sid);
+    }
+
+    // Mandatory integrity RID of a token, e.g. SECURITY_MANDATORY_MEDIUM_RID, or the error
+    inline std::expected<DWORD, DWORD> token_integrity_rid(HANDLE token)
+    {
+        const auto label = token_information(token, TokenIntegrityLevel);
+        if (!label)
+            return std::unexpected{ label.error() };
+
+        const auto sid = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(label->data())->Label.Sid;
+        const auto count = *GetSidSubAuthorityCount(sid);
+        if (count == 0)
+            return std::unexpected{ static_cast<DWORD>(ERROR_INVALID_SID) };
+
+        return *GetSidSubAuthority(sid, count - 1u);
     }
 
     // Protected DACL: GENERIC_ALL for the process user and LocalSystem, nothing for anyone else.
@@ -353,6 +420,82 @@ namespace gb::yadro::util
         std::unique_ptr<void, local_free_deleter> _descriptor;
         SECURITY_ATTRIBUTES _attributes{};
         SECURITY_ATTRIBUTES* _external = nullptr;
+    };
+
+    //----------------------------------------------------------------------------------------------
+    // Server identity requirements resolved from pipe_client_options before the client connects,
+    // so a malformed expected SID is reported without touching the pipe
+    struct pipe_server_verifier
+    {
+        explicit pipe_server_verifier(const pipe_client_options& options)
+            : _min_integrity(options.min_server_integrity)
+        {
+            if (!options.verify_server_user && options.expected_server_sid.empty())
+                return;
+
+            const auto sid_string = options.expected_server_sid.empty() ? current_process_user_sid() : options.expected_server_sid;
+            PSID sid{};
+            if (!ConvertStringSidToSidW(sid_string.c_str(), &sid))
+            {
+                const auto last_error = GetLastError();
+                throw util::exception_t(std::format("invalid expected pipe server SID \"{}\", error: {}", utf8_from_utf16(sid_string), last_error));
+            }
+            _expected_sid.reset(sid);
+        }
+
+        [[nodiscard]] bool enabled() const noexcept
+        {
+            return _expected_sid || _min_integrity != SECURITY_MANDATORY_UNTRUSTED_RID;
+        }
+
+        // Why the process serving this connected client pipe fails the requirements; empty when it
+        // meets them. See pipe_client_options for what the check can and cannot establish.
+        [[nodiscard]] std::string mismatch(HANDLE pipe) const
+        {
+            if (!enabled())
+                return {};
+
+            ULONG pid{};
+            if (!GetNamedPipeServerProcessId(pipe, &pid))
+                return std::format("cannot identify the server process, error: {}", GetLastError());
+
+            unique_win_handle process{ OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+            if (!process.valid())
+                return std::format("cannot open server process {}, error: {}", pid, GetLastError());
+
+            HANDLE raw_token{};
+            if (!OpenProcessToken(process, TOKEN_QUERY, &raw_token))
+                return std::format("cannot open the token of server process {}, error: {}", pid, GetLastError());
+            unique_win_handle token{ raw_token };
+
+            if (_expected_sid)
+            {
+                const auto user = token_information(token, TokenUser);
+                if (!user)
+                    return std::format("cannot query the user of server process {}, error: {}", pid, user.error());
+
+                const auto server_sid = reinterpret_cast<const TOKEN_USER*>(user->data())->User.Sid;
+                if (!EqualSid(server_sid, _expected_sid.get()))
+                    return std::format("server process {} runs as {}, expected {}", pid,
+                        utf8_from_utf16(sid_to_string(server_sid)), utf8_from_utf16(sid_to_string(_expected_sid.get())));
+            }
+
+            if (_min_integrity != SECURITY_MANDATORY_UNTRUSTED_RID)
+            {
+                const auto integrity = token_integrity_rid(token);
+                if (!integrity)
+                    return std::format("cannot query the integrity level of server process {}, error: {}", pid, integrity.error());
+
+                if (*integrity < _min_integrity)
+                    return std::format("server process {} integrity level {:#x} is below the required {:#x}", pid, *integrity, _min_integrity);
+            }
+
+            return {};
+        }
+
+    private:
+        std::unique_ptr<void, local_free_deleter> _expected_sid;
+        DWORD _min_integrity;
     };
 
     //----------------------------------------------------------------------------------------------
@@ -752,6 +895,7 @@ namespace gb::yadro::util
             std::chrono::duration<Rep, Period> timeout, unsigned connection_attempts, auto&&... log_args)
             : winpipe_base_t(timeout, std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
         {
+            const pipe_server_verifier verifier{ options };
             // Windows' default without SECURITY_SQOS_PRESENT is full impersonation
             const DWORD sqos_flags = options.allow_impersonation ? 0 : SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
             using namespace std::chrono_literals;
@@ -781,6 +925,16 @@ namespace gb::yadro::util
                 auto str_name = pipe_name_for_error(pipename);
                 auto error_string = util::to_string("\"", _client_name, "\": failed to open pipe: ", str_name, ": ", GetLastError());
                 log(error_string);
+                throw util::exception_t(error_string);
+            }
+
+            // opt-in, before anything is sent: see pipe_client_options for the limits of this check
+            if (auto reason = verifier.mismatch(_pipe); !reason.empty())
+            {
+                auto str_name = pipe_name_for_error(pipename);
+                auto error_string = util::to_string("\"", _client_name, "\": pipe server identity check failed: ", str_name, ": ", reason);
+                log(error_string);
+                _pipe.reset(); // close without the disconnect notification: nothing goes to this server
                 throw util::exception_t(error_string);
             }
 
