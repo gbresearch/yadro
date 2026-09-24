@@ -27,6 +27,10 @@
 //-----------------------------------------------------------------------------
 
 #include "../util/gbutil.h"
+#if defined(GBWINDOWS)
+#include <aclapi.h>
+#endif
+#include <map>
 #include <sstream>
 #include <string>
 #include <algorithm>
@@ -1744,6 +1748,378 @@ unset multiplot)*";
         gbassert(!failed);
         gbassert(failed.error().find("named failure") != std::string::npos);
         gbassert(client.request<int>("ok").value() == 3);
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+#if defined(GBWINDOWS)
+    struct pipe_dacl_t
+    {
+        bool is_protected = false;
+        std::map<std::wstring, ACCESS_MASK> allowed; // SID string -> access mask
+    };
+
+    // Reads the DACL of the pipe the handle refers to; every ACE must be an allow ACE
+    pipe_dacl_t read_pipe_dacl(HANDLE pipe)
+    {
+        PACL dacl{};
+        PSECURITY_DESCRIPTOR descriptor{};
+        gbassert(GetSecurityInfo(pipe, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, &dacl, nullptr, &descriptor) == ERROR_SUCCESS);
+        std::unique_ptr<void, local_free_deleter> owned_descriptor{ descriptor };
+        gbassert(dacl != nullptr);
+
+        SECURITY_DESCRIPTOR_CONTROL control{};
+        DWORD revision{};
+        gbassert(GetSecurityDescriptorControl(descriptor, &control, &revision));
+
+        pipe_dacl_t result;
+        result.is_protected = (control & SE_DACL_PROTECTED) != 0;
+        for (DWORD i = 0; i < dacl->AceCount; ++i)
+        {
+            void* ace{};
+            gbassert(GetAce(dacl, i, &ace));
+            gbassert(static_cast<const ACE_HEADER*>(ace)->AceType == ACCESS_ALLOWED_ACE_TYPE);
+            auto allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+
+            LPWSTR sid_string{};
+            gbassert(ConvertSidToStringSidW(reinterpret_cast<PSID>(&allowed->SidStart), &sid_string));
+            std::unique_ptr<wchar_t, local_free_deleter> owned_sid{ sid_string };
+            gbassert(result.allowed.emplace(sid_string, allowed->Mask).second);
+        }
+        return result;
+    }
+
+    // what default_pipe_sddl() must produce once GA is mapped to the pipe's specific rights
+    std::map<std::wstring, ACCESS_MASK> expected_default_dacl()
+    {
+        return { { current_process_user_sid(), FILE_ALL_ACCESS }, { std::wstring{ local_system_sid }, FILE_ALL_ACCESS } };
+    }
+
+    std::wstring unique_test_pipe_name(std::wstring_view name)
+    {
+        return L"\\\\.\\pipe\\yadro\\" + std::wstring{ name } + L"_" + std::to_wstring(GetCurrentProcessId());
+    }
+
+    unique_win_handle create_squatting_pipe(const std::wstring& pipename, DWORD extra_open_mode = 0)
+    {
+        return unique_win_handle{ CreateNamedPipe(pipename.c_str(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | extra_open_mode, pipe_mode,
+            PIPE_UNLIMITED_INSTANCES, pipe_chunk_size, pipe_chunk_size, NMPWAIT_WAIT_FOREVER, nullptr) };
+    }
+#endif
+
+    GB_TEST(util, win_pipe_default_dacl_admits_only_process_user_and_system)
+    {
+#if defined(GBWINDOWS)
+        const auto user_sid = current_process_user_sid();
+        gbassert(user_sid.starts_with(L"S-1-"));
+        if (user_sid == local_system_sid)
+            gbassert(default_pipe_sddl() == L"D:P(A;;GA;;;S-1-5-18)");
+        else
+            gbassert(default_pipe_sddl() == L"D:P(A;;GA;;;" + user_sid + L")(A;;GA;;;SY)");
+
+        pipe_listener_t listener{ unique_test_pipe_name(L"default_dacl") };
+        listener.prepare();
+        const auto dacl = read_pipe_dacl(listener.listening_handle());
+
+        // protected: nothing inherited, and exactly the process user and LocalSystem, each with
+        // full access (GA is stored mapped to the pipe's specific rights)
+        gbassert(dacl.is_protected);
+        gbassert(dacl.allowed == expected_default_dacl());
+#endif
+    }
+
+    GB_TEST(util, win_pipe_server_instances_carry_default_security)
+    {
+#if defined(GBWINDOWS)
+        // the DACL and reject-remote flag reach the instance a real client talks to, for both the
+        // single-instance server and start_server
+        const auto single_name = unique_test_pipe_name(L"single_security");
+        auto single = std::async(std::launch::async, [&]
+            {
+                winpipe_server_t server(single_name);
+                DWORD flags{};
+                gbassert(GetNamedPipeInfo(server.get_handle(), &flags, nullptr, nullptr, nullptr));
+                gbassert((flags & PIPE_REJECT_REMOTE_CLIENTS) != 0);
+                server.run([] { return 1; });
+            });
+
+        {
+            winpipe_client_t client(single_name, "single security client", 10);
+            const auto dacl = read_pipe_dacl(client.get_handle());
+            gbassert(dacl.is_protected);
+            gbassert(dacl.allowed == expected_default_dacl());
+            gbassert(client.request<int>(0).value() == 1);
+        }
+        single.get();
+
+        const auto multi_name = unique_test_pipe_name(L"multi_security");
+        auto multi = std::async(std::launch::async, [&]
+            {
+                start_server(multi_name, nullptr, std::tuple{ "ping", [] { return 2; } });
+            });
+
+        {
+            winpipe_client_t client(multi_name, "multi security client", 10);
+            const auto dacl = read_pipe_dacl(client.get_handle());
+            gbassert(dacl.is_protected);
+            gbassert(dacl.allowed == expected_default_dacl());
+            gbassert(client.request<int>("ping").value() == 2);
+        }
+        gbassert(shutdown_server(multi_name, 10));
+        multi.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_rejects_remote_clients_unless_allowed)
+    {
+#if defined(GBWINDOWS)
+        // GetNamedPipeInfo reports PIPE_REJECT_REMOTE_CLIENTS in its flags (observed on Windows 10
+        // and 11, not documented). The documented-structure alternative is
+        // NtQueryInformationFile(FilePipeLocalInformation): NamedPipeType carries
+        // FILE_PIPE_REJECT_REMOTE_CLIENTS (2).
+        pipe_listener_t local_only{ unique_test_pipe_name(L"reject_remote") };
+        local_only.prepare();
+        DWORD flags{};
+        gbassert(GetNamedPipeInfo(local_only.listening_handle(), &flags, nullptr, nullptr, nullptr));
+        gbassert((flags & PIPE_SERVER_END) != 0);
+        gbassert((flags & PIPE_REJECT_REMOTE_CLIENTS) != 0);
+
+        pipe_listener_t remote_allowed{ unique_test_pipe_name(L"allow_remote"), pipe_server_options{ .allow_remote_clients = true } };
+        remote_allowed.prepare();
+        flags = 0;
+        gbassert(GetNamedPipeInfo(remote_allowed.listening_handle(), &flags, nullptr, nullptr, nullptr));
+        gbassert((flags & PIPE_SERVER_END) != 0);
+        gbassert((flags & PIPE_REJECT_REMOTE_CLIENTS) == 0);
+#endif
+    }
+
+    GB_TEST(util, win_pipe_applies_caller_sddl)
+    {
+#if defined(GBWINDOWS)
+        const auto user_sid = current_process_user_sid();
+        const auto pipename = unique_test_pipe_name(L"caller_sddl");
+        // the process user plus read access for Builtin Users, and no LocalSystem
+        const pipe_server_options options{ .sddl = L"D:P(A;;GA;;;" + user_sid + L")(A;;GR;;;BU)" };
+
+        auto server = std::async(std::launch::async, [&]
+            {
+                start_server(pipename, options, nullptr, std::tuple{ "ping", [] { return 3; } });
+            });
+
+        {
+            winpipe_client_t client(pipename, "caller sddl client", 10);
+            const auto dacl = read_pipe_dacl(client.get_handle());
+            gbassert(dacl.is_protected);
+            std::map<std::wstring, ACCESS_MASK> expected{ { user_sid, FILE_ALL_ACCESS }, { L"S-1-5-32-545", FILE_GENERIC_READ } };
+            gbassert(dacl.allowed == expected);
+            gbassert(client.request<int>("ping").value() == 3);
+        }
+        gbassert(shutdown_server(pipename, 10));
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_applies_caller_security_attributes)
+    {
+#if defined(GBWINDOWS)
+        const auto user_sid = current_process_user_sid();
+        const auto sddl = L"D:P(A;;GA;;;" + user_sid + L")";
+        PSECURITY_DESCRIPTOR descriptor{};
+        gbassert(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr));
+        std::unique_ptr<void, local_free_deleter> owned_descriptor{ descriptor };
+        SECURITY_ATTRIBUTES attributes{ sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE };
+
+        pipe_listener_t listener{ unique_test_pipe_name(L"caller_attributes"), pipe_server_options{ .security_attributes = &attributes } };
+        listener.prepare();
+        const auto dacl = read_pipe_dacl(listener.listening_handle());
+        gbassert(dacl.is_protected);
+        std::map<std::wstring, ACCESS_MASK> expected{ { user_sid, FILE_ALL_ACCESS } };
+        gbassert(dacl.allowed == expected);
+
+        // ambiguous and malformed security are rejected before any pipe is created
+        must_throw([&] { pipe_listener_t{ L"\\\\.\\pipe\\yadro\\unused", pipe_server_options{ .sddl = sddl, .security_attributes = &attributes } }; });
+        must_throw([] { pipe_listener_t{ L"\\\\.\\pipe\\yadro\\unused", pipe_server_options{ .sddl = L"D:P(not sddl" } }; });
+#endif
+    }
+
+    GB_TEST(util, win_pipe_first_instance_refuses_squatted_name)
+    {
+#if defined(GBWINDOWS)
+        const auto pipename = unique_test_pipe_name(L"squatted");
+        auto squatter = create_squatting_pipe(pipename);
+        gbassert(squatter.valid());
+
+        try
+        {
+            pipe_listener_t{ pipename }.prepare();
+            gbassert(false);
+        }
+        catch (std::exception& e)
+        {
+            gbassert(std::string{ e.what() }.find("already in use") != std::string::npos);
+        }
+
+        // the single-instance server refuses too, before it would block waiting for a client
+        must_throw([&] { winpipe_server_t server(pipename); });
+
+        // opting out joins the existing pipe (possible here only because the squatter is this
+        // process's user, whose default DACL grants us FILE_CREATE_PIPE_INSTANCE)
+        pipe_listener_t joined{ pipename, pipe_server_options{ .first_pipe_instance = false } };
+        joined.prepare();
+        gbassert(joined.listening_handle() != INVALID_HANDLE_VALUE);
+#endif
+    }
+
+    GB_TEST(util, win_pipe_listener_keeps_name_between_connections)
+    {
+#if defined(GBWINDOWS)
+        const auto pipename = unique_test_pipe_name(L"keep_name");
+        pipe_listener_t listener{ pipename };
+        listener.prepare(); // the instance exists before the client looks for it
+
+        unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        gbassert(shutdown_event.valid());
+
+        std::optional<winpipe_server_t> server;
+        auto accepted = std::async(std::launch::async, [&]
+            {
+                if (auto connected = winpipe_server_t::accept(listener, shutdown_event.get(), nullptr))
+                    server.emplace(std::move(*connected));
+            });
+
+        unique_win_handle client{ CreateFileW(pipename.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr) };
+        if (!client.valid())
+            SetEvent(shutdown_event.get()); // don't leave accept waiting for a client that never comes
+        accepted.get();
+        gbassert(client.valid());
+        gbassert(server.has_value());
+        // accept published the next instance before returning the connection
+        gbassert(listener.listening_handle() != INVALID_HANDLE_VALUE);
+
+        // the connection ends, but the listening instance keeps the pipe alive, so nobody can
+        // re-create it with a descriptor of their own (FILE_FLAG_FIRST_PIPE_INSTANCE fails while
+        // any instance exists). Adding an instance to the live pipe is governed by the DACL
+        // instead: see win_pipe_client_ace_admits_use_but_not_instances.
+        server.reset();
+        client.reset();
+        auto squatter = create_squatting_pipe(pipename, FILE_FLAG_FIRST_PIPE_INSTANCE);
+        gbassert(!squatter.valid());
+        gbassert(GetLastError() == ERROR_ACCESS_DENIED);
+
+        // once the server lets go, the name is free again: the check above was meaningful
+        listener.close();
+        squatter = create_squatting_pipe(pipename, FILE_FLAG_FIRST_PIPE_INSTANCE);
+        gbassert(squatter.valid());
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_permits_identification_only)
+    {
+#if defined(GBWINDOWS)
+        // a server (or a process squatting on the name) can identify the client but not act as it
+        const auto pipename = unique_test_pipe_name(L"client_sqos");
+        auto server = std::async(std::launch::async, [&]
+            {
+                winpipe_server_t server(pipename);
+                server.run([&]
+                    {
+                        if (!ImpersonateNamedPipeClient(server.get_handle()))
+                            return -1;
+
+                        auto level = -2;
+                        HANDLE raw_token{};
+                        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &raw_token))
+                        {
+                            unique_win_handle token{ raw_token };
+                            SECURITY_IMPERSONATION_LEVEL token_level{};
+                            DWORD size{};
+                            if (GetTokenInformation(token, TokenImpersonationLevel, &token_level, sizeof(token_level), &size))
+                                level = static_cast<int>(token_level);
+                        }
+                        RevertToSelf();
+                        return level;
+                    });
+            });
+
+        winpipe_client_t client(pipename, "sqos client", 10);
+        gbassert(client.request<int>(0).value() == static_cast<int>(SecurityIdentification));
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_can_opt_into_impersonation)
+    {
+#if defined(GBWINDOWS)
+        const auto pipename = unique_test_pipe_name(L"client_impersonation");
+        auto server = std::async(std::launch::async, [&]
+            {
+                winpipe_server_t server(pipename);
+                server.run([&]
+                    {
+                        if (!ImpersonateNamedPipeClient(server.get_handle()))
+                            return -1;
+
+                        auto level = -2;
+                        HANDLE raw_token{};
+                        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &raw_token))
+                        {
+                            unique_win_handle token{ raw_token };
+                            SECURITY_IMPERSONATION_LEVEL token_level{};
+                            DWORD size{};
+                            if (GetTokenInformation(token, TokenImpersonationLevel, &token_level, sizeof(token_level), &size))
+                                level = static_cast<int>(token_level);
+                        }
+                        RevertToSelf();
+                        return level;
+                    });
+            });
+
+        winpipe_client_t client(pipename, pipe_client_options{ .allow_impersonation = true }, "impersonation client", 10);
+        gbassert(client.request<int>(0).value() == static_cast<int>(SecurityImpersonation));
+        client.disconnect();
+        server.get();
+#endif
+    }
+
+    GB_TEST(util, win_pipe_client_ace_admits_use_but_not_instances)
+    {
+#if defined(GBWINDOWS)
+        gbassert(pipe_client_access == 0x12018bu);
+        gbassert((pipe_client_access & FILE_CREATE_PIPE_INSTANCE) == 0);
+        // why clients must not be granted GW: on a pipe it maps to FILE_GENERIC_WRITE, which
+        // includes FILE_CREATE_PIPE_INSTANCE (FILE_APPEND_DATA)
+        gbassert((FILE_GENERIC_WRITE & FILE_CREATE_PIPE_INSTANCE) != 0);
+        gbassert(pipe_client_ace(L"IU") == L"(A;;0x12018b;;;IU)");
+
+        // The process user stands in for a client account: the DACL grants it only the client
+        // rights. Creating the pipe needs no right on it, so the single-instance server starts,
+        // and winpipe_client_t can connect and call, but adding a rogue instance to the live pipe
+        // is refused.
+        const auto user_sid = current_process_user_sid();
+        const auto pipename = unique_test_pipe_name(L"client_ace");
+        const pipe_server_options options{ .sddl = L"D:P" + pipe_client_ace(user_sid) };
+        auto server = std::async(std::launch::async, [&]
+            {
+                winpipe_server_t server(pipename, options);
+                server.run([] { return 4; });
+            });
+
+        winpipe_client_t client(pipename, "client ace client", 10);
+        const auto dacl = read_pipe_dacl(client.get_handle());
+        std::map<std::wstring, ACCESS_MASK> expected{ { user_sid, pipe_client_access } };
+        gbassert(dacl.allowed == expected);
+
+        auto rogue = create_squatting_pipe(pipename); // no FILE_FLAG_FIRST_PIPE_INSTANCE
+        const auto rogue_error = GetLastError();
+        gbassert(!rogue.valid());
+        gbassert(rogue_error == ERROR_ACCESS_DENIED);
+
+        gbassert(client.request<int>(0).value() == 4);
         client.disconnect();
         server.get();
 #endif
