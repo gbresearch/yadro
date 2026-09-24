@@ -157,6 +157,7 @@
     <ClInclude Include="..\simulator\signal.h" />
     <ClInclude Include="..\simulator\simulator.h" />
     <ClInclude Include="..\simulator\task.h" />
+    <ClInclude Include="..\util\durable_file.h" />
     <ClInclude Include="..\util\file_mutex.h" />
     <ClInclude Include="..\util\gberror.h" />
     <ClInclude Include="..\util\gblog.h" />
@@ -171,6 +172,7 @@
     <ClInclude Include="..\util\hybrid_mutex.h" />
     <ClInclude Include="..\util\misc.h" />
     <ClInclude Include="..\util\named_resource_lock.h" />
+    <ClInclude Include="..\util\sha256.h" />
     <ClInclude Include="..\util\string_util.h" />
     <ClInclude Include="..\util\time_util.h" />
     <ClInclude Include="..\util\traits.h" />
