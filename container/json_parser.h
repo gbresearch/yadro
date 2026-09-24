@@ -42,13 +42,18 @@
 //-----------------------------------------------------------------------------
 
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <istream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 
 #if defined(GB_YADRO_ENABLE_AXE_JSON)
 #   if __has_include(<axe.h>)
@@ -387,6 +392,443 @@ namespace gb::yadro::container
         flush();
         out.push_back('"');
         return {};
+    }
+
+    //-------------------------------------------------------------------------
+    // front end
+    //
+    // Structure. AXE combinators match the tokens: literals, numbers, and string characters,
+    // where an unescaped character is axe::r_utf8() minus '"', '\\' and U+0000..U+001F. Objects
+    // and arrays are matched by one hand-written, AXE-compatible structural rule, and a plain
+    // dispatcher chooses the token rule from the next byte. This keeps the recursion at three
+    // small frames per nesting level (container -> value -> depth wrapper); a grammar written
+    // entirely in AXE combinators needs roughly ten times the stack per level in a Debug build.
+    //
+    // Depth. The structural rule is wrapped in axe::r_depth_limit_t, held as a member of the
+    // per-call parser and invoked directly by the dispatcher only when the next byte is '{' or
+    // '['. The depth therefore counts simultaneously open containers exactly: a root scalar has
+    // depth 0, [] has depth 1, and opening container max_depth + 1 throws depth_exceeded at its
+    // bracket. The wrapper keys its count on its own address, so it must never be copied per
+    // call or embedded in an AXE composite: AXE composites before c602171 returned their
+    // sub-rules by value from r_binary_fn_t::get(), which silently reset such a nested limit.
+    // max_depth levels must fit the stack of the parsing thread.
+    //
+    // Strings. A view passed to the handler points into the input when the string has no
+    // escapes, and into a reused scratch buffer otherwise; it is valid only during the call.
+    // \uXXXX surrogate pairs are combined; a lone surrogate throws lone_surrogate.
+    //
+    // Numbers. Integers become int_value (negative) or uint_value (non-negative) when they fit;
+    // otherwise big_integers decides between number_out_of_range and the double conversion.
+    // Doubles are converted by std::from_chars and are correctly rounded. A value that rounds to
+    // infinity throws number_out_of_range; a non-zero value that rounds to zero becomes a zero
+    // with the token's sign (classified from the token, never from from_chars' output).
+    //
+    // Errors. The front end throws json_parse_error for its own errors and rethrows a
+    // handler's json_handler_error as json_parse_error at the triggering token. Every other
+    // exception thrown by a handler propagates unchanged.
+    //-------------------------------------------------------------------------
+    namespace detail
+    {
+        // Decimal exponent of the first non-zero significant digit of a JSON number token,
+        // saturated to +/-2^30. A token whose digits are all zero returns 0.
+        [[nodiscard]] inline long long json_lead_exponent(std::string_view token) noexcept
+        {
+            constexpr long long limit = 1LL << 30;
+            std::size_t k = 0;
+            if (k < token.size() && token[k] == '-')
+                ++k;
+            const auto int_start = k;
+            while (k < token.size() && token[k] >= '0' && token[k] <= '9')
+                ++k;
+            const auto int_digits = token.substr(int_start, k - int_start);
+            std::string_view fraction_digits;
+            if (k < token.size() && token[k] == '.') {
+                const auto start = ++k;
+                while (k < token.size() && token[k] >= '0' && token[k] <= '9')
+                    ++k;
+                fraction_digits = token.substr(start, k - start);
+            }
+            long long exponent = 0;
+            if (k < token.size() && (token[k] == 'e' || token[k] == 'E')) {
+                ++k;
+                bool negative = false;
+                if (k < token.size() && (token[k] == '+' || token[k] == '-'))
+                    negative = token[k++] == '-';
+                for (; k < token.size(); ++k) {
+                    if (exponent < limit)
+                        exponent = exponent * 10 + (token[k] - '0');
+                }
+                exponent = std::min(exponent, limit);
+                if (negative)
+                    exponent = -exponent;
+            }
+            if (auto first = int_digits.find_first_not_of('0'); first != std::string_view::npos)
+                return exponent + static_cast<long long>(int_digits.size() - 1 - first);
+            if (auto first = fraction_digits.find_first_not_of('0'); first != std::string_view::npos)
+                return exponent - static_cast<long long>(first + 1);
+            return 0;
+        }
+
+#if GB_YADRO_JSON_PARSER_HAS_AXE
+        // The grammar factories bring the AXE operators into block scope. This namespace also
+        // declares unrelated operator templates (the matrix operators), and unqualified lookup
+        // from here would otherwise find those first; checking their constraints against an AXE
+        // rule is a hard error.
+        //
+        // Each grammar is one expression of prvalues. AXE operators that mix a literal and a rule
+        // keep an lvalue rule operand by reference, so a rule built from named locals would
+        // dangle once the factory returns.
+#define GB_YADRO_JSON_AXE_OPERATORS \
+            using axe::operator&; using axe::operator|; using axe::operator-; \
+            using axe::operator*; using axe::operator~; using axe::operator+
+
+        inline auto make_json_string_chars()
+        {
+            GB_YADRO_JSON_AXE_OPERATORS;
+            return *((axe::r_utf8() - '"' - '\\' - axe::r_any('\x00', '\x1f'))
+                | '\\' & (axe::r_any("\"\\/bfnrt") | 'u' & axe::r_many(axe::r_hex(), 4, 4)));
+        }
+
+        inline auto make_json_number()
+        {
+            GB_YADRO_JSON_AXE_OPERATORS;
+            using namespace axe::shortcuts;
+            return ~axe::r_lit('-') & (axe::r_lit('0') | axe::r_any("123456789") & *_d)
+                & ~(axe::r_lit('.') & +_d) & ~(axe::r_any("eE") & ~axe::r_any("+-") & +_d);
+        }
+#undef GB_YADRO_JSON_AXE_OPERATORS
+
+        template<json_handler H>
+        class json_front_end
+        {
+            using iterator = const char*;
+
+            struct structural_rule
+            {
+                json_front_end* self;
+
+                axe::result<iterator> operator()(iterator i, iterator) const
+                {
+                    return axe::result<iterator>(true, self->container(i));
+                }
+            };
+
+        public:
+            json_front_end(std::string_view text, H& handler, const json_parse_options& options)
+                : _text(text), _begin(text.data()), _end(text.data() + text.size()), _handler(handler), _options(options),
+                _limited(structural_rule{ this }, options.max_depth)
+            {}
+
+            json_front_end(const json_front_end&) = delete;
+            json_front_end& operator=(const json_front_end&) = delete;
+
+            void parse()
+            {
+                if (_options.max_input_bytes != 0 && _text.size() > _options.max_input_bytes)
+                    throw_parse_error(_text, _options.max_input_bytes, json_parse_errc::input_too_large,
+                        "JSON input exceeds the maximum size of " + std::to_string(_options.max_input_bytes) + " bytes");
+                try {
+                    auto i = skip_ws(_begin);
+                    if (i == _end)
+                        fail_end();
+                    if (!_options.allow_scalar_root && *i != '{' && *i != '[')
+                        fail(i, json_parse_errc::syntax, "the JSON document root must be an object or an array");
+                    i = skip_ws(value(i));
+                    if (i != _end)
+                        fail(i, json_parse_errc::syntax, "unexpected content after the JSON document");
+                }
+                catch (const axe::depth_limit_exceeded<iterator>& e) {
+                    throw_parse_error(_text, static_cast<std::size_t>(e.position() - _begin), json_parse_errc::depth_exceeded,
+                        "JSON nesting exceeds the maximum depth of " + std::to_string(_options.max_depth));
+                }
+            }
+
+        private:
+            [[nodiscard]] iterator skip_ws(iterator i) const noexcept
+            {
+                while (i != _end && (*i == ' ' || *i == '\t' || *i == '\n' || *i == '\r'))
+                    ++i;
+                return i;
+            }
+
+            [[noreturn]] void fail(iterator at, json_parse_errc code, std::string_view message) const
+            {
+                throw_parse_error(_text, static_cast<std::size_t>(at - _begin), code, message);
+            }
+
+            [[noreturn]] void fail_end() const
+            {
+                fail(_end, json_parse_errc::unexpected_end, "unexpected end of JSON input");
+            }
+
+            template<class F>
+            void emit(iterator at, F&& event)
+            {
+                try {
+                    event();
+                }
+                catch (const json_handler_error& e) {
+                    fail(at, e.code, e.what());
+                }
+            }
+
+            // i != _end; returns the position after the value
+            iterator value(iterator i)
+            {
+                switch (*i) {
+                case '{':
+                case '[':
+                    return _limited(i, _end).position;
+                case '"': {
+                    auto [text, next] = string(i);
+                    emit(i, [&] { _handler.string_value(text); });
+                    return next;
+                }
+                case 't':
+                    return literal(i, _true, "true", [&] { _handler.bool_value(true); });
+                case 'f':
+                    return literal(i, _false, "false", [&] { _handler.bool_value(false); });
+                case 'n':
+                    return literal(i, _null, "null", [&] { _handler.null_value(); });
+                default:
+                    if (*i == '-' || (*i >= '0' && *i <= '9'))
+                        return number(i);
+                    fail(i, json_parse_errc::syntax, "unexpected character where a JSON value is expected");
+                }
+            }
+
+            // *i is '{' or '['; returns the position after the closing bracket
+            iterator container(iterator i)
+            {
+                const bool is_object = *i == '{';
+                const char close = is_object ? '}' : ']';
+                emit(i, [&] { is_object ? _handler.begin_object() : _handler.begin_array(); });
+                i = skip_ws(i + 1);
+                if (i == _end)
+                    fail_end();
+                if (*i == close) {
+                    emit(i, [&] { is_object ? _handler.end_object() : _handler.end_array(); });
+                    return i + 1;
+                }
+                for (;;) {
+                    if (is_object) {
+                        if (*i != '"')
+                            fail(i, json_parse_errc::syntax, "expected a JSON object key");
+                        auto [key, next] = string(i);
+                        emit(i, [&] { _handler.key(key); });
+                        i = skip_ws(next);
+                        if (i == _end)
+                            fail_end();
+                        if (*i != ':')
+                            fail(i, json_parse_errc::syntax, "expected ':' after a JSON object key");
+                        i = skip_ws(i + 1);
+                        if (i == _end)
+                            fail_end();
+                    }
+                    i = skip_ws(value(i));
+                    if (i == _end)
+                        fail_end();
+                    if (*i == ',') {
+                        i = skip_ws(i + 1);
+                        if (i == _end)
+                            fail_end();
+                        continue;
+                    }
+                    if (*i == close) {
+                        emit(i, [&] { is_object ? _handler.end_object() : _handler.end_array(); });
+                        return i + 1;
+                    }
+                    fail(i, json_parse_errc::syntax, is_object ? "expected ',' or '}' in a JSON object" : "expected ',' or ']' in a JSON array");
+                }
+            }
+
+            // *i is '"'; returns the decoded text and the position after the closing quote
+            std::pair<std::string_view, iterator> string(iterator i)
+            {
+                auto run_end = _chars(i + 1, _end).position;
+                if (run_end == _end)
+                    fail_end();
+                if (*run_end != '"')
+                    classify_string_failure(run_end);
+                return { decode(i + 1, run_end), run_end + 1 };
+            }
+
+            [[noreturn]] void classify_string_failure(iterator p) const
+            {
+                const auto c = static_cast<unsigned char>(*p);
+                if (c < 0x20)
+                    fail(p, json_parse_errc::control_character, "unescaped control character in a JSON string");
+                if (c >= 0x80)
+                    fail(p, json_parse_errc::invalid_utf8, "invalid UTF-8 in a JSON string");
+                if (c == '\\') {
+                    if (p + 1 == _end)
+                        fail_end();
+                    if (p[1] == 'u') {
+                        auto q = p + 2;
+                        int digits = 0;
+                        while (digits < 4 && q != _end && std::isxdigit(static_cast<unsigned char>(*q))) {
+                            ++q;
+                            ++digits;
+                        }
+                        if (digits < 4 && q == _end)
+                            fail_end();
+                    }
+                    fail(p, json_parse_errc::invalid_escape, "invalid escape in a JSON string");
+                }
+                throw std::logic_error("JSON front end: unclassified string failure");
+            }
+
+            [[nodiscard]] static unsigned hex4(iterator p) noexcept
+            {
+                unsigned value = 0;
+                for (int k = 0; k < 4; ++k) {
+                    const auto c = p[k];
+                    value <<= 4;
+                    if (c >= '0' && c <= '9')
+                        value |= static_cast<unsigned>(c - '0');
+                    else if (c >= 'a' && c <= 'f')
+                        value |= static_cast<unsigned>(c - 'a' + 10);
+                    else
+                        value |= static_cast<unsigned>(c - 'A' + 10);
+                }
+                return value;
+            }
+
+            // [first, last) was matched by the string grammar, so every escape is well formed
+            std::string_view decode(iterator first, iterator last)
+            {
+                auto backslash = static_cast<iterator>(std::memchr(first, '\\', static_cast<std::size_t>(last - first)));
+                if (!backslash)
+                    return { first, static_cast<std::size_t>(last - first) };
+
+                _scratch.clear();
+                auto run = first;
+                auto p = backslash;
+                for (;;) {
+                    _scratch.append(run, p);
+                    switch (p[1]) {
+                    case '"': _scratch.push_back('"'); p += 2; break;
+                    case '\\': _scratch.push_back('\\'); p += 2; break;
+                    case '/': _scratch.push_back('/'); p += 2; break;
+                    case 'b': _scratch.push_back('\b'); p += 2; break;
+                    case 'f': _scratch.push_back('\f'); p += 2; break;
+                    case 'n': _scratch.push_back('\n'); p += 2; break;
+                    case 'r': _scratch.push_back('\r'); p += 2; break;
+                    case 't': _scratch.push_back('\t'); p += 2; break;
+                    default: {
+                        auto unit = hex4(p + 2);
+                        if (unit >= 0xD800 && unit <= 0xDBFF) {
+                            if (last - p < 12 || p[6] != '\\' || p[7] != 'u')
+                                fail(p, json_parse_errc::lone_surrogate, "unpaired UTF-16 high surrogate escape in a JSON string");
+                            auto low = hex4(p + 8);
+                            if (low < 0xDC00 || low > 0xDFFF)
+                                fail(p, json_parse_errc::lone_surrogate, "unpaired UTF-16 high surrogate escape in a JSON string");
+                            append_utf8(static_cast<char32_t>(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)), _scratch);
+                            p += 12;
+                        }
+                        else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+                            fail(p, json_parse_errc::lone_surrogate, "unpaired UTF-16 low surrogate escape in a JSON string");
+                        }
+                        else {
+                            append_utf8(static_cast<char32_t>(unit), _scratch);
+                            p += 6;
+                        }
+                        break;
+                    }
+                    }
+                    run = p;
+                    p = static_cast<iterator>(std::memchr(run, '\\', static_cast<std::size_t>(last - run)));
+                    if (!p) {
+                        _scratch.append(run, last);
+                        return _scratch;
+                    }
+                }
+            }
+
+            iterator number(iterator i)
+            {
+                auto matched = _number(i, _end);
+                if (!matched.matched)
+                    fail(*i == '-' ? i + 1 : i, json_parse_errc::syntax, "invalid JSON number");
+                const auto last = matched.position;
+                const std::string_view token{ i, static_cast<std::size_t>(last - i) };
+
+                if (token.find_first_of(".eE") == std::string_view::npos) {
+                    if (token.front() == '-') {
+                        std::int64_t value{};
+                        if (auto [ptr, ec] = std::from_chars(i, last, value); ec == std::errc{} && ptr == last) {
+                            emit(i, [&] { _handler.int_value(value); });
+                            return last;
+                        }
+                    }
+                    else {
+                        std::uint64_t value{};
+                        if (auto [ptr, ec] = std::from_chars(i, last, value); ec == std::errc{} && ptr == last) {
+                            emit(i, [&] { _handler.uint_value(value); });
+                            return last;
+                        }
+                    }
+                    if (_options.big_integers == json_big_integer_policy::error)
+                        fail(i, json_parse_errc::number_out_of_range, "JSON integer is outside the int64 and uint64 ranges");
+                }
+
+                double value{};
+                auto [ptr, ec] = std::from_chars(i, last, value, std::chars_format::general);
+                if (ec == std::errc::result_out_of_range) {
+                    if (json_lead_exponent(token) >= 0)
+                        fail(i, json_parse_errc::number_out_of_range, "JSON number is outside the double range");
+                    value = token.front() == '-' ? -0.0 : 0.0;
+                }
+                else if (ec != std::errc{} || ptr != last) {
+                    throw std::logic_error("JSON front end: number token rejected by from_chars");
+                }
+                emit(i, [&] { _handler.double_value(value); });
+                return last;
+            }
+
+            template<class Rule, class F>
+            iterator literal(iterator i, const Rule& rule, std::string_view word, F&& event)
+            {
+                if (auto matched = rule(i, _end); matched.matched) {
+                    emit(i, event);
+                    return matched.position;
+                }
+                const auto remaining = static_cast<std::size_t>(_end - i);
+                if (remaining < word.size() && word.starts_with(std::string_view{ i, remaining }))
+                    fail(i, json_parse_errc::unexpected_end, "unexpected end of JSON input in a literal");
+                fail(i, json_parse_errc::syntax, "invalid JSON literal");
+            }
+
+            std::string_view _text;
+            iterator _begin;
+            iterator _end;
+            H& _handler;
+            const json_parse_options& _options;
+            std::string _scratch;
+            decltype(make_json_string_chars()) _chars = make_json_string_chars();
+            decltype(make_json_number()) _number = make_json_number();
+            decltype(axe::r_lit("true")) _true = axe::r_lit("true");
+            decltype(axe::r_lit("false")) _false = axe::r_lit("false");
+            decltype(axe::r_lit("null")) _null = axe::r_lit("null");
+            axe::r_depth_limit_t<structural_rule> _limited;
+        };
+#endif
+    }
+
+    // Parses text and reports it to handler as a sequence of events. Throws json_parse_error on
+    // malformed input; see the front end notes above for the exact rules.
+    template<json_handler H>
+    void parse_json_events(std::string_view text, H& handler, const json_parse_options& options = {})
+    {
+#if GB_YADRO_JSON_PARSER_HAS_AXE
+        detail::json_front_end<H> front_end(text, handler, options);
+        front_end.parse();
+#else
+        (void)text;
+        (void)handler;
+        (void)options;
+        throw std::logic_error("JSON parsing requires opt-in AXE support: define GB_YADRO_ENABLE_AXE_JSON and add AXE include directory");
+#endif
     }
 }
 
