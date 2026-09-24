@@ -26,7 +26,521 @@
 //  DEALINGS IN THE SOFTWARE.
 //-----------------------------------------------------------------------------
 
-
 #pragma once
 
+//-----------------------------------------------------------------------------
+// json.h: a general JSON value (json_value), its writer, JSON pointer lookup, and parsing
+// through the shared front end in json_parser.h.
+//
+// Invariants
+// - An integer that fits in int64 is always stored as int64, whether parsed or constructed from
+//   any integral type; the uint64 kind holds only values above INT64_MAX. Round trips therefore
+//   preserve the kind exactly.
+// - json_object keeps member order and never holds two members with the same key. Lookup is a
+//   linear scan, which suits the small objects of protocol messages.
+//
+// Equality
+// - Arrays compare element by element in order; objects compare as sets of members (order is
+//   ignored).
+// - Numbers compare by exact mathematical value across int64, uint64 and double: 1 == 1.0 and
+//   -0.0 == 0, while 9007199254740993 != 9007199254740992.0 because an integer and a double are
+//   never compared through a lossy conversion. NaN is unequal to everything.
+// - Other kinds are equal only to the same kind.
+//
+// Recursion
+// - Copying, destroying, comparing and writing a value recurse over its nesting. Parsed values
+//   are bounded by json_parse_options::max_depth; callers that build values programmatically own
+//   the depth of what they build.
+//-----------------------------------------------------------------------------
+
 #include "json_parser.h"
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <initializer_list>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+namespace gb::yadro::container
+{
+    enum class json_kind
+    {
+        null,
+        boolean,
+        int64,
+        uint64,
+        number,     // double
+        string,
+        array,
+        object
+    };
+
+    struct json_access_error
+    {
+        enum class reason
+        {
+            type_mismatch,
+            out_of_range
+        };
+
+        reason code = reason::type_mismatch;
+        json_kind actual = json_kind::null;
+    };
+
+    // (1) forward declarations; json_array only names the vector specialization here
+    class json_value;
+    class json_member;
+    using json_array = std::vector<json_value>;
+
+    // (2) json_object is defined while json_member is still incomplete. A vector may be
+    // instantiated with an incomplete element type as long as none of its members is used before
+    // the type is complete, so json_object declares every special member and defines no function
+    // body here: all of them are defined in (5).
+    class json_object
+    {
+    public:
+        using iterator = json_member*;
+        using const_iterator = const json_member*;
+
+        json_object() noexcept;
+        json_object(const json_object&);
+        json_object(json_object&&) noexcept;
+        json_object& operator=(const json_object&);
+        json_object& operator=(json_object&&) noexcept;
+        ~json_object();
+
+        // throws std::invalid_argument on a duplicate key
+        json_object(std::initializer_list<std::pair<std::string, json_value>> members);
+
+        [[nodiscard]] std::size_t size() const noexcept;
+        [[nodiscard]] bool empty() const noexcept;
+        void reserve(std::size_t capacity);
+
+        // member order; keys are read-only, values are mutable through the non-const iterators
+        [[nodiscard]] iterator begin() noexcept;
+        [[nodiscard]] iterator end() noexcept;
+        [[nodiscard]] const_iterator begin() const noexcept;
+        [[nodiscard]] const_iterator end() const noexcept;
+
+        [[nodiscard]] json_value* find(std::string_view key) noexcept;
+        [[nodiscard]] const json_value* find(std::string_view key) const noexcept;
+        [[nodiscard]] bool contains(std::string_view key) const noexcept;
+
+        // inserts at the end unless the key exists; returns the member's value and whether it was
+        // inserted. The pointer is invalidated by the next insertion.
+        std::pair<json_value*, bool> insert(std::string key, json_value value);
+        // replaces the value of an existing key in place, or inserts at the end
+        json_value& insert_or_assign(std::string key, json_value value);
+        // removes the member and keeps the order of the others
+        bool erase(std::string_view key);
+
+    private:
+        friend class json_value_builder;
+        friend bool json_objects_equal(const json_object& a, const json_object& b);
+
+        std::vector<json_member> _members;
+    };
+
+    // (3) json_value: every alternative of the variant is now a complete class type
+    // (std::vector<json_value> is complete although json_value is not). All special members are
+    // declared here and defined in (5).
+    class json_value
+    {
+    public:
+        json_value() noexcept;
+        json_value(const json_value&);
+        json_value(json_value&&) noexcept;
+        json_value& operator=(const json_value&);
+        json_value& operator=(json_value&&) noexcept;
+        ~json_value();
+
+        json_value(std::nullptr_t) noexcept;
+        json_value(bool value) noexcept;
+
+        // any integer type except bool and the character types; canonicalized as described above
+        template<std::integral T>
+            requires (!std::same_as<T, bool> && !std::same_as<T, char> && !std::same_as<T, wchar_t>
+                && !std::same_as<T, char8_t> && !std::same_as<T, char16_t> && !std::same_as<T, char32_t>)
+        json_value(T value) noexcept;
+
+        json_value(double value) noexcept;
+        json_value(float value) noexcept;
+        json_value(std::string value) noexcept;
+        json_value(std::string_view value);
+        json_value(const char* value);
+        json_value(json_array value) noexcept;
+        json_value(json_object value) noexcept;
+
+        [[nodiscard]] json_kind kind() const noexcept;
+        [[nodiscard]] bool is_null() const noexcept;
+        [[nodiscard]] bool is_bool() const noexcept;
+        [[nodiscard]] bool is_integer() const noexcept;    // int64 or uint64
+        [[nodiscard]] bool is_number() const noexcept;     // int64, uint64 or double
+        [[nodiscard]] bool is_string() const noexcept;
+        [[nodiscard]] bool is_array() const noexcept;
+        [[nodiscard]] bool is_object() const noexcept;
+
+        // exact kind match: T is bool, std::int64_t, std::uint64_t, double, std::string, json_array
+        // or json_object
+        template<class T>
+        [[nodiscard]] T* get_if() noexcept;
+        template<class T>
+        [[nodiscard]] const T* get_if() const noexcept;
+
+        [[nodiscard]] std::expected<bool, json_access_error> as_bool() const noexcept;
+        // int64 only; a uint64 value is out_of_range and a double is a type_mismatch, even when integral
+        [[nodiscard]] std::expected<std::int64_t, json_access_error> as_int64() const noexcept;
+        // uint64, or a non-negative int64
+        [[nodiscard]] std::expected<std::uint64_t, json_access_error> as_uint64() const noexcept;
+        // any number; integers convert to the nearest double
+        [[nodiscard]] std::expected<double, json_access_error> as_double() const noexcept;
+        [[nodiscard]] std::expected<std::string_view, json_access_error> as_string() const noexcept;
+        [[nodiscard]] std::expected<const json_array*, json_access_error> as_array() const noexcept;
+        [[nodiscard]] std::expected<json_array*, json_access_error> as_array() noexcept;
+        [[nodiscard]] std::expected<const json_object*, json_access_error> as_object() const noexcept;
+        [[nodiscard]] std::expected<json_object*, json_access_error> as_object() noexcept;
+
+        // structural equality (see the header notes); not noexcept because comparing large
+        // objects allocates
+        friend bool operator==(const json_value& a, const json_value& b);
+
+    private:
+        using storage = std::variant<std::nullptr_t, bool, std::int64_t, std::uint64_t, double, std::string,
+            json_array, json_object>;
+
+        [[nodiscard]] json_access_error mismatch() const noexcept;
+
+        storage _value;
+    };
+
+    // (4) json_member holds a complete json_value
+    class json_member
+    {
+    public:
+        [[nodiscard]] const std::string& key() const noexcept { return _key; }
+
+        json_value value;
+
+    private:
+        friend class json_object;
+        friend class json_value_builder;
+
+        json_member(std::string key, json_value member_value) : value(std::move(member_value)), _key(std::move(key)) {}
+
+        std::string _key;
+    };
+
+    //-------------------------------------------------------------------------
+    // (5) definitions, now that json_object, json_value and json_member are complete
+    //-------------------------------------------------------------------------
+    inline json_object::json_object() noexcept = default;
+    inline json_object::json_object(const json_object&) = default;
+    inline json_object::json_object(json_object&&) noexcept = default;
+    inline json_object& json_object::operator=(const json_object&) = default;
+    inline json_object& json_object::operator=(json_object&&) noexcept = default;
+    inline json_object::~json_object() = default;
+
+    inline json_object::json_object(std::initializer_list<std::pair<std::string, json_value>> members)
+    {
+        _members.reserve(members.size());
+        for (auto& [key, value] : members) {
+            if (!insert(key, value).second)
+                throw std::invalid_argument("duplicate JSON object key: " + key);
+        }
+    }
+
+    inline std::size_t json_object::size() const noexcept { return _members.size(); }
+    inline bool json_object::empty() const noexcept { return _members.empty(); }
+    inline void json_object::reserve(std::size_t capacity) { _members.reserve(capacity); }
+    inline json_object::iterator json_object::begin() noexcept { return _members.data(); }
+    inline json_object::iterator json_object::end() noexcept { return _members.data() + _members.size(); }
+    inline json_object::const_iterator json_object::begin() const noexcept { return _members.data(); }
+    inline json_object::const_iterator json_object::end() const noexcept { return _members.data() + _members.size(); }
+
+    inline json_value* json_object::find(std::string_view key) noexcept
+    {
+        for (auto& member : _members)
+            if (member._key == key)
+                return &member.value;
+        return nullptr;
+    }
+
+    inline const json_value* json_object::find(std::string_view key) const noexcept
+    {
+        for (auto& member : _members)
+            if (member._key == key)
+                return &member.value;
+        return nullptr;
+    }
+
+    inline bool json_object::contains(std::string_view key) const noexcept
+    {
+        return find(key) != nullptr;
+    }
+
+    inline std::pair<json_value*, bool> json_object::insert(std::string key, json_value value)
+    {
+        if (auto* existing = find(key))
+            return { existing, false };
+        _members.push_back(json_member(std::move(key), std::move(value)));
+        return { &_members.back().value, true };
+    }
+
+    inline json_value& json_object::insert_or_assign(std::string key, json_value value)
+    {
+        if (auto* existing = find(key)) {
+            *existing = std::move(value);
+            return *existing;
+        }
+        _members.push_back(json_member(std::move(key), std::move(value)));
+        return _members.back().value;
+    }
+
+    inline bool json_object::erase(std::string_view key)
+    {
+        auto it = std::find_if(_members.begin(), _members.end(), [&](const json_member& m) { return m._key == key; });
+        if (it == _members.end())
+            return false;
+        _members.erase(it);
+        return true;
+    }
+
+    inline json_value::json_value() noexcept = default;
+    inline json_value::json_value(const json_value&) = default;
+    inline json_value::json_value(json_value&&) noexcept = default;
+    inline json_value& json_value::operator=(const json_value&) = default;
+    inline json_value& json_value::operator=(json_value&&) noexcept = default;
+    inline json_value::~json_value() = default;
+
+    inline json_value::json_value(std::nullptr_t) noexcept {}
+    inline json_value::json_value(bool value) noexcept : _value(std::in_place_type<bool>, value) {}
+
+    template<std::integral T>
+        requires (!std::same_as<T, bool> && !std::same_as<T, char> && !std::same_as<T, wchar_t>
+            && !std::same_as<T, char8_t> && !std::same_as<T, char16_t> && !std::same_as<T, char32_t>)
+    inline json_value::json_value(T value) noexcept
+    {
+        if constexpr (std::is_signed_v<T>) {
+            _value.template emplace<std::int64_t>(static_cast<std::int64_t>(value));
+        }
+        else {
+            const auto u = static_cast<std::uint64_t>(value);
+            if (u <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                _value.template emplace<std::int64_t>(static_cast<std::int64_t>(u));
+            else
+                _value.template emplace<std::uint64_t>(u);
+        }
+    }
+
+    inline json_value::json_value(double value) noexcept : _value(std::in_place_type<double>, value) {}
+    inline json_value::json_value(float value) noexcept : _value(std::in_place_type<double>, static_cast<double>(value)) {}
+    inline json_value::json_value(std::string value) noexcept : _value(std::in_place_type<std::string>, std::move(value)) {}
+    inline json_value::json_value(std::string_view value) : _value(std::in_place_type<std::string>, value) {}
+    inline json_value::json_value(const char* value) : _value(std::in_place_type<std::string>, value) {}
+    inline json_value::json_value(json_array value) noexcept : _value(std::in_place_type<json_array>, std::move(value)) {}
+    inline json_value::json_value(json_object value) noexcept : _value(std::in_place_type<json_object>, std::move(value)) {}
+
+    inline json_kind json_value::kind() const noexcept { return static_cast<json_kind>(_value.index()); }
+    inline bool json_value::is_null() const noexcept { return kind() == json_kind::null; }
+    inline bool json_value::is_bool() const noexcept { return kind() == json_kind::boolean; }
+    inline bool json_value::is_integer() const noexcept { return kind() == json_kind::int64 || kind() == json_kind::uint64; }
+    inline bool json_value::is_number() const noexcept { return is_integer() || kind() == json_kind::number; }
+    inline bool json_value::is_string() const noexcept { return kind() == json_kind::string; }
+    inline bool json_value::is_array() const noexcept { return kind() == json_kind::array; }
+    inline bool json_value::is_object() const noexcept { return kind() == json_kind::object; }
+
+    namespace detail
+    {
+        template<class T>
+        inline constexpr bool is_json_alternative = std::same_as<T, bool> || std::same_as<T, std::int64_t>
+            || std::same_as<T, std::uint64_t> || std::same_as<T, double> || std::same_as<T, std::string>
+            || std::same_as<T, json_array> || std::same_as<T, json_object>;
+    }
+
+    template<class T>
+    inline T* json_value::get_if() noexcept
+    {
+        static_assert(detail::is_json_alternative<T>, "json_value::get_if: T must be one of the stored kinds");
+        return std::get_if<T>(&_value);
+    }
+
+    template<class T>
+    inline const T* json_value::get_if() const noexcept
+    {
+        static_assert(detail::is_json_alternative<T>, "json_value::get_if: T must be one of the stored kinds");
+        return std::get_if<T>(&_value);
+    }
+
+    inline json_access_error json_value::mismatch() const noexcept
+    {
+        return { json_access_error::reason::type_mismatch, kind() };
+    }
+
+    inline std::expected<bool, json_access_error> json_value::as_bool() const noexcept
+    {
+        if (auto* b = std::get_if<bool>(&_value))
+            return *b;
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<std::int64_t, json_access_error> json_value::as_int64() const noexcept
+    {
+        if (auto* i = std::get_if<std::int64_t>(&_value))
+            return *i;
+        if (std::holds_alternative<std::uint64_t>(_value))
+            return std::unexpected(json_access_error{ json_access_error::reason::out_of_range, json_kind::uint64 });
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<std::uint64_t, json_access_error> json_value::as_uint64() const noexcept
+    {
+        if (auto* u = std::get_if<std::uint64_t>(&_value))
+            return *u;
+        if (auto* i = std::get_if<std::int64_t>(&_value)) {
+            if (*i >= 0)
+                return static_cast<std::uint64_t>(*i);
+            return std::unexpected(json_access_error{ json_access_error::reason::out_of_range, json_kind::int64 });
+        }
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<double, json_access_error> json_value::as_double() const noexcept
+    {
+        if (auto* d = std::get_if<double>(&_value))
+            return *d;
+        if (auto* i = std::get_if<std::int64_t>(&_value))
+            return static_cast<double>(*i);
+        if (auto* u = std::get_if<std::uint64_t>(&_value))
+            return static_cast<double>(*u);
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<std::string_view, json_access_error> json_value::as_string() const noexcept
+    {
+        if (auto* s = std::get_if<std::string>(&_value))
+            return std::string_view{ *s };
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<const json_array*, json_access_error> json_value::as_array() const noexcept
+    {
+        if (auto* a = std::get_if<json_array>(&_value))
+            return a;
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<json_array*, json_access_error> json_value::as_array() noexcept
+    {
+        if (auto* a = std::get_if<json_array>(&_value))
+            return a;
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<const json_object*, json_access_error> json_value::as_object() const noexcept
+    {
+        if (auto* o = std::get_if<json_object>(&_value))
+            return o;
+        return std::unexpected(mismatch());
+    }
+
+    inline std::expected<json_object*, json_access_error> json_value::as_object() noexcept
+    {
+        if (auto* o = std::get_if<json_object>(&_value))
+            return o;
+        return std::unexpected(mismatch());
+    }
+
+    //-------------------------------------------------------------------------
+    // equality
+    //-------------------------------------------------------------------------
+    namespace detail
+    {
+        // exact comparisons: the double must be finite, integral and inside the integer's range
+        [[nodiscard]] inline bool json_equals(std::int64_t i, double d) noexcept
+        {
+            if (!std::isfinite(d) || std::trunc(d) != d || d < -9223372036854775808.0 || d >= 9223372036854775808.0)
+                return false;
+            return static_cast<std::int64_t>(d) == i;
+        }
+
+        [[nodiscard]] inline bool json_equals(std::uint64_t u, double d) noexcept
+        {
+            if (!std::isfinite(d) || std::trunc(d) != d || d < 0.0 || d >= 18446744073709551616.0)
+                return false;
+            return static_cast<std::uint64_t>(d) == u;
+        }
+
+        [[nodiscard]] inline bool json_equals(std::int64_t i, std::uint64_t u) noexcept
+        {
+            return i >= 0 && static_cast<std::uint64_t>(i) == u;
+        }
+    }
+
+    inline bool json_objects_equal(const json_object& a, const json_object& b)
+    {
+        if (a._members.size() != b._members.size())
+            return false;
+        if (a._members.size() <= 16) {
+            for (auto& member : a._members) {
+                auto* other = b.find(member.key());
+                if (!other || !(member.value == *other))
+                    return false;
+            }
+            return true;
+        }
+        auto sorted = [](const json_object& o) {
+            std::vector<const json_member*> members;
+            members.reserve(o._members.size());
+            for (auto& member : o._members)
+                members.push_back(&member);
+            std::sort(members.begin(), members.end(), [](const json_member* x, const json_member* y) { return x->key() < y->key(); });
+            return members;
+        };
+        auto sa = sorted(a);
+        auto sb = sorted(b);
+        for (std::size_t i = 0; i < sa.size(); ++i)
+            if (sa[i]->key() != sb[i]->key() || !(sa[i]->value == sb[i]->value))
+                return false;
+        return true;
+    }
+
+    inline bool operator==(const json_value& a, const json_value& b)
+    {
+        return std::visit([&](const auto& x) -> bool {
+            using X = std::decay_t<decltype(x)>;
+            return std::visit([&](const auto& y) -> bool {
+                using Y = std::decay_t<decltype(y)>;
+                if constexpr (std::is_same_v<X, Y>) {
+                    if constexpr (std::is_same_v<X, json_object>)
+                        return json_objects_equal(x, y);
+                    else if constexpr (std::is_same_v<X, std::nullptr_t>)
+                        return true;
+                    else
+                        return x == y;
+                }
+                else if constexpr (std::is_same_v<X, std::int64_t> && std::is_same_v<Y, std::uint64_t>)
+                    return detail::json_equals(x, y);
+                else if constexpr (std::is_same_v<X, std::uint64_t> && std::is_same_v<Y, std::int64_t>)
+                    return detail::json_equals(y, x);
+                else if constexpr ((std::is_same_v<X, std::int64_t> || std::is_same_v<X, std::uint64_t>) && std::is_same_v<Y, double>)
+                    return detail::json_equals(x, y);
+                else if constexpr (std::is_same_v<X, double> && (std::is_same_v<Y, std::int64_t> || std::is_same_v<Y, std::uint64_t>))
+                    return detail::json_equals(y, x);
+                else
+                    return false;
+            }, b._value);
+        }, a._value);
+    }
+
+    static_assert(std::is_nothrow_move_constructible_v<json_value>);
+    static_assert(std::is_nothrow_move_constructible_v<json_object>);
+    static_assert(std::is_copy_constructible_v<json_value>);
+}

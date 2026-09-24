@@ -52,6 +52,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace
@@ -1099,5 +1101,173 @@ namespace
             gbassert(error3.code == json_parse_errc::input_too_large);
             gbassert(error3.offset == 3);
         }
+    }
+
+    //-------------------------------------------------------------------------
+    // json_value
+    //-------------------------------------------------------------------------
+
+    GB_TEST(json, json_value_layout_test)
+    {
+        json_value v = json_array{ json_object{ { "k", 1 } } };
+        auto w = v;
+        gbassert(w == v);
+        auto moved = std::move(w);
+        gbassert(moved == v);
+        static_assert(std::is_nothrow_move_constructible_v<json_value>);
+        static_assert(std::is_nothrow_move_constructible_v<json_object>);
+        static_assert(std::is_copy_constructible_v<json_value>);
+    }
+
+    GB_TEST(json, json_value_construction_test)
+    {
+        gbassert(json_value(std::uint64_t{ 5 }).kind() == json_kind::int64);
+        gbassert(json_value(std::uint64_t{ 1 } << 63).kind() == json_kind::uint64);
+        gbassert(json_value(std::numeric_limits<std::uint64_t>::max()).kind() == json_kind::uint64);
+        gbassert(json_value(std::uint64_t{ 9223372036854775807ull }).kind() == json_kind::int64);
+        gbassert(json_value(-1).kind() == json_kind::int64);
+        gbassert(json_value(std::uint8_t{ 7 }).kind() == json_kind::int64);
+        gbassert(json_value(short{ -3 }).kind() == json_kind::int64);
+        gbassert(json_value(1.5f).kind() == json_kind::number);
+        gbassert(json_value(2.5).kind() == json_kind::number);
+        gbassert(json_value("x").kind() == json_kind::string);
+        gbassert(json_value(std::string{ "x" }).kind() == json_kind::string);
+        gbassert(json_value(std::string_view{ "x" }).kind() == json_kind::string);
+        gbassert(json_value(true).kind() == json_kind::boolean);
+        gbassert(json_value(nullptr).kind() == json_kind::null);
+        gbassert(json_value().kind() == json_kind::null);
+        gbassert(json_value(json_array{}).kind() == json_kind::array);
+        gbassert(json_value(json_object{}).kind() == json_kind::object);
+
+        gbassert(json_value().is_null() && json_value(true).is_bool() && json_value(1).is_integer() && json_value(1).is_number());
+        gbassert(json_value(1.0).is_number() && !json_value(1.0).is_integer());
+        gbassert(json_value(std::uint64_t{ 1 } << 63).is_integer());
+        gbassert(json_value("s").is_string() && json_value(json_array{}).is_array() && json_value(json_object{}).is_object());
+    }
+
+    GB_TEST(json, json_object_order_and_uniqueness_test)
+    {
+        json_object object;
+        gbassert(object.empty());
+        gbassert(object.insert("b", 1).second);
+        gbassert(object.insert("a", 2).second);
+        gbassert(object.insert("c", 3).second);
+        auto [existing, inserted] = object.insert("a", 99);
+        gbassert(!inserted && *existing == json_value(2));
+        gbassert(object.size() == 3);
+
+        std::string order;
+        for (auto& member : object)
+            order += member.key();
+        gbassert(order == "bac");
+
+        object.insert_or_assign("a", 20);
+        order.clear();
+        for (auto& member : object)
+            order += member.key();
+        gbassert(order == "bac");
+        gbassert(*object.find("a") == json_value(20));
+        object.insert_or_assign("d", 4);
+        gbassert(object.size() == 4);
+
+        gbassert(object.erase("a"));
+        gbassert(!object.erase("missing"));
+        order.clear();
+        for (const auto& member : std::as_const(object))
+            order += member.key();
+        gbassert(order == "bcd");
+        gbassert(object.contains("b") && !object.contains("a"));
+        gbassert(object.find("missing") == nullptr);
+
+        for (auto& member : object)
+            member.value = json_value(0);
+        gbassert(*object.find("c") == json_value(0));
+
+        json_object literal{ { "x", 1 }, { "y", "two" } };
+        gbassert(literal.size() == 2 && *literal.find("y") == json_value("two"));
+        must_throw<std::invalid_argument>([] { json_object duplicate{ { "x", 1 }, { "x", 2 } }; });
+    }
+
+    GB_TEST(json, json_value_accessors_test)
+    {
+        auto u64max = json_value(std::numeric_limits<std::uint64_t>::max());
+        gbassert(!u64max.as_int64() && u64max.as_int64().error().code == json_access_error::reason::out_of_range);
+        gbassert(u64max.as_uint64() == std::numeric_limits<std::uint64_t>::max());
+
+        auto one = json_value(1.0);
+        gbassert(!one.as_int64());
+        gbassert(one.as_int64().error().code == json_access_error::reason::type_mismatch);
+        gbassert(one.as_int64().error().actual == json_kind::number);
+
+        gbassert(json_value(-1).as_uint64().error().code == json_access_error::reason::out_of_range);
+        gbassert(json_value(5).as_uint64() == 5u);
+        gbassert(json_value(5).as_int64() == 5);
+        gbassert(json_value(3).as_double() == 3.0);
+        gbassert(json_value(std::uint64_t{ 1 } << 63).as_double() == 9223372036854775808.0);
+        gbassert(!json_value("3").as_double());
+        gbassert(json_value(true).as_bool() == true);
+        gbassert(!json_value(1).as_bool());
+
+        json_value text("hello");
+        auto view = text.as_string();
+        gbassert(view && *view == "hello");
+        gbassert(view->data() == text.get_if<std::string>()->data());
+        gbassert(json_value(1).as_string().error().actual == json_kind::int64);
+
+        json_value array = json_array{ 1, 2 };
+        const json_value& const_array = array;
+        gbassert(const_array.as_array().value()->size() == 2);
+        array.as_array().value()->push_back(3);
+        gbassert(const_array.as_array().value()->size() == 3);
+        gbassert(!array.as_object());
+        gbassert(array.as_object().error().code == json_access_error::reason::type_mismatch);
+
+        json_value object = json_object{ { "k", 1 } };
+        object.as_object().value()->insert_or_assign("k", 2);
+        gbassert(*std::as_const(object).as_object().value()->find("k") == json_value(2));
+        gbassert(!object.as_array());
+
+        gbassert(json_value(1).get_if<double>() == nullptr);
+        gbassert(json_value(1).get_if<std::int64_t>() != nullptr);
+        gbassert(json_value(2.0).get_if<double>() != nullptr);
+    }
+
+    GB_TEST(json, json_value_equality_test)
+    {
+        gbassert(json_value(1) == json_value(1.0));
+        gbassert(json_value(-0.0) == json_value(0));
+        gbassert(json_value(0.0) == json_value(-0.0));
+        gbassert(json_value(std::uint64_t{ 1 } << 63) == json_value(9223372036854775808.0));
+        gbassert(json_value(std::int64_t{ 9007199254740993 }) != json_value(9007199254740992.0));
+        gbassert(json_value(-1) != json_value(std::numeric_limits<std::uint64_t>::max()));
+        gbassert(json_value(std::numeric_limits<std::int64_t>::min()) == json_value(-9223372036854775808.0));
+        gbassert(json_value(1) != json_value(1.5));
+        gbassert(json_value(1e300) != json_value(1));
+        auto nan = json_value(std::numeric_limits<double>::quiet_NaN());
+        gbassert(nan != nan);
+        gbassert(json_value(std::numeric_limits<double>::infinity()) != json_value(std::numeric_limits<std::uint64_t>::max()));
+        gbassert(json_value("1") != json_value(1));
+        gbassert(json_value() != json_value(false));
+        gbassert(json_value() == json_value(nullptr));
+        gbassert(json_value(json_array{ 1, 2 }) == json_value(json_array{ 1.0, 2 }));
+        gbassert(json_value(json_array{ 1, 2 }) != json_value(json_array{ 2, 1 }));
+        gbassert(json_value(json_array{ 1 }) != json_value(json_array{ 1, 1 }));
+
+        gbassert(json_value(json_object{ { "a", 1 }, { "b", 2 } }) == json_value(json_object{ { "b", 2 }, { "a", 1 } }));
+        gbassert(json_value(json_object{ { "a", 1 } }) != json_value(json_object{ { "b", 1 } }));
+        gbassert(json_value(json_object{ { "a", 1 } }) != json_value(json_object{ { "a", 1 }, { "b", 1 } }));
+
+        json_object forward, backward;
+        for (int i = 0; i < 40; ++i)
+            forward.insert("k" + std::to_string(i), i);
+        for (int i = 39; i >= 0; --i)
+            backward.insert("k" + std::to_string(i), i);
+        gbassert(json_value(forward) == json_value(backward));
+        backward.insert_or_assign("k17", 18);
+        gbassert(json_value(forward) != json_value(backward));
+
+        json_value nested_a = json_object{ { "x", json_array{ json_object{ { "y", 1 } } } } };
+        json_value nested_b = json_object{ { "x", json_array{ json_object{ { "y", 1.0 } } } } };
+        gbassert(nested_a == nested_b);
     }
 }
