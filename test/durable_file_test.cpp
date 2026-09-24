@@ -92,6 +92,24 @@ namespace
         return {};
     }
 
+    // how an atomic_replace_file call ended, and with which error code
+    enum class replace_outcome { replaced, not_committed, committed_not_durable };
+
+    template<class Fn>
+    std::pair<replace_outcome, std::error_code> replace_result(Fn&& fn)
+    {
+        try {
+            fn();
+        }
+        catch (const replace_not_durable_error& e) {
+            return { replace_outcome::committed_not_durable, e.data() };
+        }
+        catch (const file_io_error& e) {
+            return { replace_outcome::not_committed, e.data() };
+        }
+        return { replace_outcome::replaced, {} };
+    }
+
     //-------------------------------------------------------------------------
     // atomic_replace_file
     //-------------------------------------------------------------------------
@@ -240,7 +258,8 @@ namespace
         auto reader = open_for_read(file, FILE_SHARE_READ);
         gbassert(reader.valid());
 
-        auto code = file_io_error_code([&] { atomic_replace_file(file, "new"); });
+        auto [outcome, code] = replace_result([&] { atomic_replace_file(file, "new"); });
+        gbassert(outcome == replace_outcome::not_committed);
         gbassert(code.value() == ERROR_SHARING_VIOLATION);
         gbassert(read_handle(reader) == "old");
         gbassert(read_whole_file(file) == "old");
@@ -254,6 +273,44 @@ namespace
         atomic_replace_file(file, "new", { .sharing_retry_timeout = std::chrono::seconds{ 10 } });
         closer.join();
         gbassert(read_whole_file(file) == "new");
+        gbassert(count_temp_files(directory) == 0);
+        fs::remove_all(directory);
+    }
+
+    GB_TEST(durable_file, atomic_replace_flush_failure_after_rename_reports_commit)
+    {
+        auto directory = fresh_test_directory("flush_after_rename");
+        auto file = directory / "state.json";
+        write_whole_file(file, "old");
+
+        // the fallback rename commits, then the flush confirming it fails
+        auto reader = open_for_read(file, FILE_SHARE_READ | FILE_SHARE_DELETE);
+        gbassert(reader.valid());
+        detail::injected_commit_flush_error = ERROR_IO_DEVICE;
+        auto [outcome, code] = replace_result([&] { atomic_replace_file(file, "new"); });
+        gbassert(detail::injected_commit_flush_error == 0);
+        gbassert(outcome == replace_outcome::committed_not_durable);
+        gbassert(code.value() == ERROR_IO_DEVICE);
+        gbassert(read_whole_file(file) == "new"); // not "left as it was"
+        gbassert(count_temp_files(directory) == 0);
+        reader.reset();
+
+        // still a file_io_error for callers that do not care about the distinction
+        detail::injected_commit_flush_error = ERROR_IO_DEVICE;
+        reader = open_for_read(file, FILE_SHARE_READ | FILE_SHARE_DELETE);
+        gbassert(file_io_error_code([&] { atomic_replace_file(file, "newer"); }).value() == ERROR_IO_DEVICE);
+        gbassert(read_whole_file(file) == "newer");
+        reader.reset();
+
+        // repeating the replacement confirms it
+        gbassert(replace_result([&] { atomic_replace_file(file, "newer"); }).first == replace_outcome::replaced);
+        gbassert(read_whole_file(file) == "newer");
+
+        // MoveFileExW's own write-through confirms a plain replacement, so nothing is left to fail
+        detail::injected_commit_flush_error = ERROR_IO_DEVICE;
+        gbassert(replace_result([&] { atomic_replace_file(file, "plain"); }).first == replace_outcome::replaced);
+        detail::injected_commit_flush_error = 0;
+        gbassert(read_whole_file(file) == "plain");
         gbassert(count_temp_files(directory) == 0);
         fs::remove_all(directory);
     }

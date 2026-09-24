@@ -40,7 +40,10 @@
 //       size()/truncate_to() for torn-tail recovery.
 //
 // Errors are thrown as file_io_error (exception_t<std::error_code>); data() carries the OS
-// error: the Win32 error code on Windows (std::system_category), errno elsewhere.
+// error: the Win32 error code on Windows (std::system_category), errno elsewhere. The one
+// failure of atomic_replace_file that happens after its rename has committed (the flush that
+// confirms durability) is thrown as replace_not_durable_error, derived from file_io_error, so
+// callers can tell "old content kept" from "new content in place, durability unconfirmed".
 //
 // What the platform guarantees
 // ----------------------------
@@ -54,6 +57,9 @@
 //     on one volume, which NTFS logs as a single journaled metadata operation: after a crash the
 //     name refers to the old file or to the new file. Microsoft documents MOVEFILE_WRITE_THROUGH
 //     as not returning until the move is on disk.
+//   * The rename is the commit point. A flush that fails after it (the one after the fallback
+//     rename below, or MoveFileExW failing although the temp file is already gone) cannot be
+//     undone, so it is reported as replace_not_durable_error, not as an untouched target.
 //   * MoveFileExW fails with ERROR_ACCESS_DENIED whenever the target is open, even when every
 //     open handle allows FILE_SHARE_DELETE. In that case the rename is redone with
 //     SetFileInformationByHandle(FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
@@ -76,7 +82,8 @@
 //
 // POSIX (fallback, not exercised by Yadro's Windows test runs):
 //   * write temp, fsync(temp), rename(temp, target), fsync(directory). On macOS F_FULLFSYNC is
-//     used, since fsync there does not flush the drive cache.
+//     used, since fsync there does not flush the drive cache. rename is the commit point; a
+//     failed fsync(directory) after it is reported as replace_not_durable_error.
 //
 // Leftover temp files: a crash between creating and installing the temp file leaves
 // "<file name>.<pid>.<n>.tmp" next to the target. It is never mistaken for the target and can
@@ -117,6 +124,15 @@ namespace gb::yadro::util
     //-------------------------------------------------------------------------
     // I/O failure; data() is the OS error (Win32 error code on Windows, errno elsewhere)
     using file_io_error = exception_t<std::error_code>;
+
+    // atomic_replace_file got past the point of no return: the rename committed, so the target
+    // already holds the new content and the old content is gone, but confirming that the rename
+    // reached stable storage failed. After a crash the target may hold either version. Repeating
+    // the same atomic_replace_file is safe and, if it succeeds, confirms the new content.
+    struct replace_not_durable_error : file_io_error
+    {
+        using file_io_error::file_io_error;
+    };
 
     namespace detail
     {
@@ -171,12 +187,24 @@ namespace gb::yadro::util
             return { reinterpret_cast<const char*>(text.data()), text.size() };
         }
 
-        [[noreturn]] GB_YADRO_NOINLINE inline void throw_file_io_error(os_error code, std::string_view operation,
+        template<class Error = file_io_error>
+        [[noreturn]] GB_YADRO_NOINLINE void throw_file_io_error(os_error code, std::string_view operation,
             const std::filesystem::path& file)
         {
             std::error_code ec{ static_cast<int>(code), std::system_category() };
-            throw file_io_error(to_string(operation, " failed for \"", path_to_utf8(file), "\": ",
+            throw Error(to_string(operation, " failed for \"", path_to_utf8(file), "\": ",
                 ec.message(), " (", os_error_kind, ' ', code, ')'), ec);
+        }
+
+        // Test hook: when nonzero, the next post-rename durability confirmation made by
+        // atomic_replace_file on this thread reports this error instead of its real result.
+        inline thread_local os_error injected_commit_flush_error = 0;
+
+        [[nodiscard]] inline os_error commit_flush_result(os_error actual) noexcept
+        {
+            if (auto injected = std::exchange(injected_commit_flush_error, os_error{}))
+                return injected;
+            return actual;
         }
 
         [[noreturn]] GB_YADRO_NOINLINE inline void throw_file_usage_error(std::string_view message, std::errc code,
@@ -412,11 +440,13 @@ namespace gb::yadro::util
             return error == ERROR_SHARING_VIOLATION || error == ERROR_ACCESS_DENIED || error == ERROR_LOCK_VIOLATION;
         }
 
-        // renames temp over target (same directory) with POSIX semantics, which succeeds while
-        // the target is open with FILE_SHARE_DELETE, then flushes the renamed file
+        // Renames temp over target (same directory) with POSIX semantics, which succeeds while the
+        // target is open with FILE_SHARE_DELETE, then flushes the renamed file. Returns the rename's
+        // error, 0 once the rename has committed; flush_error then holds the flush's result.
         [[nodiscard]] inline os_error rename_replace_posix_semantics(const std::filesystem::path& temp,
-            const std::filesystem::path& target)
+            const std::filesystem::path& target, os_error& flush_error)
         {
+            flush_error = 0;
 #if defined(FILE_RENAME_FLAG_POSIX_SEMANTICS)
             unique_win_handle file{ CreateFileW(temp.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL, nullptr) };
@@ -435,12 +465,27 @@ namespace gb::yadro::util
 
             if (!SetFileInformationByHandle(file, FileRenameInfoEx, info, static_cast<DWORD>(buffer.size())))
                 return GetLastError();
-            return FlushFileBuffers(file) ? 0 : GetLastError();
+            // committed: from here on a failure means "replaced, durability unconfirmed"
+            flush_error = FlushFileBuffers(file) ? 0 : GetLastError();
+            return 0;
 #else
             (void)temp;
             (void)target;
             return ERROR_NOT_SUPPORTED;
 #endif
+        }
+
+        // after a failed MoveFileExW: whether the temp file is certainly gone, i.e. the rename
+        // itself happened and only the write-through flush that follows it failed
+        [[nodiscard]] inline bool temp_was_renamed(const std::filesystem::path& temp, os_error move_error) noexcept
+        {
+            // the temp missing *before* the move (deleted by someone else) is not a commit
+            if (move_error == ERROR_FILE_NOT_FOUND || move_error == ERROR_PATH_NOT_FOUND)
+                return false;
+            if (GetFileAttributesW(temp.c_str()) != INVALID_FILE_ATTRIBUTES)
+                return false;
+            auto error = GetLastError();
+            return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
         }
 #endif
 
@@ -495,7 +540,9 @@ namespace gb::yadro::util
             [[nodiscard]] auto handle() const noexcept { return _handle.get(); }
             [[nodiscard]] auto&& path() const noexcept { return _path; }
 
-            // makes the temp file durable and renames it over target
+            // Makes the temp file durable and renames it over target. Failures before the rename
+            // throw file_io_error with target untouched; a failure to confirm durability after
+            // the rename throws replace_not_durable_error.
             void install(const std::filesystem::path& target, std::chrono::milliseconds sharing_retry_timeout)
             {
 #if defined(GBWINDOWS)
@@ -506,16 +553,30 @@ namespace gb::yadro::util
 
                 auto deadline = std::chrono::steady_clock::now() + sharing_retry_timeout;
                 for (;;) {
-                    if (MoveFileExW(_path.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-                        break;
+                    if (MoveFileExW(_path.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                        _installed = true;
+                        return;
+                    }
 
                     auto error = GetLastError();
+                    if (temp_was_renamed(_path, error)) {
+                        _installed = true;
+                        throw_file_io_error<replace_not_durable_error>(error,
+                            "atomic_replace_file: MoveFileExW write-through after the rename", target);
+                    }
+
                     std::string_view operation = "atomic_replace_file: MoveFileExW";
                     if (error == ERROR_ACCESS_DENIED) {
                         // MoveFileExW will not replace an open target even if it is shared for delete
-                        auto fallback = rename_replace_posix_semantics(_path, target);
-                        if (fallback == 0)
-                            break;
+                        os_error flush_error = 0;
+                        auto fallback = rename_replace_posix_semantics(_path, target, flush_error);
+                        if (fallback == 0) {
+                            _installed = true;
+                            if (auto confirm = commit_flush_result(flush_error))
+                                throw_file_io_error<replace_not_durable_error>(confirm,
+                                    "atomic_replace_file: FlushFileBuffers after the rename", target);
+                            return;
+                        }
                         // keep the MoveFileExW error when the file system lacks POSIX-semantics renames
                         if (fallback != ERROR_NOT_SUPPORTED && fallback != ERROR_INVALID_PARAMETER && fallback != ERROR_INVALID_FUNCTION) {
                             error = fallback;
@@ -527,7 +588,6 @@ namespace gb::yadro::util
                         throw_file_io_error(error, operation, target);
                     std::this_thread::sleep_for(std::chrono::milliseconds{ 10 });
                 }
-                _installed = true;
 #else
                 (void)sharing_retry_timeout;
                 if (auto error = flush_file(handle()))
@@ -537,8 +597,9 @@ namespace gb::yadro::util
                 if (::rename(_path.c_str(), target.c_str()) != 0)
                     throw_file_io_error(errno, "atomic_replace_file: rename", target);
                 _installed = true;
-                if (auto error = sync_directory(target.parent_path()))
-                    throw_file_io_error(error, "atomic_replace_file: fsync(directory)", target.parent_path());
+                if (auto error = commit_flush_result(sync_directory(target.parent_path())))
+                    throw_file_io_error<replace_not_durable_error>(error, "atomic_replace_file: fsync(directory) after the rename",
+                        target.parent_path());
 #endif
             }
 
@@ -563,9 +624,14 @@ namespace gb::yadro::util
 
     //-------------------------------------------------------------------------
     // Replaces file with whatever writer(std::ostream&) writes. The content goes to a temp file in
-    // the same directory, which is flushed to stable storage and then renamed over file. If writer
-    // throws, or any step fails, file is left as it was and the temp file is removed; the
-    // exception propagates (I/O failures as file_io_error). The parent directory must exist.
+    // the same directory, which is flushed to stable storage and then renamed over file. The
+    // parent directory must exist. Outcomes:
+    //   * returns normally: file holds the new content, durably.
+    //   * the writer's exception, or file_io_error (other than the next case): nothing was
+    //     committed; file is left as it was and the temp file is removed.
+    //   * replace_not_durable_error (derived from file_io_error): the rename committed, so file
+    //     already holds the new content, but confirming durability failed; see that type.
+    //     Catch it before file_io_error when the difference matters.
     template<class Writer>
         requires std::invocable<Writer&, std::ostream&>
     void atomic_replace_file(const std::filesystem::path& file, Writer&& writer, const atomic_replace_options& options = {})
