@@ -60,13 +60,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <initializer_list>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -851,5 +855,185 @@ namespace gb::yadro::container
         out.write(text.data(), static_cast<std::streamsize>(text.size()));
         if (!out)
             throw std::runtime_error("Failed to write JSON stream");
+    }
+
+    //-------------------------------------------------------------------------
+    // json_value_builder: a json_handler that builds a json_value
+    //
+    // Open containers live on an explicit frame stack, so the builder itself does not recurse.
+    // Opening a container can reallocate that stack and move every frame, so nothing in a frame
+    // points into another frame or into an object's member storage: duplicate detection scans
+    // the keys of objects with up to 8 members and, from the 9th member on, uses an index that
+    // owns copies of the keys and maps each one to its member position (positions are stable
+    // because the builder only appends).
+    //-------------------------------------------------------------------------
+    class json_value_builder
+    {
+    public:
+        explicit json_value_builder(json_duplicate_keys duplicate_keys = json_duplicate_keys::reject)
+            : _duplicate_keys(duplicate_keys)
+        {}
+
+        void begin_object() { _frames.push_back(frame{ json_value(json_object{}) }); }
+        void begin_array() { _frames.push_back(frame{ json_value(json_array{}) }); }
+        void end_object() { close(); }
+        void end_array() { close(); }
+
+        void key(std::string_view key)
+        {
+            auto& top = _frames.back();
+            auto& members = top.container.get_if<json_object>()->_members;
+            std::optional<std::size_t> existing;
+            if (top.index) {
+                if (auto it = top.index->find(key); it != top.index->end())
+                    existing = it->second;
+            }
+            else {
+                for (std::size_t i = 0; i < members.size(); ++i) {
+                    if (members[i]._key == key) {
+                        existing = i;
+                        break;
+                    }
+                }
+            }
+            if (existing) {
+                switch (_duplicate_keys) {
+                case json_duplicate_keys::reject:
+                    throw json_handler_error(json_parse_errc::duplicate_key, "duplicate JSON object key");
+                case json_duplicate_keys::keep_first:
+                    top.discard_next = true;
+                    break;
+                case json_duplicate_keys::keep_last:
+                    top.overwrite = *existing;
+                    break;
+                }
+                return;
+            }
+            top.pending_key.assign(key);
+        }
+
+        void null_value() { add(json_value(nullptr)); }
+        void bool_value(bool value) { add(json_value(value)); }
+        void int_value(std::int64_t value) { add(json_value(value)); }
+        void uint_value(std::uint64_t value) { add(json_value(value)); }   // canonicalized to int64 when it fits
+        void double_value(double value) { add(json_value(value)); }
+        void string_value(std::string_view value) { add(json_value(std::string{ value })); }
+
+        [[nodiscard]] json_value finish() &&
+        {
+            if (!_frames.empty() || !_root)
+                throw std::logic_error("json_value_builder: the JSON document is incomplete");
+            return std::move(*_root);
+        }
+
+    private:
+        struct transparent_string_hash
+        {
+            using is_transparent = void;
+            std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+        };
+
+        using key_index = std::unordered_map<std::string, std::size_t, transparent_string_hash, std::equal_to<>>;
+
+        static constexpr std::size_t index_threshold = 9;
+        static constexpr std::size_t no_position = static_cast<std::size_t>(-1);
+
+        struct frame
+        {
+            json_value container;
+            std::string pending_key;
+            std::unique_ptr<key_index> index;
+            std::size_t overwrite = no_position;    // keep_last: member position to replace
+            bool discard_next = false;              // keep_first: drop the next value
+        };
+
+        void close()
+        {
+            auto value = std::move(_frames.back().container);
+            _frames.pop_back();
+            add(std::move(value));
+        }
+
+        void add(json_value value)
+        {
+            if (_frames.empty()) {
+                _root = std::move(value);
+                return;
+            }
+            auto& top = _frames.back();
+            if (auto* array = top.container.get_if<json_array>()) {
+                array->push_back(std::move(value));
+                return;
+            }
+            auto& members = top.container.get_if<json_object>()->_members;
+            if (top.discard_next) {
+                top.discard_next = false;
+                return;
+            }
+            if (top.overwrite != no_position) {
+                members[top.overwrite].value = std::move(value);
+                top.overwrite = no_position;
+                return;
+            }
+            if (top.index)
+                top.index->emplace(top.pending_key, members.size());
+            members.push_back(json_member(std::move(top.pending_key), std::move(value)));
+            top.pending_key.clear();
+            if (!top.index && members.size() >= index_threshold) {
+                top.index = std::make_unique<key_index>();
+                top.index->reserve(members.size() * 2);
+                for (std::size_t i = 0; i < members.size(); ++i)
+                    top.index->emplace(members[i]._key, i);
+            }
+        }
+
+        std::vector<frame> _frames;
+        std::optional<json_value> _root;
+        json_duplicate_keys _duplicate_keys;
+    };
+
+    static_assert(json_handler<json_value_builder>);
+
+    //-------------------------------------------------------------------------
+    // parsing
+    //-------------------------------------------------------------------------
+
+    // Parses text through the shared front end (json_parser.h); throws json_parse_error.
+    // options.duplicate_keys selects how repeated object keys are handled.
+    [[nodiscard]] inline json_value parse_json_value(std::string_view text, const json_parse_options& options = {})
+    {
+        json_value_builder builder(options.duplicate_keys);
+        parse_json_events(text, builder, options);
+        return std::move(builder).finish();
+    }
+
+    // Reads at most options.max_input_bytes + 1 bytes from in (all of it when the limit is 0).
+    [[nodiscard]] inline json_value parse_json_value(std::istream& in, const json_parse_options& options = {})
+    {
+        return parse_json_value(detail::read_capped(in, options.max_input_bytes), options);
+    }
+
+    // As parse_json_value, but returns a json_parse_error instead of throwing it; every other
+    // exception (allocation failure, stream failure) propagates.
+    [[nodiscard]] inline std::expected<json_value, json_parse_error> try_parse_json_value(std::string_view text,
+        const json_parse_options& options = {})
+    {
+        try {
+            return parse_json_value(text, options);
+        }
+        catch (const json_parse_error& e) {
+            return std::unexpected(e);
+        }
+    }
+
+    [[nodiscard]] inline std::expected<json_value, json_parse_error> try_parse_json_value(std::istream& in,
+        const json_parse_options& options = {})
+    {
+        try {
+            return parse_json_value(in, options);
+        }
+        catch (const json_parse_error& e) {
+            return std::unexpected(e);
+        }
     }
 }

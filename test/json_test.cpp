@@ -1484,4 +1484,169 @@ namespace
         format_json(stream, json_value(json_object{ { "x", true } }));
         gbassert(stream.str() == "{\"x\":true}");
     }
+
+    //-------------------------------------------------------------------------
+    // json_value_builder and the parse entry points
+    //-------------------------------------------------------------------------
+
+    [[nodiscard]] json_parse_options with_duplicates(json_duplicate_keys policy)
+    {
+        json_parse_options options;
+        options.duplicate_keys = policy;
+        return options;
+    }
+
+    GB_TEST(json, json_parse_value_basic_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            auto value = parse_json_value(R"({"i":5,"n":-7,"u":18446744073709551615,"z":-0,"d":1.0,"s":"t","b":false,"x":null,"a":[1,[2]],"o":{}})");
+            auto kind_at = [&](std::string_view pointer) { return value.at_pointer(pointer).value()->kind(); };
+            gbassert(kind_at("/i") == json_kind::int64);
+            gbassert(kind_at("/n") == json_kind::int64);
+            gbassert(kind_at("/u") == json_kind::uint64);
+            gbassert(kind_at("/z") == json_kind::int64 && *value.at_pointer("/z").value() == json_value(0));
+            gbassert(kind_at("/d") == json_kind::number);
+            gbassert(kind_at("/s") == json_kind::string);
+            gbassert(kind_at("/b") == json_kind::boolean);
+            gbassert(kind_at("/x") == json_kind::null);
+            gbassert(kind_at("/a/1/0") == json_kind::int64);
+            gbassert(kind_at("/o") == json_kind::object);
+
+            gbassert(parse_json_value("42") == json_value(42));
+            gbassert(parse_json_value("\"s\"") == json_value("s"));
+            gbassert(parse_json_value("[]") == json_value(json_array{}));
+
+            std::string order;
+            for (auto& member : *parse_json_value(R"({"c":1,"a":2,"b":3})").as_object().value())
+                order += member.key();
+            gbassert(order == "cab");
+        }
+    }
+
+    GB_TEST(json, json_parse_value_duplicate_keys_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            auto error = catch_parse_error([] { (void)parse_json_value(R"({"a":1,"b":2,"a":3})"); });
+            gbassert(error.code == json_parse_errc::duplicate_key && error.offset == 13);
+
+            auto first = parse_json_value(R"({"a":1,"b":2,"a":3})", with_duplicates(json_duplicate_keys::keep_first));
+            gbassert(first == json_value(json_object{ { "a", 1 }, { "b", 2 } }));
+            auto last = parse_json_value(R"({"a":1,"b":2,"a":{"deep":[3]}})", with_duplicates(json_duplicate_keys::keep_last));
+            gbassert(last == json_value(json_object{ { "a", json_object{ { "deep", json_array{ 3 } } } }, { "b", 2 } }));
+            gbassert(last.as_object().value()->begin()->key() == "a");
+
+            // the same key in different objects is not a duplicate
+            (void)parse_json_value(R"({"a":{"a":1},"b":{"a":2},"c":[{"a":3},{"a":4}]})");
+
+            // a duplicate beyond the hash-index threshold
+            std::string wide = "{";
+            for (int i = 0; i < 20; ++i)
+                wide += "\"k" + std::to_string(i) + "\":" + std::to_string(i) + ",";
+            const auto duplicate_offset = wide.size();
+            wide += "\"k0\":100}";
+            error = catch_parse_error([&] { (void)parse_json_value(wide); });
+            gbassert(error.code == json_parse_errc::duplicate_key && error.offset == duplicate_offset);
+            auto kept_last = parse_json_value(wide, with_duplicates(json_duplicate_keys::keep_last));
+            gbassert(kept_last.as_object().value()->size() == 20);
+            gbassert(kept_last.as_object().value()->begin()->key() == "k0");
+            gbassert(*kept_last.at_pointer("/k0").value() == json_value(100));
+            auto kept_first = parse_json_value(wide, with_duplicates(json_duplicate_keys::keep_first));
+            gbassert(*kept_first.at_pointer("/k0").value() == json_value(0));
+        }
+    }
+
+    GB_TEST(json, json_parse_value_duplicate_after_nesting_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            // an object with an index (12 members), then a 64-level nested member that reallocates the
+            // builder's frame stack several times, then duplicates of the first key
+            std::string text = "{";
+            for (int i = 0; i < 12; ++i)
+                text += "\"m" + std::to_string(i) + "\":" + std::to_string(i) + ",";
+            text += "\"nested\":" + nest(64, "1", nest_shape::objects) + ",";
+            const auto duplicate_offset = text.size();
+            text += "\"m0\":\"first\",\"m0\":\"second\",\"m0\":\"third\"}";
+
+            auto error = catch_parse_error([&] { (void)parse_json_value(text); });
+            gbassert(error.code == json_parse_errc::duplicate_key && error.offset == duplicate_offset);
+
+            auto first = parse_json_value(text, with_duplicates(json_duplicate_keys::keep_first));
+            gbassert(*first.at_pointer("/m0").value() == json_value(0));
+            gbassert(first.as_object().value()->size() == 13);
+
+            auto last = parse_json_value(text, with_duplicates(json_duplicate_keys::keep_last));
+            gbassert(*last.at_pointer("/m0").value() == json_value("third"));
+            gbassert(last.as_object().value()->begin()->key() == "m0");
+            gbassert(last.as_object().value()->size() == 13);
+            gbassert(*last.at_pointer("/m11").value() == json_value(11));
+        }
+    }
+
+    GB_TEST(json, json_try_parse_value_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            auto ok = try_parse_json_value(R"({"a":[1,2]})");
+            gbassert(ok.has_value() && *ok->at_pointer("/a/1").value() == json_value(2));
+
+            auto bad = try_parse_json_value("{\n  \"a\": [1,]\n}");
+            gbassert(!bad.has_value());
+            gbassert(bad.error().code == json_parse_errc::syntax);
+            gbassert(bad.error().offset == 12 && bad.error().line == 2 && bad.error().column == 11);
+
+            std::istringstream stream(R"(["x"])");
+            auto from_stream = try_parse_json_value(stream);
+            gbassert(from_stream.has_value() && *from_stream == json_value(json_array{ "x" }));
+        }
+    }
+
+    GB_TEST(json, json_parse_value_stream_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            const std::string text = "{\"a\":\n[1,2,3],\n\"b\":\"text\"}";
+            json_parse_options options;
+            options.max_input_bytes = text.size();
+            {
+                extraction_streambuf buffer(text);
+                std::istream in(&buffer);
+                gbassert(parse_json_value(in, options) == parse_json_value(text));
+            }
+            options.max_input_bytes = text.size() - 1;
+            {
+                extraction_streambuf buffer(text);
+                std::istream in(&buffer);
+                auto error = catch_parse_error([&] { (void)parse_json_value(in, options); });
+                gbassert(error.code == json_parse_errc::input_too_large && error.offset == text.size() - 1);
+                gbassert(buffer.extracted() <= options.max_input_bytes + 1);
+            }
+            {
+                extraction_streambuf buffer(text);
+                std::istream in(&buffer);
+                auto result = try_parse_json_value(in, options);
+                gbassert(!result && result.error().code == json_parse_errc::input_too_large);
+            }
+        }
+    }
+
+    GB_TEST(json, json_realistic_shapes_test)
+    {
+        if constexpr (json_parser_axe_enabled) {
+            const std::string_view message = R"({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"},)"
+                R"({"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls","timeout":120000}}],)"
+                R"("usage":{"input_tokens":12,"output_tokens":3}},"session_id":"s"})";
+            auto parsed = parse_json_value(message);
+            gbassert(*parsed.at_pointer("/message/content/1/input/timeout").value() == json_value(120000));
+            gbassert(*parsed.at_pointer("/message/content/0/type").value() == json_value("text"));
+            gbassert(parse_json_value(format_json(parsed)) == parsed);
+            json_format pretty;
+            pretty.pretty = true;
+            gbassert(parse_json_value(format_json(parsed, pretty)) == parsed);
+
+            const std::string_view findings = R"([{"file":"a.cpp","location":{"line":10,"column":4},"severity":"high","summary":"x"},)"
+                R"({"file":"b.h","location":{"line":1,"column":1},"severity":"low","summary":"y"}])";
+            auto review = parse_json_value(findings);
+            gbassert(*review.at_pointer("/1/location/line").value() == json_value(1));
+            gbassert(review.at_pointer("/0/location/column").value()->as_int64() == 4);
+            gbassert(parse_json_value(format_json(review)) == review);
+        }
+    }
 }
