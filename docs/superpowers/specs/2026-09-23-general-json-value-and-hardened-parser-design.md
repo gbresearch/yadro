@@ -1,6 +1,6 @@
 # General JSON Value and Hardened Parser Design
 
-Status: revision 2, for operator review. AXE P1 has landed on AXE `master` (`09b0883`, then `4e93d14`). This branch is rebased onto Yadro `master` `773b1e3`.
+Status: revision 2 approved on 2026-09-24, including decisions 10–12. Revision 2.1 amendments A1 and A2 await operator review. AXE P1 has landed on AXE `master` (`09b0883`, then `4e93d14`). This branch is rebased onto Yadro `master` `d511885`.
 
 Consumer: the AI orchestrator's prerequisite P2 (`AI_orchestrator/docs/superpowers/plans/2026-09-23-increment-1-engine-skeleton.md` §3). The orchestrator uses it for:
 
@@ -19,6 +19,9 @@ Consumer: the AI orchestrator's prerequisite P2 (`AI_orchestrator/docs/superpowe
   - **Writer exceptions.** The writer exception contract is made consistent.
   - **Double conversion.** The double conversion contract is specified and checked against MSVC.
   - **AXE defect.** It records an AXE defect that the measurements exposed.
+- **Revision 2.1 (2026-09-24):** two amendments raised while revising the implementation plan. Both are for operator review.
+  - **A1.** `read_json_file` no longer has a separate `std::filesystem::file_size` pre-check. `read_capped` alone enforces the cap and reports the offset, line, and column promised for `input_too_large`. A pre-check could report those coordinates only by reading the same prefix, and the spec does not allow a coordinate-free error.
+  - **A2.** The 640 KiB stack gate applies to the **measured peak stack displacement** of whole parses on a fresh 1 MiB thread. That covers fixed overhead, handler frames, number and string decoding at maximum depth, and exception dispatch on the error paths, instead of a per-level slope multiplied by 256. The slope is still logged, but only for information.
 
 ## Scope
 
@@ -196,8 +199,10 @@ The front end uses shape C, because shape A cannot meet the default depth within
 - **Limit exceeded.** Opening container number `max_depth + 1` throws `json_parse_error{depth_exceeded}`, translated from `axe::depth_limit_exceeded`. Its offset is that container's opening bracket.
 - **`max_depth = 0`** means that only scalar roots are accepted.
 - **Stack budget.** The default of 256 is kept only because shape C measured 540 KiB in x64 Debug. The implementation must meet the following acceptance criteria, checked by tests:
-  - The real front end, with handler dispatch, parses 256 levels on a thread created with an explicit 1 MiB stack reservation, in all four configurations. The documents are nested arrays, nested objects, and alternating levels, and they are parsed through both the DOM and json_db builders.
-  - A measurement test logs bytes per level in each configuration. In x64 Debug, 256 levels must use at most 640 KiB (62.5% of 1 MiB). If the implementation exceeds this, I will stop and report rather than lower the default on my own.
+  - The real front end, with handler dispatch, parses 256 levels on a thread created with an explicit 1 MiB stack reservation, in all four configurations.
+    - The DOM builder parses nested arrays, nested objects, and alternating levels.
+    - The json_db builder parses nested objects. json_db's value model rejects nested arrays with `std::logic_error` before the depth limit applies.
+  - **Peak gate (amendment A2).** Each workload runs on a fresh thread, and its peak stack displacement is measured from the lowest committed page of that thread's stack. The workloads are the successful 256-level parses, parses with number and string decoding at depth 256, and error paths at the limit. In x64 Debug, the peak must be at most 640 KiB (62.5% of 1 MiB). If the implementation exceeds this, I will stop and report rather than lower the default on my own. The bytes-per-level slope is logged for information only.
 - **Documentation.** The header will state the measured per-level cost and that `max_depth` must fit the parsing thread's stack.
 
 ### String decoding
@@ -257,7 +262,7 @@ The front end uses shape C, because shape A cannot meet the default depth within
   |---|---|
   | `read_json(std::istream&, const json_read_options&)` | `options.max_input_bytes` |
   | `read_json(std::istream&, const json_db_defaults&)` | `defaults.read.max_input_bytes`, applied while buffering, before the manifest pass |
-  | `read_json_file(path, options)`, and `insert_json_file` through it | `options.max_input_bytes`, checked first against `std::filesystem::file_size` for an early reject, then enforced by `read_capped`, because the file can grow |
+  | `read_json_file(path, options)`, and `insert_json_file` through it | `options.max_input_bytes`, enforced by `read_capped` (at most cap + 1 bytes read, with coordinates computed over the prefix it holds). There is no separate `file_size` pre-check (amendment A1). |
   | `read_json_defaults(std::istream&)`, `json_db_defaults(std::istream&)` | `json_read_options{}` defaults: unlimited size, depth 256. These read trusted configuration files, as today. |
   | `parse_json_value(std::istream&, options)`, `try_parse_json_value(std::istream&, options)` | `options.max_input_bytes` |
 
@@ -459,7 +464,7 @@ These are unchanged:
      The error offset equals the offending bracket.
    - **Scalar leaves don't count.** `[[1]]` passes with `max_depth = 2`, and `max_depth = 0` accepts only a scalar root.
    - **Hostile input.** 1,000,000 `[`, 1,000,000 `{"a":`, and 1,000,000 `[` followed by garbage are rejected without a crash.
-   - **Stack budget.** 256 levels parse on a 1 MiB-reservation thread, through the DOM and json_db builders. Bytes per level are logged and checked against 640 KiB for 256 levels in x64 Debug.
+   - **Stack budget.** 256 levels parse on a 1 MiB-reservation thread, through the DOM builder (arrays and objects) and the json_db builder (objects). The measured peak stack displacement, including error paths, is checked against 640 KiB in x64 Debug (amendment A2). Bytes per level are logged for information.
 4. **Numbers:**
    - every row of the MSVC boundary table;
    - INT64_MIN±1, INT64_MAX±1, UINT64_MAX, and UINT64_MAX+1, under both `big_integers` policies;

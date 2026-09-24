@@ -28,7 +28,7 @@
 - `GB_TEST`.
 - MSBuild for x64 and Win32, Debug and Release.
 
-**Spec:** `docs/superpowers/specs/2026-09-23-general-json-value-and-hardened-parser-design.md` (revision 2, approved 2026-09-24, including decisions 10–12).
+**Spec:** `docs/superpowers/specs/2026-09-23-general-json-value-and-hardened-parser-design.md` (revision 2, approved 2026-09-24, including decisions 10–12; revision 2.1 amendments A1 and A2, which accompany this plan revision, await review).
 
 ## Global Constraints
 
@@ -222,7 +222,7 @@ namespace detail {
        - With `ascii_only=true` → `\u00e9\ud83d\ude00`.
      - **`json_escape_invalid_utf8_test`:**
        - With `error`, each invalid input returns `ok == false` and the exact `invalid_offset`. The inputs are `"ab\xC0\xAF"` (offset 2), `"x\xED\xA0\x80"` (1), `"\xF4\x90\x80\x80"` (0), `"ok\xE2\x82"` (2, truncated), and `"\x80"` (0).
-       - With `replace`, each maximal subpart becomes one `U+FFFD`: `"\xE2\x82A"` → `"\xEF\xBF\xBDA"`, and `"\xC0\xAF"` → two replacement characters.
+       - With `replace`, each maximal subpart becomes one `U+FFFD`: `"\xE2\x82" "A"` (bytes `E2 82 41`; the literal is split because `\x82A` would be one greedy hex escape) → `"\xEF\xBF\xBD" "A"`, and `"\xC0\xAF"` → two replacement characters.
      - **`json_utf8_decoder_matches_axe_test`** (inside `if constexpr (gbdb_json_axe_enabled)`). Compare `detail::utf8_decode` with `axe::r_utf8()`, using `const char*` iterators, on validity and consumed length, over:
        - every single byte;
        - every 2-byte sequence;
@@ -235,11 +235,16 @@ namespace detail {
        - offset 3 → line 2, column 1;
        - offset 6 → line 2, column 4 (`\r` counts as a byte);
        - offset 7 → line 3, column 1.
-     - **`json_read_capped_test`.** A `counting_streambuf` (a `std::streambuf` subclass serving a string through `underflow`, one 4 KiB chunk at a time, that counts the bytes handed out) is used as follows:
+     - **`json_read_capped_test`.** It uses two test stream buffers, defined once in `json_test.cpp` and reused by Tasks 3 and 7:
+       - **`extraction_streambuf`** calls `setg` once over the whole source string and never refills. The bytes the reader actually extracted are therefore exactly `gptr() - eback()`, exposed as `extracted()`. The resource bound is asserted on this buffer.
+       - **`chunked_streambuf`** serves the source through `underflow` in 4 KiB chunks. It reports `extracted() = handed_out - (egptr() - gptr())`, meaning the bytes handed out minus what is still unread in the current chunk. It checks that the capped reader stays correct across refills.
+
+       Assertions, on both buffers unless stated:
        - with cap 0, it reads everything;
-       - input exactly at the cap is returned intact;
+       - input exactly at the cap is returned intact, with `extracted() == size`;
        - a cap of `size - 1` throws `json_parse_error` with `code == input_too_large` and `offset == cap`;
-       - on a 1 MiB source with cap 10, the bytes consumed are at most `cap + 1 + 4096`, and the returned or buffered string never exceeds `cap + 1`;
+       - on a 1 MiB source with cap 10: `extracted() <= cap + 1` **exactly**, on both buffers. That is the spec's bound; there is no allowance for refill buffering;
+       - on a 1 MiB source with cap 70,000, which spans more than one 64 KiB read chunk and many 4 KiB refills: `extracted() <= cap + 1`, and the error's line and column equal `position_of(source, cap)`;
        - a stream in fail state (not EOF) throws `std::runtime_error("Failed to read JSON stream")`.
 - [ ] **Step 2: Confirm RED.** Run a compile-only Debug x64 build. Expected: errors naming `json_parse_errc`, `append_json_string`, and the `detail::` helpers.
 - [ ] **Step 3: Implement `json_parser.h`**
@@ -511,10 +516,16 @@ namespace detail {
     - a raw control character in a value and in a key;
     - each invalid UTF-8 class from Task 2;
     - a lone high and a lone low surrogate;
-    - depth 257 (arrays and objects), and depth 4 with `max_depth=3`;
+    - 257 nested objects with the default limit, and 4 nested objects with `max_depth=3`. Both give `depth_exceeded` at the offending `{`, and 256 and 3 nested objects respectively are accepted;
     - text over `max_input_bytes`.
 
-    `std::string(1'000'000, '[')` → `depth_exceeded`, with no crash.
+    One million repetitions of `{"a":` give `depth_exceeded` at the 257th `{` (offset 1280), with no crash.
+
+    **json_db depth tests use nested objects only.** `json_db_builder` throws `std::logic_error` for arrays before the depth limit can apply:
+    - at the first `[` at the root, unless `table_mode` is `infer_tables` ("JSON array member is missing a key", `gbdb_json.h:595`);
+    - at the second level of nested arrays without table inference, and at the third level with it (`gbdb_json.h:584-586`).
+
+    Pin that interaction as unchanged: `std::string(1'000'000, '[')` throws `std::logic_error` at the first `[` with the default options, and never crashes.
   - **`gbdb_read_surrogate_pair_stored_as_utf8_test`.** `{"s":"\ud83d\ude00"}` stores `F0 9F 98 80`.
   - **`gbdb_read_underflow_and_overflow_test`.** `{"d":1e-400}` stores `+0.0`, and `{"d":-1e-400}` stores `-0.0`, compared by bit pattern. `{"d":1e309}` → `number_out_of_range`.
   - **`gbdb_read_unchanged_contracts_test`.** These keep their current exception types:
@@ -523,18 +534,24 @@ namespace detail {
     - `{"a":true,"a":false}` → `std::logic_error` (unchanged);
     - `{"a":[true]}` → `std::logic_error` (the value model, unchanged);
     - `{"a":[1,2]}` → still `uint_array_ref`.
-  - **`gbdb_stream_caps_test`.** Using the Task 1 `counting_streambuf`, for:
-    - `read_json(std::istream&, json_read_options)`;
-    - `read_json(std::istream&, json_db_defaults)`;
-    - `read_json_file`, via a temp file under `std::filesystem::temp_directory_path()` with a unique name, removed at the end;
-    - `insert_json_file`
+  - **`gbdb_stream_caps_test`:**
+    - **Streams.** For `read_json(std::istream&, json_read_options)` and `read_json(std::istream&, json_db_defaults)`, driven by the Task 1 `extraction_streambuf` over a multi-line nested-object document:
+      - `max_input_bytes = size` is accepted, with `extracted() == size`;
+      - `max_input_bytes = c = size - 1` is rejected with `input_too_large` at offset `c`, with line and column equal to `position_of(document, c)`, and with `extracted() <= c + 1`.
+    - **Defaults overload.** The rejection happens during buffering, before the manifest pass. The test document's manifest sets `table_format`, and the defaults use `fail_on_conflict` with a different `table_format`, so the manifest pass would throw a conflict `std::logic_error` if it ran. `input_too_large` proves it did not.
+    - **Files.** For `read_json_file` and `insert_json_file`, use a temp file under `std::filesystem::temp_directory_path()` with a unique name, removed at the end:
+      - a file exactly at the cap is accepted;
+      - a larger file is rejected with `input_too_large` at offset cap, with line and column equal to `position_of(file_contents, cap)`.
+  - **`gbdb_manifest_cannot_loosen_limits_test`.** The documents contain nested objects only, because json_db rejects nested arrays with `std::logic_error`, which would mask the limit. For every `json_defaults_conflict_policy`, with `defaults.write.table_format` equal to the manifest's `table_format`, so that `fail_on_conflict` has no legitimate conflict:
+    - **The shared manifest.** `M` is `"$gbdb_manifest":{"read":{"max_depth":100000,"max_input_bytes":0,"big_integers":"to_double"},"table_format":"columns_data"}`. It occupies depth 3 (root, manifest, `read`).
+    - **Depth.** `{M,"x":{"a":{"a":{"a":{}}}}}` has depth 5 (root, `x`, then three `a` levels).
+      - With `defaults.read.max_depth=4`, it fails with `depth_exceeded` at the fifth `{`.
+      - With `max_depth=5`, it is accepted.
 
-    input at the cap is accepted, cap+1 is rejected with `input_too_large`, and the bytes consumed stay within `cap + 1 + 4096`. `read_json_file` with a file larger than the cap throws before reading, and nothing is consumed; verify through a file larger than the cap.
-  - **`gbdb_manifest_cannot_loosen_limits_test`.** For every `json_defaults_conflict_policy`:
-    - a document with `{"$gbdb_manifest":{"read":{"max_depth":100000,"max_input_bytes":0,"big_integers":"to_double"},"table_format":"columns_data"}, "x": <depth 5 array>, "n": 18446744073709551616}`, read with `defaults.read.max_depth=4`, fails with `depth_exceeded`;
-    - with depth 3 but the big integer present → `number_out_of_range`;
-    - with `defaults.read.max_input_bytes` smaller than the document → `input_too_large` before the manifest pass;
-    - `fail_on_conflict` does not throw a conflict error because of the limit fields.
+      Both results are the same under every policy, which shows the manifest's `max_depth` of 100000 was ignored in both passes.
+    - **Big integers.** `{M,"x":{"a":1},"n":18446744073709551616}` with `max_depth=4` → `number_out_of_range`, because the manifest's `to_double` is ignored.
+    - **Size.** `{M,"x":{"a":1}}` with `defaults.read.max_input_bytes` one byte shorter than the document → `input_too_large`, raised by `read_capped` before either pass.
+    - **No conflict from limits.** `fail_on_conflict` never reports a conflict because of the limit fields. With a manifest that differs from the defaults only in `read.*` limits, the document reads successfully.
   - **`gbdb_defaults_persist_new_read_options_test`:**
     - `write_json_defaults` followed by `read_json_defaults` round-trips `max_depth=17`, `max_input_bytes=12345`, and `big_integers=to_double`;
     - a defaults document without these fields reads them as the defaults 256, 0, and `error`.
@@ -560,9 +577,9 @@ namespace detail {
   - **Stream and file entry points:**
     - `read_json(std::istream&, options)` → `read_json(detail::read_capped(in, options.max_input_bytes), options)`.
     - `read_json(std::istream&, const json_db_defaults&)` → `detail::read_capped(in, defaults.read.max_input_bytes)`. Leave the manifest logic untouched. `extract_manifest_defaults` already starts from the caller's defaults; add a comment that read limits are never taken from a manifest.
-    - `read_json_file`:
-      - if `options.max_input_bytes != 0`, and `std::filesystem::file_size(file, ec)` succeeds and exceeds the cap → throw `json_parse_error{input_too_large}` at offset cap, before any byte is read. Nothing has been read, so no position can be computed: set `line` and `column` to 0, and document 0 as "not computed". Record this in the handoff as the interpretation of the spec's "line and column of that offset".
-      - Then open the file and use `read_capped`.
+    - `read_json_file`: open the file and call `detail::read_capped(in, options.max_input_bytes)`.
+      - `read_capped` reads at most cap + 1 bytes. When the file is larger, it throws `input_too_large` at offset cap, with line and column computed over the prefix it holds, as the spec requires.
+      - There is no separate `file_size` pre-check. A pre-check could only report coordinates by reading the same prefix, so it would save nothing. Spec amendment A1 (in this revision) records the change.
   - **Persist the new options:**
     - in `write_json_defaults`: `read.max_depth` and `read.max_input_bytes` as `uint64`, and `read.big_integers` as a string;
     - in `apply_defaults_from_db`: `read_uint_option` or `read_enum_option`;
@@ -585,13 +602,23 @@ namespace detail {
 
 **Interfaces produced:**
 
+Declarations appear in the header in exactly the order below. See Step 3, "Declaration order", for why each step is valid.
+
 ```cpp
 enum class json_kind { null, boolean, int64, uint64, number, string, array, object };
-class json_value; using json_array = std::vector<json_value>;
-class json_member { public: const std::string& key() const noexcept; json_value value; /* key_ private */ };
-class json_object {
+class json_value;                                    // (1) forward declarations
+class json_member;
+using json_array = std::vector<json_value>;          // names the type only; nothing is instantiated here
+
+class json_object {                                  // (2) defined while json_member is incomplete
+    std::vector<json_member> members_;               // allowed: [vector.overview]/4 (incomplete element type)
 public:
-    json_object() = default;
+    json_object() noexcept;                          // every special member declared, none defined in-class
+    json_object(const json_object&);
+    json_object(json_object&&) noexcept;
+    json_object& operator=(const json_object&);
+    json_object& operator=(json_object&&) noexcept;
+    ~json_object();
     json_object(std::initializer_list<std::pair<std::string, json_value>>); // duplicate -> std::invalid_argument
     std::size_t size() const noexcept; bool empty() const noexcept; void reserve(std::size_t);
     iterator/const_iterator begin()/end();     // over json_member, key read-only
@@ -600,10 +627,16 @@ public:
     std::pair<json_value*, bool> insert(std::string key, json_value value);   // no overwrite
     json_value& insert_or_assign(std::string key, json_value value);         // keeps position
     bool erase(std::string_view key);                                        // preserves order
+    // declarations only: no in-class body may touch a json_member
 };
 struct json_access_error { enum class reason { type_mismatch, out_of_range } code; json_kind actual; };
-class json_value {
+class json_value {                                   // (3) json_object is complete; json_array is a complete vector type
+    std::variant<std::nullptr_t, bool, std::int64_t, std::uint64_t, double, std::string,
+                 json_array, json_object> v_;
 public:
+    json_value(const json_value&); json_value(json_value&&) noexcept;       // declared, defaulted out of line
+    json_value& operator=(const json_value&); json_value& operator=(json_value&&) noexcept;
+    ~json_value();
     json_value() noexcept;                  // null
     json_value(std::nullptr_t) noexcept; json_value(bool) noexcept;
     template<std::integral T> requires (!std::same_as<T, bool> && !std::same_as<T, char>) json_value(T) noexcept; // canonicalized
@@ -621,8 +654,19 @@ public:
     std::expected<json_array*, json_access_error> as_array() noexcept;
     std::expected<const json_object*, json_access_error> as_object() const noexcept;
     std::expected<json_object*, json_access_error> as_object() noexcept;
-    friend bool operator==(const json_value&, const json_value&) noexcept;
+    friend bool operator==(const json_value&, const json_value&);  // not noexcept: large objects allocate sort buffers
 };
+class json_member {                                  // (4) json_value is complete
+public:
+    const std::string& key() const noexcept;
+    json_value value;
+private:
+    friend class json_object;
+    json_member(std::string key, json_value value);
+    std::string key_;
+};
+// (5) every member function of json_object and json_value is defined below, `inline`, out of class,
+//     including `inline json_object::~json_object() = default;` and the other defaulted special members.
 ```
 
 `char` is excluded from the integral constructor so that `json_value('x')` does not silently become a number. `get_if<T>` accepts `bool`, `std::int64_t`, `std::uint64_t`, `double`, `std::string`, `json_array`, and `json_object`; a `static_assert` rejects any other type.
@@ -662,9 +706,22 @@ public:
     - nesting works.
 - [ ] **Step 2: Confirm RED.** Run a compile-only build.
 - [ ] **Step 3: Implement**
-  - **Storage.** Use `std::variant<std::nullptr_t, bool, std::int64_t, std::uint64_t, double, std::string, json_array, json_object>`. `json_array` is `std::vector<json_value>`, and `json_object` holds `std::vector<json_member>`.
-    - Declare `json_value` first; define `json_member` and `json_object` after it.
-    - If MSVC rejects the recursive variant, store `json_array` and `json_object` in the variant as the declared types and move `json_value`'s member functions out of line after `json_object`. Do not switch to heap indirection without recording the deviation.
+  - **Declaration order.** Follow the order in the interface block. Each step is valid because:
+    - **(1)** `using json_array = std::vector<json_value>` only names a specialization.
+    - **(2)** `json_object`'s data member `std::vector<json_member>` instantiates the vector class with an incomplete element type. The standard permits this for `vector`, `list`, and `forward_list` when the element type is complete before any member of the specialization is referenced. `json_object` must therefore declare every special member, and must define no in-class function body that uses `members_`. Otherwise an implicit or inline definition would instantiate `vector<json_member>` members while `json_member` is incomplete.
+    - **(3)** `json_value`'s variant requires complete alternative types. `json_object` is complete after (2), and `std::vector<json_value>` is a complete class type even though `json_value` is not. `json_value` declares all five special members and defines none in-class, so the variant's copy, move, and destroy operations, and the element operations of `vector<json_value>` and `vector<json_member>`, are instantiated only in (5).
+    - **(4)** `json_member` holds a complete `json_value`.
+    - **(5)** Every `json_object` and `json_value` function is defined here, out of class, including `= default` for the special members, after all three types are complete.
+  - **Checks.** At the end of (5), add:
+
+    ```cpp
+    static_assert(std::is_nothrow_move_constructible_v<json_value>);
+    static_assert(std::is_nothrow_move_constructible_v<json_object>);
+    static_assert(std::is_copy_constructible_v<json_value>);
+    ```
+
+    `vector<json_value>` growth uses `move_if_noexcept`, so the noexcept moves matter for performance.
+  - **Checking the layout first.** Before writing the rest of Step 3, compile the empty skeleton, the declarations plus the (5) special members, in both the AXE and the non-AXE scratch TUs from Task 10 Step 3, at `/W4`. Then instantiate `json_value v = json_array{ json_object{ { "k", 1 } } }; auto w = v;` in a test. If a toolset rejects this layout, stop and report with the diagnostic; do not switch to heap indirection without review.
   - **Numeric equality.** Compare mathematically and exactly:
     - int64 against uint64: a negative value is never equal; otherwise cast and compare.
     - an integer against a double: the double must be finite and integral, with `std::trunc(d) == d`, and within [−2^63, 2^64). Convert the double to the matching integer type and compare exactly. The double 2^63 is compared as a uint64.
@@ -672,6 +729,7 @@ public:
   - **Object equality.** Sizes must match.
     - With up to 16 members, look up each key of the left object in the right one.
     - Otherwise, build two vectors of `const json_member*`, sort both by key, and compare them pairwise.
+  - **No `noexcept` on equality.** `operator==` is deliberately **not** `noexcept`, because the sorted path allocates and may throw `std::bad_alloc`. The numeric and scalar helpers it calls may be `noexcept`.
 - [ ] **Step 4: GREEN.** Build Debug and Release x64.
 - [ ] **Step 5: Commit** with `git commit -m "feat: add general JSON value type with checked accessors and structural equality"`.
 
@@ -812,8 +870,8 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
   - **`json_try_parse_value_test`:**
     - on error, an `unexpected` with the code, offset, line, and column;
     - a valid document gives `has_value()`;
-    - the rule that `try_` catches only `json_parse_error`, never `std::bad_alloc` or a handler's `std::logic_error`, is verified in review (Task 10, Step 5), because forcing `bad_alloc` in a test is impractical.
-  - **`json_parse_value_stream_test`.** The stream overloads honour `max_input_bytes` through `read_capped`, using `counting_streambuf`.
+    - the rule that `try_` catches only `json_parse_error`, never `std::bad_alloc` or a handler's `std::logic_error`, is verified in review (Task 10, Step 4), because forcing `bad_alloc` in a test is impractical.
+  - **`json_parse_value_stream_test`.** The stream overloads honour `max_input_bytes` through `read_capped`. With the Task 1 `extraction_streambuf`, a rejection has `extracted() <= max_input_bytes + 1`.
   - **`json_realistic_shapes_test`.** Two hand-written documents:
     - a Claude stream-json `assistant` message, `{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls","timeout":120000}}],"usage":{"input_tokens":12,"output_tokens":3}},"session_id":"s"}`;
     - a review-findings array, `[{"file":"a.cpp","location":{"line":10,"column":4},"severity":"high","summary":"x"},{"file":"b.h","location":{"line":1,"column":1},"severity":"low","summary":"y"}]`.
@@ -821,10 +879,34 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     Navigate them with `at_pointer` (`/message/content/1/input/timeout`, `/1/location/line`) and check round-trip equality through `format_json`.
 - [ ] **Step 2: Confirm RED.**
 - [ ] **Step 3: Implement `json_value_builder`**
-  - **Frame stack.** Keep `std::vector<frame>`. A frame holds a `json_value` (array or object), an `std::optional<std::string> pending_key`, and `std::unique_ptr<index_set>`.
-    - `index_set` is an `std::unordered_set<std::size_t, key_hash, key_eq>`.
-    - Its hasher and comparator read `members[i].key()` through a pointer to the frame's object. It supports heterogeneous lookup by `std::string_view` through `is_transparent`.
-    - The set is created when an object reaches 9 members, and it indexes all of them at that point.
+  - **Frame stack.** Keep `std::vector<frame>`. A frame holds:
+    - a `json_value`, the array or object being built;
+    - an `std::optional<std::string> pending_key`;
+    - `std::unique_ptr<key_index>`.
+
+    Opening a nested container can reallocate this vector and move every frame, including the frame of an outer object that is still open. For that reason no frame member, and nothing reachable from one, may hold a pointer or reference into another frame or into a `json_object`'s member storage.
+  - **The key index owns its keys:**
+
+    ```cpp
+    struct transparent_string_hash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+    };
+    using key_index = std::unordered_map<std::string, std::size_t, transparent_string_hash, std::equal_to<>>;
+    ```
+
+    - It maps a key to the member's position within its object.
+    - It is created when an object reaches 9 members, copying the existing keys at that point, and it gets every later key as the key is added.
+    - Positions are stable, because a frame's object is only appended to while the frame is open; the builder never erases.
+    - Lookup is heterogeneous, `find(std::string_view)`, as MSVC supports for C++20.
+    - `keep_last` overwrites the member at the mapped position. `reject` and `keep_first` need only the lookup.
+    - The extra key copies cost memory only for objects of 9 or more members. Record the measured cost for the 500,000-key object in Task 9.
+  - **Frame-reallocation regression (`json_parse_value_duplicate_after_nesting_test`).** Add it to Step 1. It needs an object that already has an index, so it has 12 members. Its 13th member is a 64-level nested object, `{"n":{"n":...{}}}`, which grows the frame vector from its initial capacity several times. The builder must not reserve frames up front beyond a small constant, so the test really reallocates. Three duplicates of the object's first key then follow, and the expected results are:
+    - `reject` reports the duplicate at the correct offset;
+    - `keep_first` keeps member 0's original value;
+    - `keep_last` overwrites member 0.
+
+    Run it in Debug and Release. A dangling index would give wrong results or crash here.
   - **Adding a value.** Scalars and completed containers go to the parent frame, or to the root if there is none. For an object parent:
     - `reject`: throw `json_handler_error{duplicate_key, "duplicate JSON object key"}` from `key()`. The front end supplies the key's offset.
     - `keep_first`: remember a "discard next value" flag.
@@ -932,9 +1014,10 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
       - a document containing `\u0000` in a key → accept.
   - **Runner (`json_conformance_test`):**
     - For each case, parse through `parse_json_value` and through a no-op SAX handler. Both must agree with `outcome`, and for a rejected case, with `code`.
-    - For object- or array-rooted cases, also run `read_json` with `table_mode = infer_tables`:
-      - an `n_` case must throw `json_parse_error` with the same code;
-      - a `y_` case either succeeds or throws `std::logic_error`, since the json_db value model is narrower.
+    - For object- or array-rooted cases, also run `read_json` with `table_mode = infer_tables`. The json_db value model is narrower, and `json_db_builder` can throw `std::logic_error` before the parser reaches a defect later in the input. For example, nested arrays and mixed arrays are rejected by the builder.
+      - An `n_` case must never succeed. If it throws `json_parse_error`, the code must equal the expected code. A `std::logic_error` is accepted.
+      - Cases marked `json_db_code_required` must throw `json_parse_error` with the expected code. These are object-rooted string, UTF-8, surrogate, number, and nested-object depth cases, in which the builder cannot object first.
+      - A `y_` case either succeeds or throws `std::logic_error`.
     - On failure, print the case name to `std::cout` before calling `gbassert`.
 - [ ] **Step 2: Round-trip property test (`json_round_trip_property_test`)**
   - **Generator.** `std::mt19937_64 rng{ 0x5eed'1234'abcd'0001 }` generates 2,000 values with depth ≤ 6 and width ≤ 6. Kinds are weighted evenly.
@@ -964,16 +1047,32 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - fails if the thread's exit code is non-zero.
 
     A stack overflow on that thread terminates the test process, which the suite reports as a crash. That outcome is the failure signal.
-  - **`json_depth_256_fits_1mib_stack_test`.** On a 1 MiB-reservation thread:
-    - `parse_json_value` of `arrays(256, "1")`, `objects(256, "true")`, and `alternating(256, "\"s\"")` succeeds;
-    - `read_json` of `objects(256, "1")` succeeds;
-    - `std::string(1'000'000, '[')` gives `depth_exceeded`.
-  - **`json_stack_per_level_measurement_test`:**
-    - A handler records `reinterpret_cast<std::uintptr_t>(&local)`, where `local` is a `volatile char` in a `__declspec(noinline)` member called from `begin_array`, for every level of `arrays(200, "1")` and `objects(200, "1")`.
-    - `per_level = (first - last) / 199`. Print `json stack: <config> arrays=<n> objects=<n> bytes/level, 256 levels=<KiB> KiB` to `std::cout`.
-    - Assert `per_level * 256 <= 640 * 1024` in every configuration.
+  - **Test helper `measure_peak_stack(F f) -> std::size_t`.** It runs `f` on a **fresh** 1 MiB-reservation thread through `run_on_thread_with_stack`. A thread's committed stack only grows, so every measurement needs its own thread. Inside the thread:
+    1. call `GetCurrentThreadStackLimits(&low, &high)`;
+    2. run `f`, catching and keeping any exception;
+    3. walk `VirtualQuery` upward from `low` to find the first region in `[low, high)` with `State == MEM_COMMIT`, which includes the `PAGE_GUARD` region;
+    4. return `high - region.BaseAddress`.
 
-    The spec's gate concerns x64 Debug, and the other configurations measured lower. If only a non-Debug configuration fails, stop and report; do not loosen the gate.
+    This is the thread's actual peak stack displacement at page granularity. It includes fixed overhead (thread start-up, the thunk, handler frames) and transient callees such as `from_chars`, AXE's UTF-8 rule, and exception dispatch, all of which run on the same stack.
+    - **Baseline.** First measure an empty `f` and log it. If the baseline exceeds 64 KiB, the measurement is unreliable, for example because of a large PE stack-commit setting, so fail with that diagnosis.
+  - **`json_stack_peak_gate_test`.** Every workload below runs through `measure_peak_stack`. For each one, log `json stack peak: <config> <workload> <KiB> KiB (baseline <KiB>)` to `std::cout`, and assert a peak of at most 640 KiB. The peak is raw, not baseline-subtracted, so the gate is conservative.
+    - `parse_json_value`:
+      - `arrays(256, "1")`;
+      - `objects(256, "true")`;
+      - `alternating(256, "\"s\"")`;
+      - `with_siblings(256, "-1.5e-300")`, which takes the double path at maximum depth;
+      - `arrays(256, "\"a\\n\\ud83d\\ude00\xC3\xA9\"")`, which takes the escape, surrogate, and raw UTF-8 decoding path at maximum depth.
+    - `read_json` of `objects(256, "1")` and `objects(256, "\"s\"")`.
+    - Error paths at maximum depth, where exception dispatch runs below the deepest parser frame:
+      - `arrays(257, "1")` and `objects(257, "1")` → `depth_exceeded`;
+      - `std::string(1'000'000, '[')` → `depth_exceeded`;
+      - a duplicate key inside the 256th object under `reject` → `duplicate_key`, through the `json_handler_error` translation path;
+      - a control character inside a string at depth 256 → `control_character`.
+
+    The spec's gate concerns x64 Debug. The gate is asserted in every configuration, because all of them measured lower in the spec probe. If only a non-Debug configuration fails, stop and report; do not loosen the gate.
+  - **`json_stack_per_level_slope_test`** (informational, not a gate):
+    - A handler records `reinterpret_cast<std::uintptr_t>(&local)`, where `local` is a `volatile char` in a `__declspec(noinline)` member called from `begin_array` or `begin_object`, for every level of `arrays(200, "1")` and `objects(200, "1")`.
+    - It logs `json stack slope: <config> arrays=<n> objects=<n> bytes/level`, and it asserts only that the slope is positive and finite, which guards the measurement itself.
 
     **Gate failure.** If the gate fails in x64 Debug, stop and report the numbers to the operator. Do not change `max_depth`'s default, and do not weaken the test.
 - [ ] **Step 2: Performance smoke test (`json_performance_smoke_test`)**
@@ -989,7 +1088,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - `wide_object` with 125,000 and 500,000 keys (divided by 8 in Debug), parsed by DOM, which exercises the duplicate-detection hash path.
   - **Assertions and output.** For each set, assert `t4 / t1 < 8.0`. Print the MiB/s figures to `std::cout`, and record them in the handoff.
   - **Win32.** If the 50 MiB DOM parse fails with `std::bad_alloc` there, pass `S/2` for Win32 only (`#if !defined(_WIN64)`) and record the deviation. Do not skip the SAX runs.
-- [ ] **Step 3: Build and run.** Run the Debug and Release builds on x64 and Win32. Copy the measurement and throughput lines into the handoff notes, and into the `json_parser.h` header comment ("measured bytes per level: ..."), with the date and toolset.
+- [ ] **Step 3: Build and run.** Run the Debug and Release builds on x64 and Win32. Copy the peak, slope, and throughput lines into the handoff notes. Also copy the peak and slope figures into the `json_parser.h` header comment ("measured peak stack for 256 levels: ..."), with the date and toolset.
 - [ ] **Step 4: Commit** with `git commit -m "test: gate JSON parser stack use and check linear parse time"`.
 
 ---
@@ -1021,17 +1120,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
      - `noaxe.cpp` is the same without the macro. It calls `parse_json_value` and `read_json` and expects `std::logic_error`.
   2. Compile both with `cl /nologo /std:c++latest /EHsc /utf-8 /Zc:__cplusplus /permissive- /W4 /WX /c` through a `vcvars64.bat` wrapper (the pattern the spec's stack probe used). For `w4.cpp`, pass `/external:I C:\Projects\GitHub\axe\include /external:W0`, which is how the orchestrator consumes AXE.
   3. Expected: zero warnings, and both TUs compile. Link and run `noaxe.cpp` to confirm the `logic_error` messages.
-- [ ] **Step 4: Final rebase and full verification**
-
-  ```powershell
-  git rebase master          # the then-current local master
-  git diff --check
-  ```
-
-  - Rebuild all four configurations with `/t:Rebuild` and the `AxeIncludeDir` form. Every configuration that was green at the Task 0 baseline must report `failed: 0`. Record `passed`, `failed`, and `disabled` against the baseline.
-  - Rerun the Release x64 exe twice more to check that the timing gates are stable.
-  - `git status --short --branch` must be clean apart from the commit made next.
-- [ ] **Step 5: Independent code review.** Review against every section of the spec. Pay particular attention to:
+- [ ] **Step 4: Independent code review.** Review against every section of the spec. Pay particular attention to:
   - the depth-wrapper placement: no composite, no `r_rule`;
   - the error offsets;
   - the stream-cap byte bound;
@@ -1041,10 +1130,24 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
   - integer canonicalization;
   - object equality on large objects.
 
-  Apply technically valid findings with fresh RED/GREEN cycles.
+  Apply technically valid findings with fresh RED/GREEN cycles, and commit them.
+- [ ] **Step 5: Mutation checks.** These run on the committed tree, before the final rebuild, and are reverted afterwards.
+  1. **Required, and independent of the AXE version.** Change `value()` so that it invokes a freshly constructed local copy of the depth wrapper, `auto copy = limited; return copy(i, end);`, instead of the member. This reproduces the copy-per-call defect. Build x64 Debug with `/p:PostBuildEventUseInBuild=false` and run the exe. The Task 2 depth boundary tests and the hostile-input tests must fail. If the hostile-input run crashes the process, that is the expected failure.
+  2. **Informational.** Nest the wrapper inside a composite (`limited | r_fail(...)`) and record whether the depth tests fail. The result depends on whether AXE `master` contains the `get()` fix at that time; record the AXE hash.
+  3. **Revert both.** Confirm `git diff --exit-code` and `git status --short` show a clean tree. The binaries built with the mutations are now stale, and Step 6 rebuilds everything from the committed source.
+- [ ] **Step 6: Final rebase and full verification** (from the clean, committed tree)
 
-  **Mutation check.** Temporarily wrap the structural rule inside an AXE composite, for example `limited | r_fail(...)`, and confirm that the depth tests fail on the current AXE `master` if the `get()` fix has not landed. Revert, and record the result.
-- [ ] **Step 6: Write the Execution Handoff section** at the end of this plan. It records:
+  ```powershell
+  git rebase master          # the then-current local master
+  git diff --check
+  git status --short --branch
+  ```
+
+  - `git status` must show no uncommitted changes before the rebuild.
+  - Rebuild all four configurations with `/t:Rebuild` and the `AxeIncludeDir` form. Every configuration that was green at the Task 0 baseline must report `failed: 0`. Record `passed`, `failed`, and `disabled` against the baseline.
+  - Rerun the Release x64 exe twice more to check that the timing gates are stable.
+  - Record `git rev-parse HEAD`. The binaries tested in this step correspond to that commit. The handoff commit that follows changes only this plan document.
+- [ ] **Step 7: Write the Execution Handoff section** at the end of this plan. It records:
   - the base master and AXE hashes;
   - the baseline and final test counts per configuration;
   - the stack and throughput measurements;
@@ -1059,4 +1162,4 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
 
 ## Execution Handoff
 
-_To be completed after execution (Task 10, Step 6)._
+_To be completed after execution (Task 10, Step 7)._
