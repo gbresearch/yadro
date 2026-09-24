@@ -22,6 +22,7 @@ A handful of `.cpp` files are compiled into a small static library.
 - [Getting started](#getting-started)
 - [Modules](#modules)
   - [util: general utilities](#util-general-utilities)
+    - [Named-pipe security](#named-pipe-security)
   - [async: thread pool and tasks](#async-thread-pool-and-tasks)
   - [archive: serialization](#archive-serialization)
   - [container: data structures and gbdb](#container-data-structures-and-gbdb)
@@ -131,7 +132,7 @@ Namespace `gb::yadro::util`, aggregate header `util/gbutil.h`.
 | `named_resource_lock.h`| `named_resource_lock::acquire(scope, path)`: an exclusive, fail-fast inter-process lock identified by a scope name and a filesystem path. Currently implemented on Windows only. |
 | `gnuplot.h`            | A `gnuplot` wrapper that builds plots (`plot_t`, `plotstyle`, multi-pane layouts) from C++ data. |
 | `gbwin.h`              | Windows helpers (only when `GBWINDOWS` is defined): `dll` loader, UUID strings, temporary file paths, `micro_sleep`. |
-| `win_pipe.h`           | Windows named-pipe RPC: `start_server(pipename, log, fn...)` exposes a list of functions, and `winpipe_client_t::request<R>(index, args...)` calls them, with arguments and results serialized through `archive`. |
+| `win_pipe.h`           | Windows named-pipe RPC: `start_server(pipename, [options,] log, fn...)` exposes a list of functions, by index or as `std::tuple{ "name", fn }`, and `winpipe_client_t::request<R>(index or name, args...)` calls them, with arguments and results serialized through `archive`. Pipes are secure by default; see [Named-pipe security](#named-pipe-security). |
 | `win_service.h`        | Run an executable as a Windows service (`win_service_main`, `win_service_install`). |
 
 Example: assertions and logging
@@ -144,6 +145,40 @@ must_throw([] { throw_error("boom"); }); // asserts that the callable throws
 
 logger log(std::cout, "app.log");         // log to the console and a file
 log() << "pi=" << tab{ 10 } << 3.14;
+```
+
+#### Named-pipe security
+
+Servers created by `start_server` and `winpipe_server_t` are locked down by default:
+
+- **Access:** a protected DACL grants full access only to the account the server process runs as and to LocalSystem (`default_pipe_sddl()`). Windows' own default would also admit Administrators, and give Everyone and anonymous read access.
+- **Local clients only:** the pipe is created with `PIPE_REJECT_REMOTE_CLIENTS`.
+- **Name squatting:** the server's first instance uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, so it refuses to start if another process already owns the pipe name. While the server runs, it always keeps an instance open, so the name can't be taken between connections.
+- **Clients:** `winpipe_client_t` requests only the rights it uses (`pipe_client_access`), and connects at identification level, so a server can tell who connected but can't impersonate the client.
+
+Clients running as the server's own account are unaffected. Everyone else is refused unless you opt in:
+
+| To admit | Use |
+|----------|-----|
+| Another account or group, e.g. a service account or interactive users | `pipe_server_options{ .sddl = default_pipe_sddl() + pipe_client_ace(L"<SID or alias>") }` |
+| Clients on other machines | `pipe_server_options{ .allow_remote_clients = true }`, plus a DACL entry for their accounts |
+| Several independent server processes on one pipe name | `pipe_server_options{ .first_pipe_instance = false }` |
+| A trusted server that impersonates its clients | `pipe_client_options{ .allow_impersonation = true }` on the client |
+
+Grant other accounts access through `pipe_client_ace`, not `GW` or `GA`: on a pipe those include the right to create pipe instances, which would let that account run its own instance and receive other clients' connections. Processes running as the server's own account keep that right, because the server needs it to create its later instances. `pipe_server_options` also accepts caller-owned `SECURITY_ATTRIBUTES`. The comments in `util/win_pipe.h` give the details.
+
+```cpp
+using namespace gb::yadro::util;
+
+// server (blocks until a client calls shutdown()): also admit interactive users as clients
+start_server(LR"(\\.\pipe\myapp)",
+    pipe_server_options{ .sddl = default_pipe_sddl() + pipe_client_ace(L"IU") },
+    nullptr,
+    std::tuple{ "add", [](int a, int b) { return a + b; } });
+
+// client, in another process
+winpipe_client_t client(LR"(\\.\pipe\myapp)", "my client", 10);
+auto sum = client.request<int>("add", 2, 3);   // std::expected<int, std::string>
 ```
 
 ### async: thread pool and tasks
