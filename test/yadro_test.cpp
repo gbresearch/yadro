@@ -56,6 +56,32 @@ int main(int argc, char* argv[])
         }
         ExitProcess(0);
     }
+
+    // Child mode for the pipe server identity tests: serves the pipe from a process of its own,
+    // which the test starts at low integrity, until a client requests shutdown. The one function
+    // reports this process's ID.
+    if (argc == 3 && argv[1] == std::string("--pipe-server"))
+    {
+        try
+        {
+            const std::string name{ argv[2] };
+            pipe_listener_t listener{ std::wstring{ name.begin(), name.end() } };
+            for (;;)
+            {
+                auto server = winpipe_server_t::accept(listener, nullptr);
+                try
+                {
+                    if (server && server->run([] { return static_cast<std::uint32_t>(GetCurrentProcessId()); }) == server_shutdown)
+                        return 0;
+                }
+                catch (...) {} // e.g. a client that rejected this server and closed without a request
+            }
+        }
+        catch (...)
+        {
+            return -1;
+        }
+    }
 #endif
 
     tester::set_verbose(true);
