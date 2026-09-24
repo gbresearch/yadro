@@ -31,12 +31,18 @@
 #include <exception>
 #include <stdexcept>
 #include <concepts>
+#include <cstdint>
+#include <format>
 #include <functional>
+#include <iterator>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <sstream>
 #include <source_location>
 #include <stacktrace>
+#include <type_traits>
+#include <utility>
 
 // keeps a cold function out of line, so the code inlined at its call sites stays small
 #if defined(_MSC_VER)
@@ -201,6 +207,178 @@ namespace gb::yadro::util
         requires(std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
     {
         gbassert<ErrorType>(std::forward<decltype(cond)>(cond), "assertion failed", location);
+    }
+
+    //-------------------------------------------------------------------------
+    // the message is built by make_msg, which is invoked only when the assertion fails, so a message that
+    // formats values costs nothing while the assertion passes:
+    //   gbassert(v.size() == n, [&] { return std::format("size {}, expected {}", v.size(), n); });
+    template<class ErrorType = generic_error>
+    inline void gbassert(const auto& cond, const auto& make_msg, std::source_location location = std::source_location::current())
+        requires((std::invocable<decltype(cond)> || std::convertible_to<decltype(!cond), bool>)
+            && std::invocable<decltype(make_msg)>
+            && !std::convertible_to<decltype(make_msg), std::string_view>
+            && std::convertible_to<std::invoke_result_t<decltype(make_msg)>, std::string_view>)
+    {
+        if constexpr (std::invocable<decltype(cond)>)
+        {
+            if (!std::invoke(cond)) [[unlikely]]
+                detail::throw_failed_assertion<ErrorType>(std::invoke(make_msg), location);
+        }
+        else
+        {
+            if (!cond) [[unlikely]]
+                detail::throw_failed_assertion<ErrorType>(std::invoke(make_msg), location);
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    namespace detail
+    {
+        template<class T>
+        concept character = std::same_as<std::remove_cv_t<T>, char> || std::same_as<std::remove_cv_t<T>, wchar_t>
+            || std::same_as<std::remove_cv_t<T>, char8_t> || std::same_as<std::remove_cv_t<T>, char16_t>
+            || std::same_as<std::remove_cv_t<T>, char32_t>;
+
+        // integers that std::cmp_equal and friends accept, compared by value whatever their signedness
+        template<class T>
+        concept comparable_integer = std::integral<T> && !std::same_as<std::remove_cv_t<T>, bool> && !character<T>;
+
+        template<class T>
+        concept streamable = requires(std::ostream & os, const T & v) { os << v; };
+
+        // appends v as a comparison assertion reports it: strings and characters quoted, then whatever
+        // std::format or operator<< makes of it, an enumeration as its underlying value, and otherwise a placeholder
+        template<class T>
+        void append_operand(std::string& out, const T& v)
+        {
+            if constexpr (std::same_as<T, std::nullptr_t>)
+                out += "nullptr";
+            else if constexpr (std::is_pointer_v<T> && std::convertible_to<const T&, std::string_view>)
+            {
+                if (v == nullptr)
+                    out += "nullptr";
+                else
+                    std::format_to(std::back_inserter(out), "\"{}\"", std::string_view(v));
+            }
+            else if constexpr (std::convertible_to<const T&, std::string_view>)
+                std::format_to(std::back_inserter(out), "\"{}\"", std::string_view(v));
+            else if constexpr (std::same_as<T, char>)
+                std::format_to(std::back_inserter(out), "'{}'", v);
+            else if constexpr (character<T>)
+                std::format_to(std::back_inserter(out), "U+{:04X}", static_cast<std::uint32_t>(v));
+            else if constexpr (std::formattable<T, char>)
+                std::format_to(std::back_inserter(out), "{}", v);
+            else if constexpr (streamable<T>)
+            {
+                std::ostringstream os;
+                os << v;
+                out += std::move(os).str();
+            }
+            else if constexpr (std::is_enum_v<T>)
+                std::format_to(std::back_inserter(out), "{}", std::to_underlying(v));
+            else
+                out += "<unprintable>";
+        }
+
+        // the failure path of the comparison assertions, kept out of line like throw_failed_assertion
+        template<class ErrorType, class A, class B>
+        [[noreturn]] GB_YADRO_NOINLINE void throw_failed_comparison(const A& a, std::string_view op, const B& b,
+            const std::source_location& location)
+        {
+            std::string msg = "assertion failed: ";
+            append_operand(msg, a);
+            msg += ' ';
+            msg += op;
+            msg += ' ';
+            append_operand(msg, b);
+            throw_failed_assertion<ErrorType>(msg, location);
+        }
+
+        // the comparison assertions' failure message would report two C strings as text, while == compares addresses
+        template<class A, class B>
+        constexpr bool both_c_strings = std::is_pointer_v<std::decay_t<A>> && std::is_pointer_v<std::decay_t<B>>
+            && character<std::remove_pointer_t<std::decay_t<A>>> && character<std::remove_pointer_t<std::decay_t<B>>>;
+
+        enum class comparison { eq, ne, lt, le, gt, ge };
+
+        // compares two integers by value, as std::cmp_equal and friends do, and anything else with its operator
+        template<comparison C>
+        constexpr bool compare(const auto& a, const auto& b)
+        {
+            if constexpr (comparable_integer<std::remove_cvref_t<decltype(a)>> && comparable_integer<std::remove_cvref_t<decltype(b)>>)
+            {
+                if constexpr (C == comparison::eq) return std::cmp_equal(a, b);
+                else if constexpr (C == comparison::ne) return std::cmp_not_equal(a, b);
+                else if constexpr (C == comparison::lt) return std::cmp_less(a, b);
+                else if constexpr (C == comparison::le) return std::cmp_less_equal(a, b);
+                else if constexpr (C == comparison::gt) return std::cmp_greater(a, b);
+                else return std::cmp_greater_equal(a, b);
+            }
+            else
+            {
+                if constexpr (C == comparison::eq) return static_cast<bool>(a == b);
+                else if constexpr (C == comparison::ne) return static_cast<bool>(a != b);
+                else if constexpr (C == comparison::lt) return static_cast<bool>(a < b);
+                else if constexpr (C == comparison::le) return static_cast<bool>(a <= b);
+                else if constexpr (C == comparison::gt) return static_cast<bool>(a > b);
+                else return static_cast<bool>(a >= b);
+            }
+        }
+
+        template<class ErrorType, comparison C>
+        inline void assert_comparison(const auto& a, const auto& b, const std::source_location& location)
+        {
+            static_assert(!both_c_strings<decltype(a), decltype(b)>,
+                "comparing two C strings compares their addresses; compare std::string_view to compare the text");
+            constexpr std::string_view operators[] = { "==", "!=", "<", "<=", ">", ">=" };
+            if (!compare<C>(a, b)) [[unlikely]]
+                throw_failed_comparison<ErrorType>(a, operators[static_cast<std::size_t>(C)], b, location);
+        }
+    }
+
+    //-------------------------------------------------------------------------
+    // comparison assertions: gbassert_eq(a, b) asserts a == b, and gbassert_ne, gbassert_lt, gbassert_le, gbassert_gt
+    // and gbassert_ge assert !=, <, <=, > and >=. A failure throws ErrorType, failed_assertion by default, reporting
+    // both operands and the location:
+    //   gbassert_eq(1 + 2, 4) throws "[E0] assertion failed: 3 == 4 (file.cpp:42)"
+    // Operands print through std::format, else operator<<, else as "<unprintable>"; strings and characters are quoted.
+    // Two integers compare by value, as std::cmp_equal and friends do, so gbassert_lt(-1, 1u) passes. As with gbassert,
+    // a passing assertion only evaluates the comparison and never allocates.
+    template<class ErrorType = failed_assertion>
+    inline void gbassert_eq(const auto& a, const auto& b, std::source_location location = std::source_location::current())
+    {
+        detail::assert_comparison<ErrorType, detail::comparison::eq>(a, b, location);
+    }
+
+    template<class ErrorType = failed_assertion>
+    inline void gbassert_ne(const auto& a, const auto& b, std::source_location location = std::source_location::current())
+    {
+        detail::assert_comparison<ErrorType, detail::comparison::ne>(a, b, location);
+    }
+
+    template<class ErrorType = failed_assertion>
+    inline void gbassert_lt(const auto& a, const auto& b, std::source_location location = std::source_location::current())
+    {
+        detail::assert_comparison<ErrorType, detail::comparison::lt>(a, b, location);
+    }
+
+    template<class ErrorType = failed_assertion>
+    inline void gbassert_le(const auto& a, const auto& b, std::source_location location = std::source_location::current())
+    {
+        detail::assert_comparison<ErrorType, detail::comparison::le>(a, b, location);
+    }
+
+    template<class ErrorType = failed_assertion>
+    inline void gbassert_gt(const auto& a, const auto& b, std::source_location location = std::source_location::current())
+    {
+        detail::assert_comparison<ErrorType, detail::comparison::gt>(a, b, location);
+    }
+
+    template<class ErrorType = failed_assertion>
+    inline void gbassert_ge(const auto& a, const auto& b, std::source_location location = std::source_location::current())
+    {
+        detail::assert_comparison<ErrorType, detail::comparison::ge>(a, b, location);
     }
 
     //-------------------------------------------------------------------------

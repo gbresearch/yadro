@@ -33,6 +33,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <initializer_list>
+#include <algorithm>
+#include <optional>
 #include <future>
 
 #include "gblog.h"
@@ -49,20 +53,84 @@ namespace gb::yadro::util
     {
         bool _result{ false };
         bool _enabled{ true };
+        bool _selected{ false }; // chosen by a run-only selection, see tester::run_only_suites
         std::launch _policy;
         const char* _test_name{};
 
         explicit operator bool() { return _result; }
 
         virtual void run() const = 0;
+
+        // registers the test with the global tester, as GB_TEST does
         test_base(const char* test_name, const char* suite, std::launch policy = std::launch::deferred);
+        // registers the test with the given tester, which is independent of the global one
+        test_base(const char* test_name, const char* suite, tester& owner, std::launch policy = std::launch::deferred);
     };
 
+    namespace detail
+    {
+        // matches text against a pattern in which '*' matches any sequence and '?' any one character
+        constexpr bool wildcard_match(std::string_view pattern, std::string_view text)
+        {
+            std::size_t p = 0, t = 0, star = std::string_view::npos, resume = 0;
+            while (t < text.size())
+            {
+                if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == text[t]))
+                {
+                    ++p;
+                    ++t;
+                }
+                else if (p < pattern.size() && pattern[p] == '*')
+                {
+                    star = p++;
+                    resume = t;
+                }
+                else if (star != std::string_view::npos)
+                {
+                    p = star + 1; // let the last '*' swallow one more character
+                    t = ++resume;
+                }
+                else
+                    return false;
+            }
+            while (p < pattern.size() && pattern[p] == '*')
+                ++p;
+            return p == pattern.size();
+        }
+    }
+
     //-----------------------------------------------------------------------------------------------------------------
+    // Test registry and runner. GB_TEST registers each test with the global tester, get(), which the static functions
+    // operate on. A separately constructed tester, with tests registered through test_base's tester& constructor, is
+    // independent of the global one; its public member functions are the same operations.
+    //
+    // Suites and tests run in registration order. Within a translation unit that is the order of definition; across
+    // translation units it follows static initialization order, which the standard leaves unspecified (in practice it
+    // is the order in which the object files are linked).
+    //
+    // Selection: when nothing is selected every registered test runs. Once a suite or test is selected (run_only_suites,
+    // run_only_tests, or --suite/--test on the command line), only the selected tests run; the rest are neither run nor
+    // reported, except as a count in the summary. Selection names may use the wildcards '*' and '?', and a name that
+    // matches no registered test throws std::invalid_argument, so a typo cannot silently run nothing. Disabling is
+    // independent of selection: a disabled test stays disabled even when it is selected.
     struct tester
     {
+        struct suite_t
+        {
+            std::string name;
+            std::vector<test_base*> tests;
+        };
+
+        // the options of a command line that parse_command_line recognized
+        struct command_line
+        {
+            bool list{};                            // --list: print the selected tests instead of running them
+            bool help{};                            // --help: print usage()
+            std::vector<std::string> unrecognized;  // the arguments left to the caller, in order
+        };
+
         std::unique_ptr<gb::yadro::async::threadpool> _pool;
-        std::unordered_map<std::string, std::vector<test_base*>> _tests;
+        std::vector<suite_t> _suites; // in registration order
         mutable logger _log;
 
         static tester& get()
@@ -71,14 +139,21 @@ namespace gb::yadro::util
             return m;
         }
 
-        static bool run() { return get()._run(); }
+        static bool run() { return get().run_tests(); }
+
+        // parses the command line, then lists or runs the selected tests: returns false on a command-line error or a
+        // failed test; app_options are arguments the caller handles itself, which the tester ignores
+        static bool run(int argc, const char* const argv[], std::initializer_list<std::string_view> app_options = {})
+        {
+            return get().run_command_line(argc, argv, app_options);
+        }
 
         static void set_policy(std::launch policy)
         {
             // allow async tests to be run async or deferred
             // tests created defferred always run deferred
-            for (auto& rec : get()._tests) 
-                for (auto& test : rec.second)
+            for (auto& suite : get()._suites)
+                for (auto& test : suite.tests)
                     if(test->_policy == std::launch::async)
                         test->_policy = policy;
             
@@ -90,12 +165,46 @@ namespace gb::yadro::util
         
         static void disable_suites(auto&& ... names)
         {
-            (get()._disable_suite(names),...);
+            (get().disable_suite(names),...);
         }
         
         static void disable_tests(const char* suite, auto&& ... tests)
         {
-            (get()._disable_test(suite, tests), ...);
+            (get().disable_test(suite, tests), ...);
+        }
+
+        // runs only the matching suites, and whatever else is selected; throws std::invalid_argument for a name
+        // that matches no suite
+        static void run_only_suites(auto&& ... names)
+        {
+            (get().select_suite(names), ...);
+        }
+
+        // runs only the matching tests of the matching suites, and whatever else is selected; throws
+        // std::invalid_argument for a name that matches no test
+        static void run_only_tests(std::string_view suite, auto&& ... tests)
+        {
+            (get().select_test(suite, tests), ...);
+        }
+
+        // selects tests as the command line asks, see usage(); throws std::invalid_argument for a malformed option
+        // or a name that matches nothing, and leaves every other argument to the caller
+        static command_line parse_command_line(int argc, const char* const argv[])
+        {
+            return get().apply_command_line(argc, argv);
+        }
+
+        // writes the selected tests, one <suite>.<test> per line, in run order
+        static void list() { get().list_tests(); }
+
+        static constexpr std::string_view usage()
+        {
+            return "options:\n"
+                "  --suite <name>          run only the named suite (repeatable)\n"
+                "  --test <suite>.<name>   run only the named test (repeatable)\n"
+                "  --list                  print the selected tests as <suite>.<name>, without running them\n"
+                "  --help                  print this help\n"
+                "names may use the wildcards * and ?; a name that matches no registered test is an error";
         }
 
         static void set_logger(auto&& ... streams)
@@ -113,61 +222,199 @@ namespace gb::yadro::util
             get()._verbose = verbose;
         }
 
-    private:
-        bool _verbose{};
+        //-------------------------------------------------------------------------------------------------------------
+        // member operations behind the static functions, usable on any tester
 
-        bool _run()
+        void add_test(std::string_view suite, test_base* test)
+        {
+            auto found = std::ranges::find(_suites, suite, &suite_t::name);
+            if (found == _suites.end())
+                found = _suites.insert(found, suite_t{ std::string(suite), {} });
+            found->tests.push_back(test);
+        }
+
+        void select_suite(std::string_view name)
+        {
+            auto matched = false;
+            for (auto& suite : _suites)
+            {
+                if (detail::wildcard_match(name, suite.name))
+                {
+                    matched = true;
+                    for (auto test : suite.tests)
+                        test->_selected = true;
+                }
+            }
+            if (!matched)
+                throw std::invalid_argument(to_string("no registered suite matches \"", name, "\""));
+            _filtered = true;
+        }
+
+        void select_test(std::string_view suite_name, std::string_view test_name)
+        {
+            auto matched = false;
+            for (auto& suite : _suites)
+            {
+                if (detail::wildcard_match(suite_name, suite.name))
+                {
+                    for (auto test : suite.tests)
+                    {
+                        if (detail::wildcard_match(test_name, test->_test_name))
+                        {
+                            matched = true;
+                            test->_selected = true;
+                        }
+                    }
+                }
+            }
+            if (!matched)
+                throw std::invalid_argument(to_string("no registered test matches \"", suite_name, ".", test_name, "\""));
+            _filtered = true;
+        }
+
+        void disable_suite(std::string_view name)
+        {
+            for (auto& suite : _suites)
+                if (suite.name == name)
+                    for (auto test : suite.tests)
+                        test->_enabled = false;
+        }
+
+        void disable_test(std::string_view suite_name, std::string_view test_name)
+        {
+            for (auto& suite : _suites)
+                if (suite.name == suite_name)
+                    for (auto test : suite.tests)
+                        if (test->_test_name == test_name)
+                            test->_enabled = false;
+        }
+
+        command_line apply_command_line(int argc, const char* const argv[])
+        {
+            command_line options;
+            for (auto i = 1; i < argc; ++i)
+            {
+                const std::string_view arg = argv[i];
+
+                // the value of option given as "option value" or "option=value", nothing when arg is another option
+                const auto value_of = [&](std::string_view option) -> std::optional<std::string_view>
+                {
+                    if (arg == option)
+                    {
+                        if (i + 1 == argc)
+                            throw std::invalid_argument(to_string(option, " requires a value"));
+                        return argv[++i];
+                    }
+                    if (arg.starts_with(option) && arg.size() > option.size() && arg[option.size()] == '=')
+                        return arg.substr(option.size() + 1);
+                    return std::nullopt;
+                };
+
+                if (arg == "--list")
+                    options.list = true;
+                else if (arg == "--help")
+                    options.help = true;
+                else if (auto suite = value_of("--suite"))
+                    select_suite(*suite);
+                else if (auto test = value_of("--test"))
+                {
+                    const auto dot = test->find('.');
+                    if (dot == std::string_view::npos || dot == 0 || dot + 1 == test->size())
+                        throw std::invalid_argument(to_string("--test expects <suite>.<name>, not \"", *test, "\""));
+                    select_test(test->substr(0, dot), test->substr(dot + 1));
+                }
+                else
+                    options.unrecognized.emplace_back(arg);
+            }
+            return options;
+        }
+
+        bool run_command_line(int argc, const char* const argv[], std::initializer_list<std::string_view> app_options = {})
+        {
+            command_line options;
+            try
+            {
+                options = apply_command_line(argc, argv);
+            }
+            catch (const std::invalid_argument& ex)
+            {
+                _log.writeln("error: ", ex.what(), "\n", usage());
+                return false;
+            }
+
+            for (auto& arg : options.unrecognized)
+            {
+                if (std::ranges::find(app_options, std::string_view(arg)) == app_options.end())
+                {
+                    _log.writeln("error: unknown argument \"", arg, "\"\n", usage());
+                    return false;
+                }
+            }
+
+            if (options.help)
+                _log.writeln(usage());
+            else if (options.list)
+                list_tests();
+            else
+                return run_tests();
+            return true;
+        }
+
+        void list_tests() const
+        {
+            for (auto& suite : _suites)
+                for (auto test : suite.tests)
+                    if (_included(*test))
+                        _log.writeln(suite.name, ".", test->_test_name);
+        }
+
+        bool run_tests()
         {
             std::vector<std::future<void>> futures;
             auto start_time = std::chrono::system_clock::now();
-            const std::size_t tab_size = 75;
 
-            for (auto& rec : _tests)
+            for (auto& suite : _suites)
             {
-                for (auto& test : rec.second)
+                for (auto test : suite.tests)
                 {
                     gbassert( test );
+                    test->_result = false;
+
+                    if (!_included(*test))
+                        continue;
 
                     if (test->_enabled)
                     {
-                        auto test_run = [&] {
+                        auto test_run = [this, test, &suite_name = suite.name] {
                             auto t = std::chrono::system_clock::now();
                             auto ts = time_stamp() + " ";
+
+                            // writes the test's result line, then details
+                            const auto report = [&](std::string_view result, auto&& ... details)
+                            {
+                                if (_verbose)
+                                {
+                                    _log.writeln(ts, suite_name, ".", test->_test_name, ":", tab(ts.size() + tab_size), result, " (",
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
+                                        " ms)", details...);
+                                }
+                                else
+                                    _log.writeln(suite_name, ".", test->_test_name, ":", tab(tab_size), result, details...);
+                            };
 
                             try
                             {
                                 test->run();
                                 test->_result = true;
-                                if (_verbose)
-                                {
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "PASSED (",
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
-                                        " ms)");
-                                }
-                                else
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(tab_size), "PASSED");
+                                report("PASSED");
                             }
                             catch (std::exception& ex)
                             {
-                                if (_verbose)
-                                {
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "FAILED (",
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
-                                        " ms)\n", ex.what());
-                                }
-                                else
-                                    _log.writeln(rec.first, ".", test->_test_name, ":", tab(tab_size), "FAILED\n", ex.what());
+                                report("FAILED", "\n", ex.what());
                             }
                             catch (...)
                             {
-                                if (_verbose)
-                                {
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "FAILED (",
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - t).count(),
-                                        " ms), unknown exception");
-                                }
-                                else
-                                    _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(tab_size), "FAILED, unknown exception");
+                                report("FAILED", ", unknown exception");
                             }
                         };
 
@@ -178,15 +425,20 @@ namespace gb::yadro::util
                     }
                     else
                     {
-                        auto ts = time_stamp() + " ";
-                        _log.writeln(ts, rec.first, ".", test->_test_name, ":", tab(ts.size() + tab_size), "DISABLED");
+                        if (_verbose)
+                        {
+                            auto ts = time_stamp() + " ";
+                            _log.writeln(ts, suite.name, ".", test->_test_name, ":", tab(ts.size() + tab_size), "DISABLED");
+                        }
+                        else
+                            _log.writeln(suite.name, ".", test->_test_name, ":", tab(tab_size), "DISABLED");
                     }
                 }
             }
 
             for (auto&& f : futures)
                 f.get();
-            
+
             _pool.reset(); // destroy pool, no longer needed
 
             if (_verbose)
@@ -198,46 +450,54 @@ namespace gb::yadro::util
             return _statistics();
         }
 
+    private:
+        static constexpr std::size_t tab_size = 75;
+        bool _verbose{};
+        bool _filtered{}; // something is selected, so only the selected tests run
+
+        bool _included(const test_base& test) const { return !_filtered || test._selected; }
+
         bool _statistics() const
         {
-            std::size_t passed(0), failed(0), disabled(0);
+            std::size_t passed(0), failed(0), disabled(0), not_selected(0);
+            std::string failed_names;
 
-            for (auto& rec : _tests)
+            for (auto& suite : _suites)
             {
-                for (auto& test : rec.second)
+                for (auto test : suite.tests)
                 {
-                    if (!test->_enabled) ++disabled;
+                    if (!_included(*test)) ++not_selected;
+                    else if (!test->_enabled) ++disabled;
                     else if (test->_result) ++passed;
-                    else ++failed;
+                    else
+                    {
+                        ++failed;
+                        failed_names += (failed_names.empty() ? "" : ", ") + suite.name + "." + test->_test_name;
+                    }
                 }
             }
-            _log.writeln("tests passed: ", passed, ", failed: ", failed, ", disabled: ", disabled);
-            return failed == 0;
-        }
 
-        void _disable_suite(const char* name)
-        {
-            auto [b,e] = _tests.equal_range(name);
-            for (; b != e; ++b)
-                for (auto&& test : b->second)
-                    test->_enabled = false;
-        }
-        void _disable_test(const char* name, const char* test_name)
-        {
-            auto [b, e] = _tests.equal_range(name);
-            for (; b != e; ++b)
-                for (auto&& test : b->second)
-                    if(std::string_view(test->_test_name) == test_name)
-                        test->_enabled = false;
+            if (_filtered)
+                _log.writeln("tests passed: ", passed, ", failed: ", failed, ", disabled: ", disabled, ", not selected: ", not_selected);
+            else
+                _log.writeln("tests passed: ", passed, ", failed: ", failed, ", disabled: ", disabled);
+            if (failed != 0)
+                _log.writeln("failed tests: ", failed_names);
+            return failed == 0;
         }
     };
 }
 
 //---------------------------------------------------------------------------------------------------------------------
 inline gb::yadro::util::test_base::test_base(const char* test_name, const char* suite, std::launch policy)
+    : test_base(test_name, suite, tester::get(), policy)
+{
+}
+
+inline gb::yadro::util::test_base::test_base(const char* test_name, const char* suite, tester& owner, std::launch policy)
     : _policy(policy), _test_name(test_name)
 {
-    gb::yadro::util::tester::get()._tests[suite].push_back(this);
+    owner.add_test(suite, this);
 }
 
 

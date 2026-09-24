@@ -519,6 +519,211 @@ unset multiplot)*";
         gbassert(true); // reaching here without disabling real tests is the assertion
     }
 
+    GB_TEST(util, test_harness_unknown_selection_throws)
+    {
+        // a name that selects nothing is an error, and leaves the global selection unchanged
+        must_throw<std::invalid_argument>([] { tester::run_only_suites("yadro_no_such_suite_xyz"); });
+        must_throw<std::invalid_argument>([] { tester::run_only_tests("util", "yadro_no_such_test_xyz"); });
+        must_throw<std::invalid_argument>([] { tester::run_only_tests("yadro_no_such_suite_xyz", "*"); });
+    }
+
+    GB_TEST(util, test_harness_wildcards)
+    {
+        using gb::yadro::util::detail::wildcard_match;
+        static_assert(wildcard_match("util", "util"));
+        static_assert(!wildcard_match("util", "utils"));
+        static_assert(!wildcard_match("utils", "util"));
+        static_assert(wildcard_match("*", ""));
+        static_assert(wildcard_match("*", "anything"));
+        static_assert(wildcard_match("win_pipe*", "win_pipe1"));
+        static_assert(wildcard_match("*_test", "gbtimer_test"));
+        static_assert(!wildcard_match("*_test", "gbtimer_tests"));
+        static_assert(wildcard_match("win_pipe?", "win_pipe3"));
+        static_assert(!wildcard_match("win_pipe?", "win_pipe"));
+        static_assert(wildcard_match("a*b*c", "a_b_b_c"));
+        static_assert(!wildcard_match("a*b*c", "a_c_b"));
+        static_assert(!wildcard_match("", "a"));
+        gbassert(wildcard_match(std::string("*mutex*"), std::string("global_mutex_test")));
+    }
+
+    // tests registered with their own tester, independent of the global one, to exercise selection and reporting
+    struct test_harness_probe
+    {
+        enum class outcome { pass, fail, throw_int };
+
+        struct probe : test_base
+        {
+            outcome _outcome;
+            mutable int runs{};
+
+            probe(const char* name, const char* suite, tester& owner, outcome result = outcome::pass)
+                : test_base(name, suite, owner), _outcome(result) {}
+
+            void run() const override
+            {
+                ++runs;
+                if (_outcome == outcome::fail)
+                    throw failed_assertion("probe failure");
+                if (_outcome == outcome::throw_int)
+                    throw 42;
+            }
+        };
+
+        std::stringstream out;
+        tester t;
+        // registered suite by suite in the order beta, alpha, gamma, though interleaved
+        probe beta_one{ "one", "beta", t };
+        probe alpha_one{ "one", "alpha", t };
+        probe beta_two{ "two", "beta", t };
+        probe alpha_two{ "two", "alpha", t, outcome::fail };
+        probe gamma_odd{ "odd", "gamma", t, outcome::throw_int };
+
+        test_harness_probe() { t._log(out); }
+
+        // runs t with the command-line arguments
+        bool run(std::vector<const char*> args, std::initializer_list<std::string_view> app_options = {})
+        {
+            args.insert(args.begin(), "probe.exe");
+            return t.run_command_line(static_cast<int>(args.size()), args.data(), app_options);
+        }
+
+        std::vector<std::string> lines() const
+        {
+            std::vector<std::string> result;
+            std::istringstream in(out.str());
+            for (std::string line; std::getline(in, line); )
+                result.push_back(line);
+            return result;
+        }
+
+        bool logged(std::string_view text) const { return out.str().contains(text); }
+
+        std::vector<int> runs() const
+        {
+            return { beta_one.runs, alpha_one.runs, beta_two.runs, alpha_two.runs, gamma_odd.runs };
+        }
+    };
+
+    GB_TEST(util, test_harness_lists_in_registration_order)
+    {
+        using lines = std::vector<std::string>;
+        {
+            test_harness_probe p;
+            gbassert(p.run({ "--list" }));
+            gbassert(p.lines() == lines{ "beta.one", "beta.two", "alpha.one", "alpha.two", "gamma.odd" });
+            gbassert(p.runs() == std::vector{ 0, 0, 0, 0, 0 });
+        }
+        {
+            test_harness_probe p;
+            gbassert(p.run({ "--suite", "alpha", "--list" }));
+            gbassert(p.lines() == lines{ "alpha.one", "alpha.two" });
+        }
+        {
+            // selections add up, and print in registration order, not command-line order
+            test_harness_probe p;
+            gbassert(p.run({ "--test", "gamma.odd", "--list", "--test=beta.two" }));
+            gbassert(p.lines() == lines{ "beta.two", "gamma.odd" });
+        }
+        {
+            test_harness_probe p;
+            gbassert(p.run({ "--suite=?eta", "--test", "*.two", "--list" }));
+            gbassert(p.lines() == lines{ "beta.one", "beta.two", "alpha.two" });
+        }
+        {
+            test_harness_probe p;
+            gbassert(p.run({ "--help" }));
+            gbassert(p.logged(tester::usage()));
+        }
+    }
+
+    GB_TEST(util, test_harness_runs_selected_tests)
+    {
+        {
+            // everything runs; each failure is reported on its line without a time stamp, and named in the summary
+            test_harness_probe p;
+            gbassert(!p.run({}));
+            gbassert(p.runs() == std::vector{ 1, 1, 1, 1, 1 });
+            const auto lines = p.lines();
+            gbassert_eq(lines.size(), 8);
+            gbassert(lines[0].starts_with("beta.one:") && lines[0].ends_with(" PASSED"), lines[0]);
+            gbassert(lines[1].starts_with("beta.two:") && lines[1].ends_with(" PASSED"), lines[1]);
+            gbassert(lines[2].starts_with("alpha.one:") && lines[2].ends_with(" PASSED"), lines[2]);
+            gbassert(lines[3].starts_with("alpha.two:") && lines[3].ends_with(" FAILED"), lines[3]);
+            gbassert(lines[4].starts_with("[E0] probe failure"), lines[4]);
+            gbassert(lines[5].starts_with("gamma.odd:") && lines[5].ends_with(" FAILED, unknown exception"), lines[5]);
+            gbassert_eq(lines[6], "tests passed: 3, failed: 2, disabled: 0");
+            gbassert_eq(lines[7], "failed tests: alpha.two, gamma.odd");
+        }
+        {
+            // only the selection runs, and the summary counts the rest as not selected
+            test_harness_probe p;
+            gbassert(p.run({ "--suite", "beta" }));
+            gbassert(p.runs() == std::vector{ 1, 0, 1, 0, 0 });
+            const auto lines = p.lines();
+            gbassert_eq(lines.size(), 3);
+            gbassert_eq(lines[2], "tests passed: 2, failed: 0, disabled: 0, not selected: 3");
+        }
+        {
+            // the same through the member functions behind run_only_suites and run_only_tests
+            test_harness_probe p;
+            p.t.select_test("alpha", "one");
+            p.t.select_test("gamma", "o*");
+            gbassert(!p.t.run_tests());
+            gbassert(p.runs() == std::vector{ 0, 1, 0, 0, 1 });
+            gbassert_eq(p.lines().back(), "failed tests: gamma.odd");
+        }
+        {
+            // a disabled test stays disabled when selected, and its line has no time stamp either
+            test_harness_probe p;
+            p.t.disable_test("beta", "one");
+            gbassert(p.run({ "--suite", "beta" }));
+            gbassert(p.runs() == std::vector{ 0, 0, 1, 0, 0 });
+            const auto lines = p.lines();
+            gbassert(lines[0].starts_with("beta.one:") && lines[0].ends_with(" DISABLED"), lines[0]);
+            gbassert_eq(lines.back(), "tests passed: 1, failed: 0, disabled: 1, not selected: 3");
+        }
+        {
+            // the caller's own options are left to it
+            test_harness_probe p;
+            gbassert(p.run({ "--run-all", "--suite", "beta" }, { "--run-all" }));
+            gbassert(p.runs() == std::vector{ 1, 0, 1, 0, 0 });
+
+            test_harness_probe q;
+            const char* args[] = { "probe.exe", "--run-all", "--list", "positional" };
+            const auto options = q.t.apply_command_line(4, args);
+            gbassert(options.list && !options.help);
+            gbassert(options.unrecognized == std::vector<std::string>{ "--run-all", "positional" });
+        }
+    }
+
+    GB_TEST(util, test_harness_rejects_bad_command_lines)
+    {
+        // each is an error that runs nothing
+        const auto rejects = [](std::vector<const char*> args, std::string_view error)
+        {
+            test_harness_probe p;
+            gbassert(!p.run(args), error);
+            gbassert(p.logged(error), [&] { return p.out.str(); });
+            gbassert(p.runs() == std::vector{ 0, 0, 0, 0, 0 }, error);
+        };
+        rejects({ "--suite", "delta" }, "error: no registered suite matches \"delta\"");
+        rejects({ "--suite", "alpha", "--suite", "alpah" }, "error: no registered suite matches \"alpah\"");
+        rejects({ "--test", "alpha.three" }, "error: no registered test matches \"alpha.three\"");
+        rejects({ "--test", "delta.*" }, "error: no registered test matches \"delta.*\"");
+        rejects({ "--test", "alpha" }, "error: --test expects <suite>.<name>, not \"alpha\"");
+        rejects({ "--test", "alpha." }, "error: --test expects <suite>.<name>, not \"alpha.\"");
+        rejects({ "--suite" }, "error: --suite requires a value");
+        rejects({ "--suite=" }, "error: no registered suite matches \"\"");
+        rejects({ "--bogus" }, "error: unknown argument \"--bogus\"");
+        rejects({ "--list", "extra" }, "error: unknown argument \"extra\"");
+
+        test_harness_probe p;
+        must_throw<std::invalid_argument>([&] { p.t.select_suite("delta"); });
+        must_throw<std::invalid_argument>([&] { p.t.select_test("alpha", "three"); });
+        gbassert(p.t.run_tests() == false); // nothing was selected, so everything runs
+        gbassert(p.runs() == std::vector{ 1, 1, 1, 1, 1 });
+    }
+
     GB_TEST(util, string_util)
     {
         // test bas64
@@ -739,25 +944,25 @@ unset multiplot)*";
         catch (const std::exception& e) { gbassert(std::string(e.what()).find("[E1000]") != std::string::npos); }
     }
 
+    // what() of the exception fun throws, or empty when it does not throw
+    std::string thrown(auto&& fun)
+    {
+        try { fun(); }
+        catch (const std::exception& e) { return e.what(); }
+        return {};
+    }
+
+    // each failing assertion shares a line with the current() passed beside it,
+    // so the expected " (file:line)" suffix comes from that location
+    void expect(const std::string& text, const std::source_location& at, auto&& fun)
+    {
+        const auto what = thrown(fun);
+        gbassert(what == std::format("{} ({}:{})", text, at.file_name(), at.line()), what);
+    }
+
     GB_TEST(util, gbassert_messages)
     {
         const std::string long_text = "a message longer than the small-string buffer";
-
-        // what() of the exception fun throws, or empty when it does not throw
-        const auto thrown = [](auto&& fun) -> std::string
-        {
-            try { fun(); }
-            catch (const std::exception& e) { return e.what(); }
-            return {};
-        };
-
-        // each failing gbassert shares a line with the current() passed beside it,
-        // so the expected " (file:line)" suffix comes from that location
-        const auto expect = [&](const std::string& text, const std::source_location& at, auto&& fun)
-        {
-            const auto what = thrown(fun);
-            gbassert(what == std::format("{} ({}:{})", text, at.file_name(), at.line()), what);
-        };
 
         // passing assertions throw nothing, whatever the message type
         gbassert(thrown([&]
@@ -787,6 +992,84 @@ unset multiplot)*";
         must_throw<failed_assertion>([] { gbassert(false); });
         must_throw<generic_error>([] { gbassert(false, "generic"); });
         must_throw<unreachable_error>([] { gbassert<unreachable_error>(false); });
+
+        // a lazy message is built only when the assertion fails
+        auto built = 0;
+        const auto lazy = [&] { ++built; return std::format("lazy {}", 42); };
+        gbassert(true, lazy);
+        gbassert([] { return true; }, lazy);
+        gbassert(built == 0);
+        expect("[E1000] lazy 42", std::source_location::current(), [&] { gbassert(false, lazy); });
+        expect("[E1000] lazy 42", std::source_location::current(), [&] { gbassert([] { return false; }, lazy); });
+        gbassert(built == 2);
+        expect("[E1000] a lazy literal", std::source_location::current(), [] { gbassert(false, [] { return "a lazy literal"; }); });
+        expect("[E1] lazy 42", location, [&] { gbassert<unreachable_error>(false, lazy, location); });
+        must_throw<generic_error>([&] { gbassert(false, lazy); });
+    }
+
+    // a type that prints only through operator<<
+    struct streamed { int value; bool operator==(const streamed&) const = default; };
+    std::ostream& operator<<(std::ostream& os, const streamed& s) { return os << "streamed(" << s.value << ")"; }
+
+    // a type that does not print
+    struct opaque { int value; bool operator==(const opaque&) const = default; };
+
+    enum class color { red = 1, green = 2 };
+
+    GB_TEST(util, gbassert_comparisons)
+    {
+        // passing comparisons throw nothing
+        gbassert(thrown([]
+            {
+                gbassert_eq(1, 1);
+                gbassert_ne(1, 2);
+                gbassert_lt(1, 2);
+                gbassert_le(2, 2);
+                gbassert_gt(2, 1);
+                gbassert_ge(2, 2);
+                gbassert_eq(std::string("abc"), "abc");
+                gbassert_eq(1.5, 1.5);
+                gbassert_eq(streamed{ 1 }, streamed{ 1 });
+                gbassert_eq(color::red, color::red);
+            }).empty());
+
+        // integers compare by value whatever their signedness, where -1 < 1u would convert -1 to unsigned
+        gbassert(thrown([]
+            {
+                gbassert_lt(-1, 1u);
+                gbassert_gt(1u, -1);
+                gbassert_ne(-1, std::numeric_limits<unsigned>::max());
+                gbassert_eq(std::size_t{ 3 }, 3);
+                gbassert_le(std::int8_t{ -1 }, std::uint64_t{ 0 });
+            }).empty());
+
+        // a failure reports both operands and the operator
+        expect("[E0] assertion failed: 3 == 4", std::source_location::current(), [] { gbassert_eq(1 + 2, 4); });
+        expect("[E0] assertion failed: 3 != 3", std::source_location::current(), [] { gbassert_ne(3, 3); });
+        expect("[E0] assertion failed: 2 < 1", std::source_location::current(), [] { gbassert_lt(2, 1); });
+        expect("[E0] assertion failed: 2 <= 1", std::source_location::current(), [] { gbassert_le(2, 1); });
+        expect("[E0] assertion failed: 1 > 2", std::source_location::current(), [] { gbassert_gt(1, 2); });
+        expect("[E0] assertion failed: 1 >= 2", std::source_location::current(), [] { gbassert_ge(1, 2); });
+        expect("[E0] assertion failed: 4294967295 < -1", std::source_location::current(), [] { gbassert_lt(std::numeric_limits<std::uint32_t>::max(), -1); });
+        expect("[E0] assertion failed: 1.5 == 2.25", std::source_location::current(), [] { gbassert_eq(1.5, 2.25); });
+
+        // strings and characters are quoted, so an empty or blank string shows
+        expect("[E0] assertion failed: \"abc\" == \"abd\"", std::source_location::current(), [] { gbassert_eq(std::string("abc"), "abd"); });
+        expect("[E0] assertion failed: \"\" == \" \"", std::source_location::current(), [] { gbassert_eq(std::string_view{}, " "); });
+        expect("[E0] assertion failed: 'a' == 'b'", std::source_location::current(), [] { gbassert_eq('a', 'b'); });
+        expect("[E0] assertion failed: nullptr != nullptr", std::source_location::current(), [] { const char* none = nullptr; gbassert_ne(none, nullptr); });
+
+        // std::format, else operator<<, else an enumeration's value, else a placeholder
+        expect("[E0] assertion failed: true == false", std::source_location::current(), [] { gbassert_eq(true, false); });
+        expect("[E0] assertion failed: [1, 2] == [1, 3]", std::source_location::current(), [] { gbassert_eq(std::vector{ 1, 2 }, std::vector{ 1, 3 }); });
+        expect("[E0] assertion failed: streamed(1) == streamed(2)", std::source_location::current(), [] { gbassert_eq(streamed{ 1 }, streamed{ 2 }); });
+        expect("[E0] assertion failed: 1 == 2", std::source_location::current(), [] { gbassert_eq(color::red, color::green); });
+        expect("[E0] assertion failed: <unprintable> == <unprintable>", std::source_location::current(), [] { gbassert_eq(opaque{ 1 }, opaque{ 2 }); });
+
+        // a custom error type and an explicit location
+        const auto location = std::source_location::current();
+        expect("[E1] assertion failed: 1 == 2", location, [&] { gbassert_eq<unreachable_error>(1, 2, location); });
+        must_throw<failed_assertion>([] { gbassert_eq(1, 2); });
     }
 
     GB_TEST(util, gbassert_passing_does_not_allocate)
@@ -802,6 +1085,15 @@ unset multiplot)*";
             gbassert(i < 100, "a literal message longer than the small-string buffer");
             gbassert(i < 100, long_text);
             gbassert<unreachable_error>(i < 100, "a custom error type with a long message");
+
+            // a lazy message is not built, and comparisons build no message
+            gbassert(i < 100, [&] { return long_text + " built lazily"; });
+            gbassert_eq(i, i);
+            gbassert_lt(i, 100);
+            gbassert_ge(i, -1);
+            gbassert_eq(long_text, long_text);
+            gbassert_ne(long_text, "a literal longer than the small-string buffer");
+            gbassert_eq(std::string_view(long_text), long_text);
         }
         const auto allocations = thread_allocation_count - before;
         gbassert(allocations == 0, std::to_string(allocations) + " heap allocations");

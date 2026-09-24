@@ -58,6 +58,11 @@ int main(int argc, char* argv[])
     }
 #endif
 
+    // --run-all also runs the tests disabled by default; the tester handles the other options, see tester::usage()
+    auto run_all = false;
+    for (auto i = 1; i < argc; ++i)
+        run_all = run_all || argv[i] == std::string_view("--run-all");
+
     tester::set_verbose(true);
     tester::set_logger("yadro-test.log", std::cout);
 #ifndef GBWINDOWS
@@ -65,18 +70,18 @@ int main(int argc, char* argv[])
     tester::disable_tests("util", "win_pipe2");
     tester::disable_tests("util", "win_pipe3");
 #else
-    if (argc < 2 || argv[1] != std::string("--run-all"))
+    if (!run_all)
     {
         tester::disable_tests("container", "gbdb_registry_win32_integration_test");
     }
 #endif
-    if (argc < 2 || argv[1] != std::string("--run-all"))
+    if (!run_all)
     {
         // bounded_priority_queue_test is disabled by default because it fails on slow machines
         tester::disable_tests("container", "bounded_priority_queue_test");
     }
-    
+
     tester::set_policy(std::launch::deferred);
-    auto success = tester::run();
+    auto success = tester::run(argc, argv, { "--run-all" });
     return success ? 0 : -1;
 }
