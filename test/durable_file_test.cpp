@@ -52,7 +52,9 @@ namespace
 
     fs::path fresh_test_directory(std::string_view name)
     {
-        auto directory = fs::temp_directory_path() / "yadro_durable_file_test" / name;
+        // the process id keeps concurrently running test executables out of each other's directories
+        auto directory = fs::temp_directory_path() / "yadro_durable_file_test"
+            / (std::string{ name } + "_" + std::to_string(get_process_id()));
         fs::remove_all(directory);
         fs::create_directories(directory);
         return directory;
