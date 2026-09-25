@@ -418,7 +418,8 @@ GB_TEST(algorithm, my_parallel_test, std::launch::async)  // may run on the thre
 ```
 
 `test/yadro_test.cpp` is the driver. It turns on verbose logging to the console and
-`yadro-test.log`, disables the platform-specific tests that don't apply, and runs all
+`yadro-test.log` (on Windows, a run started while another holds that file logs to
+`yadro-test_<pid>.log` instead), disables the platform-specific tests that don't apply, and runs all
 suites. Build and run the `yadro_test` project. A few slow or environment-dependent tests
 (for example `bounded_priority_queue_test` and the live Windows registry integration test)
 are skipped unless you pass `--run-all`. The process exits with 0 when all enabled tests

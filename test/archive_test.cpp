@@ -177,11 +177,13 @@ namespace
         gbassert(compare_arrays(iarr, std::array<int, 5>{ 5, 4, 3, 2, 1 }));
 
         // binary file archive test
-        bin_archive<std::ofstream> ofs("archive_test.eraseme", std::ios::binary);
+        // the process id keeps concurrently running test executables off each other's file
+        const auto archive_file = "archive_test_" + std::to_string(get_process_id()) + ".eraseme";
+        bin_archive<std::ofstream> ofs(archive_file, std::ios::binary);
         ofs(123, a, b, std::string("Hello World"), 3.14, serialize_as<int>(enum_type::three), std::tuple{ 30, 50.55, std::string("tuple three") },
             std::vector{ 20, 21, 22, 23, 24, 25 }, q, stk, m, um, opt1, opt2, v1, v2, v3, v4, std::array<int, 5>{ 5, 4, 3, 2, 1 });
         ofs.get_stream().close();
-        bin_archive<std::ifstream> ifs("archive_test.eraseme", std::ios::binary);
+        bin_archive<std::ifstream> ifs(archive_file, std::ios::binary);
         ifs(i, aa, bb, s, d, serialize_as<int>(e), t, v, qq, stkk, m, um, opt1, opt2, v1, v2, v3, v4, iarr);
         ifs.get_stream().close();
         gbassert(i == 123);
@@ -208,7 +210,7 @@ namespace
         gbassert(v3 == std::variant<int, char, std::string>{'A'});
         gbassert(v4 == std::variant<int, char, std::string>{"variant"});
         gbassert(compare_arrays(iarr, std::array<int, 5>{ 5, 4, 3, 2, 1 }));
-        std::remove("archive_test.eraseme");
+        std::remove(archive_file.c_str());
 
         // test serialization size and md5
         // should be identical for 32-bit and 64-bit targets
