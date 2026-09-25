@@ -2147,6 +2147,11 @@ namespace gb::yadro::container
         detail::json_db_merger{ target, source, policy }.merge();
     }
 
+    // Reads JSON text into a json_db. Malformed or unsafe input throws json_parse_error with a code,
+    // byte offset, line and column: raw control characters in strings, invalid UTF-8, lone UTF-16
+    // surrogate escapes, nesting beyond options.max_depth, input beyond options.max_input_bytes, and
+    // integers outside int64/uint64 unless options.big_integers is to_double. Shapes the json_db
+    // value model cannot hold (for example, boolean or nested arrays) throw std::logic_error.
     [[nodiscard]] inline json_db read_json(std::string_view text, const json_read_options& options = {})
     {
 #if GB_YADRO_GBDB_JSON_HAS_AXE
