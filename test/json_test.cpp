@@ -2336,34 +2336,30 @@ namespace
     }
 
     // min t(4x) / min t(1x) must stay below 8: linear growth gives about 4, quadratic about 16.
-    // Other processes can only slow a run down, so a ratio at or above 8 is re-measured: each retry
-    // times both sizes once more and the minimums are kept. A loaded machine lets at least one
-    // quiet run of each size through; quadratic growth stays near 16 however many runs are taken.
+    // Each size is timed a fixed number of times, alternating so both sample the same machine load,
+    // and a single decision is made on the minimums. Other processes only slow a run down, so a
+    // linear parser fails only if every 4x run is slowed 2x, and a quadratic one passes only if
+    // every 1x run is. There is no retry-until-pass: that would give quadratic parsing extra chances.
     // cleanup runs after each timed parse, outside the timed region (it destroys a DOM result).
     template<class Parse, class Cleanup>
     void check_linear(std::string_view name, const std::string& quarter, const std::string& full, Parse&& parse, Cleanup&& cleanup)
     {
-        constexpr int max_attempts = 5;
+        constexpr int runs = 3;
         auto timed = [&](const std::string& text) {
             const double t = seconds_of([&] { parse(text); });
             cleanup();
             return t;
         };
-        double t1 = std::min(timed(quarter), timed(quarter));
-        double t4 = timed(full);
-        double ratio = t4 / std::max(t1, 1e-9);
-        int attempts = 1;
-        for (; ratio >= 8.0 && attempts < max_attempts; ++attempts) {
-            t4 = std::min(t4, timed(full));
+        double t1 = std::numeric_limits<double>::max();
+        double t4 = std::numeric_limits<double>::max();
+        for (int run = 0; run < runs; ++run) {
             t1 = std::min(t1, timed(quarter));
-            ratio = t4 / std::max(t1, 1e-9);
+            t4 = std::min(t4, timed(full));
         }
+        const double ratio = t4 / std::max(t1, 1e-9);
         const double mib_per_s = static_cast<double>(full.size()) / (1024.0 * 1024.0) / std::max(t4, 1e-9);
         std::cout << "json performance: " << name << ": " << full.size() / (1024 * 1024) << " MiB in " << t4 << " s ("
-            << mib_per_s << " MiB/s), ratio to 1/4 size " << ratio;
-        if (attempts > 1)
-            std::cout << " (" << attempts << " attempts)";
-        std::cout << '\n';
+            << mib_per_s << " MiB/s), ratio to 1/4 size " << ratio << '\n';
         gbassert(ratio < 8.0);
     }
 
