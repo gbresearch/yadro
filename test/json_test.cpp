@@ -2335,18 +2335,27 @@ namespace
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     }
 
-    // t(4x) / min of two t(1x) must stay below 8: linear growth gives about 4, quadratic about 16.
+    // min t(4x) / min t(1x) must stay below 8: linear growth gives about 4, quadratic about 16.
+    // Each size is timed a fixed number of times, alternating so both sample the same machine load,
+    // and a single decision is made on the minimums. Other processes only slow a run down, so a
+    // linear parser fails only if every 4x run is slowed 2x, and a quadratic one passes only if
+    // every 1x run is. There is no retry-until-pass: that would give quadratic parsing extra chances.
     // cleanup runs after each timed parse, outside the timed region (it destroys a DOM result).
     template<class Parse, class Cleanup>
     void check_linear(std::string_view name, const std::string& quarter, const std::string& full, Parse&& parse, Cleanup&& cleanup)
     {
+        constexpr int runs = 3;
         auto timed = [&](const std::string& text) {
             const double t = seconds_of([&] { parse(text); });
             cleanup();
             return t;
         };
-        const double t1 = std::min(timed(quarter), timed(quarter));
-        const double t4 = timed(full);
+        double t1 = std::numeric_limits<double>::max();
+        double t4 = std::numeric_limits<double>::max();
+        for (int run = 0; run < runs; ++run) {
+            t1 = std::min(t1, timed(quarter));
+            t4 = std::min(t4, timed(full));
+        }
         const double ratio = t4 / std::max(t1, 1e-9);
         const double mib_per_s = static_cast<double>(full.size()) / (1024.0 * 1024.0) / std::max(t4, 1e-9);
         std::cout << "json performance: " << name << ": " << full.size() / (1024 * 1024) << " MiB in " << t4 << " s ("
