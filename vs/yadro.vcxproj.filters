@@ -205,6 +205,12 @@
     <ClInclude Include="..\container\gbdb_json_path.h">
       <Filter>container</Filter>
     </ClInclude>
+    <ClInclude Include="..\container\json.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\json_parser.h">
+      <Filter>container</Filter>
+    </ClInclude>
     <ClInclude Include="..\container\gbdb_registry.h">
       <Filter>container</Filter>
     </ClInclude>

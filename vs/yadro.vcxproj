@@ -139,6 +139,8 @@
     <ClInclude Include="..\container\gbdb_file.h" />
     <ClInclude Include="..\container\gbdb_json.h" />
     <ClInclude Include="..\container\gbdb_json_path.h" />
+    <ClInclude Include="..\container\json.h" />
+    <ClInclude Include="..\container\json_parser.h" />
     <ClInclude Include="..\container\gbcontainer.h" />
     <ClInclude Include="..\container\gbdb_registry.h" />
     <ClInclude Include="..\container\graph.h" />

@@ -69,7 +69,9 @@
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="UserMacros">
+    <AxeIncludeDir Condition="'$(AxeIncludeDir)'==''">$(ProjectDir)..\..\axe\include</AxeIncludeDir>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>..\exe\$(PlatformName)\$(Configuration)\</OutDir>
     <IntDir>..\obj\$(ProjectName)\$(PlatformName)\$(Configuration)\</IntDir>
@@ -96,7 +98,7 @@
       <AdditionalOptions>/Zc:__cplusplus /arch:AVX2 %(AdditionalOptions) /arch:AVX2   /utf-8 /bigobj</AdditionalOptions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\axe\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(AxeIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -120,7 +122,7 @@
       <AdditionalOptions>/Zc:__cplusplus /arch:AVX2 %(AdditionalOptions) /arch:AVX2   /utf-8 /bigobj</AdditionalOptions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\axe\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(AxeIncludeDir);</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -146,7 +148,7 @@
       <AdditionalOptions>/Zc:__cplusplus /arch:AVX2 %(AdditionalOptions) /arch:AVX2   /utf-8 /bigobj</AdditionalOptions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\axe\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(AxeIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -174,7 +176,7 @@
       <AdditionalOptions>/Zc:__cplusplus /arch:AVX2 %(AdditionalOptions) /arch:AVX2   /utf-8 /bigobj</AdditionalOptions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\..\axe\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(AxeIncludeDir);</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -196,6 +198,7 @@
     <ClCompile Include="..\test\async_test.cpp" />
     <ClCompile Include="..\test\container_test.cpp" />
     <ClCompile Include="..\test\durable_file_test.cpp" />
+    <ClCompile Include="..\test\json_test.cpp" />
     <ClCompile Include="..\test\graph_test.cpp" />
     <ClCompile Include="..\test\simulator_test.cpp" />
     <ClCompile Include="..\test\util_test.cpp" />

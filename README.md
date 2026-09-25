@@ -264,6 +264,8 @@ Namespace `gb::yadro::container`, aggregate header `container/gbcontainer.h`.
 | `bounded_priority_queue.h` | A concurrent top-K collector: each thread inserts into its own local heap, and the heaps are merged at the end. |
 | `pareto_front.h`           | Multi-objective selection: `objective_t` (projection, direction, epsilon), `dominates_t`, `pareto_set`, `pareto_set_ordered`. |
 | `gbdb.h` and `gbdb_*.h`    | **gbdb**, a compact in-memory hierarchical database (see below). |
+| `json.h`                   | `json_value`: a general JSON value (null, bool, int64, uint64, double, UTF-8 string, array, and an object that keeps member order and unique keys) with checked `std::expected` accessors, RFC 6901 JSON pointer lookup (`at_pointer`), structural equality, a compact, pretty and ASCII-only writer (`format_json`), and parsing (`parse_json_value`, `try_parse_json_value`). See below. |
+| `json_parser.h`            | The hardened JSON front end shared by `json_value` and `json_db`: `parse_json_events` drives a SAX-style handler; `json_parse_error` reports a code, byte offset, line and column. Requires AXE (see below). |
 
 #### gbdb
 
@@ -277,7 +279,12 @@ external blob files.
 
 - `gbdb_json.h`: a JSON reader and writer (`write_json`, `write_json_file`,
   `write_json_subtree`, `insert_json`, `insert_json_file`) with merge policies,
-  table layouts, external blob files, and read/write options.
+  table layouts, external blob files, and read/write options. `read_json` uses the hardened
+  front end in `json_parser.h` and rejects raw control characters in strings, invalid UTF-8,
+  lone UTF-16 surrogate escapes, nesting deeper than `json_read_options::max_depth` (256),
+  and, when `max_input_bytes` is set, oversized input (streams and files never read more than
+  the cap plus one byte). Out-of-range integers are rejected unless `big_integers` is
+  `to_double`. A file manifest never changes these limits.
 - `gbdb_json_path.h`: path-addressed JSON I/O (`write_json_path`, `insert_json_at_path`).
 - `gbdb_file.h`: atomic binary save (`save_json_db_file`).
 - `gbdb_registry.h`: import a Windows registry tree into a `json_db` and write one back
@@ -295,6 +302,39 @@ db.set_array({ "market", "history" }, std::span{ hist });
 double price = std::get<double>(*db.get({ "market", "price" }));
 auto json = write_json(db);                           // serialize to JSON text
 ```
+
+#### json_value
+
+`json_value` holds any JSON document, including the mixed and nested arrays that `json_db`'s
+value model does not cover. Parsing requires AXE: define `GB_YADRO_ENABLE_AXE_JSON` and add
+the AXE include directory; the value type and the writer do not need it.
+
+```cpp
+using namespace gb::yadro::container;
+
+auto message = parse_json_value(R"({"id":7,"content":[{"type":"text","text":"hi"}]})");
+auto text = message.at_pointer("/content/0/text");     // std::expected<const json_value*, json_pointer_error>
+auto id = message.at_pointer("/id").value()->as_int64(); // std::expected<std::int64_t, json_access_error>
+
+json_value reply = json_object{ { "id", 7 }, { "ok", true }, { "items", json_array{ 1, 2.5, "x" } } };
+auto compact = format_json(reply);                      // {"id":7,"ok":true,"items":[1,2.5,"x"]}
+
+std::string_view untrusted = R"({"a":[1,]})";              // e.g. a message read from a pipe
+auto result = try_parse_json_value(untrusted, json_parse_options{ .max_input_bytes = 16 << 20 });
+if (!result)                                            // syntax at line 1, column 9
+    std::cerr << result.error().what() << '\n';
+```
+
+- Integers that fit in int64 are stored as int64; `uint64` holds only larger values, so round
+  trips preserve the kind. Doubles are written in shortest round-trip form and always read back
+  as doubles.
+- Objects keep member order; duplicate keys are rejected by default (`json_parse_options::duplicate_keys`).
+- Equality is structural: object member order is ignored and numbers compare by exact value
+  across int64, uint64 and double.
+- The parser validates UTF-8, rejects raw control characters and lone surrogates, combines
+  surrogate pairs, and limits nesting to `max_depth` (256) simultaneously open containers.
+  Destroying, copying and comparing values do not recurse; 256 levels of parsing take at most
+  about 400 KiB of stack in an unoptimized x64 build and 130 KiB in an optimized one.
 
 ### algorithm: numerical and statistical algorithms
 
