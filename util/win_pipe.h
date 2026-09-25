@@ -1343,6 +1343,15 @@ namespace gb::yadro::util
                     close();
                     return std::nullopt;
                 }
+                // What the client wrote before closing is still buffered and readable, e.g. a whole
+                // shutdown request sent while the server was busy with an earlier connection. Such
+                // an instance is served; only one the client left empty is replaced.
+                if (DWORD available{}; PeekNamedPipe(_listening.get(), nullptr, 0, nullptr, &available, nullptr)
+                    && available != 0)
+                {
+                    log_pipe(_listening.get(), "server connected client that already closed");
+                    return std::exchange(_listening, unique_win_handle{});
+                }
                 log_pipe(_listening.get(), "client disconnected before server accept");
                 auto replacement = create_instance();
                 _listening = std::move(replacement);

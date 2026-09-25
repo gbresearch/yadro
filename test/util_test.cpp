@@ -2086,6 +2086,51 @@ unset multiplot)*";
 #endif
     }
 
+    GB_TEST(util, win_pipe_serves_client_that_closed_before_accept)
+    {
+#if defined(GBWINDOWS)
+        // A client can connect, send its whole request and close before the server accepts it, e.g.
+        // a shutdown request while the server still handles the previous connection. The request
+        // stays buffered in the instance and must reach the server.
+        const auto pipename = unique_test_pipe_name(L"closed_before_accept");
+        pipe_listener_t listener{ pipename };
+        listener.prepare(); // the instance exists, but nobody accepts on it yet
+        winpipe_client_t(pipename, "closed before accept", 10).shutdown();
+
+        unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
+        gbassert(shutdown_event.valid());
+        std::optional<winpipe_server_t> server;
+        auto accepted = std::async(std::launch::async, [&]
+            {
+                if (auto connected = winpipe_server_t::accept(listener, shutdown_event.get(), nullptr))
+                    server.emplace(std::move(*connected));
+            });
+
+        using namespace std::chrono_literals;
+        if (accepted.wait_for(5s) != std::future_status::ready)
+            SetEvent(shutdown_event.get()); // don't leave accept waiting for a client that never comes
+        accepted.get();
+        gbassert(server.has_value());
+        gbassert(server->run([] { return 1; }) == server_shutdown);
+#endif
+    }
+
+    GB_TEST(util, win_pipe_cancelled_accept_skips_client_that_closed_before_accept)
+    {
+#if defined(GBWINDOWS)
+        // once the server is shutting down it takes no more clients, even one that left a request
+        const auto pipename = unique_test_pipe_name(L"cancelled_closed_before_accept");
+        pipe_listener_t listener{ pipename };
+        listener.prepare();
+        winpipe_client_t(pipename, "closed before cancelled accept", 10).shutdown();
+
+        unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, TRUE, nullptr) }; // already signaled
+        gbassert(shutdown_event.valid());
+        gbassert(!winpipe_server_t::accept(listener, shutdown_event.get(), nullptr).has_value());
+        gbassert(listener.listening_handle() == INVALID_HANDLE_VALUE);
+#endif
+    }
+
     GB_TEST(util, win_pipe_client_permits_identification_only)
     {
 #if defined(GBWINDOWS)
