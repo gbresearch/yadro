@@ -82,6 +82,6 @@ int main(int argc, char* argv[])
     }
 
     tester::set_policy(std::launch::deferred);
-    auto success = tester::run(argc, argv, { "--run-all" });
+    auto success = tester::run(argc, argv, { { "--run-all", "also run the tests disabled by default" } });
     return success ? 0 : -1;
 }

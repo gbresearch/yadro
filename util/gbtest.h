@@ -37,6 +37,7 @@
 #include <initializer_list>
 #include <algorithm>
 #include <optional>
+#include <format>
 #include <future>
 
 #include "gblog.h"
@@ -129,6 +130,16 @@ namespace gb::yadro::util
             std::vector<std::string> unrecognized;  // the arguments left to the caller, in order
         };
 
+        // an argument that the caller of run handles itself: the tester accepts it and lists it in the help
+        struct app_option
+        {
+            std::string_view name;
+            std::string_view help;
+
+            app_option(const char* name, const char* help = "") : name(name), help(help) {}
+            app_option(std::string_view name, std::string_view help = {}) : name(name), help(help) {}
+        };
+
         std::unique_ptr<gb::yadro::async::threadpool> _pool;
         std::vector<suite_t> _suites; // in registration order
         mutable logger _log;
@@ -142,8 +153,9 @@ namespace gb::yadro::util
         static bool run() { return get().run_tests(); }
 
         // parses the command line, then lists or runs the selected tests: returns false on a command-line error or a
-        // failed test; app_options are arguments the caller handles itself, which the tester ignores
-        static bool run(int argc, const char* const argv[], std::initializer_list<std::string_view> app_options = {})
+        // failed test; app_options are arguments the caller handles itself, which the tester only lists in its help,
+        // e.g. run(argc, argv, { { "--run-all", "also run the disabled tests" } })
+        static bool run(int argc, const char* const argv[], std::initializer_list<app_option> app_options = {})
         {
             return get().run_command_line(argc, argv, app_options);
         }
@@ -187,8 +199,8 @@ namespace gb::yadro::util
             (get().select_test(suite, tests), ...);
         }
 
-        // selects tests as the command line asks, see usage(); throws std::invalid_argument for a malformed option
-        // or a name that matches nothing, and leaves every other argument to the caller
+        // selects tests as the command line asks, see usage(), and leaves every other argument to the caller; throws
+        // std::invalid_argument for a malformed option or a name that matches nothing, keeping the selection as it was
         static command_line parse_command_line(int argc, const char* const argv[])
         {
             return get().apply_command_line(argc, argv);
@@ -197,14 +209,20 @@ namespace gb::yadro::util
         // writes the selected tests, one <suite>.<test> per line, in run order
         static void list() { get().list_tests(); }
 
-        static constexpr std::string_view usage()
+        // the help for the tester's options, followed by app_options
+        static std::string usage(std::initializer_list<app_option> app_options = {})
         {
-            return "options:\n"
+            std::string text = "options:\n"
                 "  --suite <name>          run only the named suite (repeatable)\n"
                 "  --test <suite>.<name>   run only the named test (repeatable)\n"
                 "  --list                  print the selected tests as <suite>.<name>, without running them\n"
-                "  --help                  print this help\n"
-                "names may use the wildcards * and ?; a name that matches no registered test is an error";
+                "  --help                  print this help\n";
+            for (auto& option : app_options)
+            {
+                text += option.help.empty() ? std::format("  {}\n", option.name)
+                    : std::format("  {:<23} {}\n", option.name, option.help);
+            }
+            return text + "names may use the wildcards * and ?; a name that matches no registered test is an error";
         }
 
         static void set_logger(auto&& ... streams)
@@ -291,46 +309,22 @@ namespace gb::yadro::util
 
         command_line apply_command_line(int argc, const char* const argv[])
         {
-            command_line options;
-            for (auto i = 1; i < argc; ++i)
+            // a command line applies whole or not at all, so an error leaves no partial selection behind
+            const auto before = _selection();
+            try
             {
-                const std::string_view arg = argv[i];
-
-                // the value of option given as "option value" or "option=value", nothing when arg is another option
-                const auto value_of = [&](std::string_view option) -> std::optional<std::string_view>
-                {
-                    if (arg == option)
-                    {
-                        if (i + 1 == argc)
-                            throw std::invalid_argument(to_string(option, " requires a value"));
-                        return argv[++i];
-                    }
-                    if (arg.starts_with(option) && arg.size() > option.size() && arg[option.size()] == '=')
-                        return arg.substr(option.size() + 1);
-                    return std::nullopt;
-                };
-
-                if (arg == "--list")
-                    options.list = true;
-                else if (arg == "--help")
-                    options.help = true;
-                else if (auto suite = value_of("--suite"))
-                    select_suite(*suite);
-                else if (auto test = value_of("--test"))
-                {
-                    const auto dot = test->find('.');
-                    if (dot == std::string_view::npos || dot == 0 || dot + 1 == test->size())
-                        throw std::invalid_argument(to_string("--test expects <suite>.<name>, not \"", *test, "\""));
-                    select_test(test->substr(0, dot), test->substr(dot + 1));
-                }
-                else
-                    options.unrecognized.emplace_back(arg);
+                return _apply_command_line(argc, argv);
             }
-            return options;
+            catch (...)
+            {
+                _restore(before);
+                throw;
+            }
         }
 
-        bool run_command_line(int argc, const char* const argv[], std::initializer_list<std::string_view> app_options = {})
+        bool run_command_line(int argc, const char* const argv[], std::initializer_list<app_option> app_options = {})
         {
+            const auto before = _selection();
             command_line options;
             try
             {
@@ -338,21 +332,22 @@ namespace gb::yadro::util
             }
             catch (const std::invalid_argument& ex)
             {
-                _log.writeln("error: ", ex.what(), "\n", usage());
+                _log.writeln("error: ", ex.what(), "\n", usage(app_options));
                 return false;
             }
 
             for (auto& arg : options.unrecognized)
             {
-                if (std::ranges::find(app_options, std::string_view(arg)) == app_options.end())
+                if (std::ranges::find(app_options, std::string_view(arg), &app_option::name) == app_options.end())
                 {
-                    _log.writeln("error: unknown argument \"", arg, "\"\n", usage());
+                    _restore(before);
+                    _log.writeln("error: unknown argument \"", arg, "\"\n", usage(app_options));
                     return false;
                 }
             }
 
             if (options.help)
-                _log.writeln(usage());
+                _log.writeln(usage(app_options));
             else if (options.list)
                 list_tests();
             else
@@ -456,6 +451,65 @@ namespace gb::yadro::util
         bool _filtered{}; // something is selected, so only the selected tests run
 
         bool _included(const test_base& test) const { return !_filtered || test._selected; }
+
+        // the selection: _filtered, then each test's _selected in registration order
+        std::vector<bool> _selection() const
+        {
+            std::vector<bool> selection{ _filtered };
+            for (auto& suite : _suites)
+                for (auto test : suite.tests)
+                    selection.push_back(test->_selected);
+            return selection;
+        }
+
+        void _restore(const std::vector<bool>& selection)
+        {
+            auto next = selection.begin();
+            _filtered = *next++;
+            for (auto& suite : _suites)
+                for (auto test : suite.tests)
+                    test->_selected = *next++;
+        }
+
+        command_line _apply_command_line(int argc, const char* const argv[])
+        {
+            command_line options;
+            for (auto i = 1; i < argc; ++i)
+            {
+                const std::string_view arg = argv[i];
+
+                // the value of option given as "option value" or "option=value", nothing when arg is another option
+                const auto value_of = [&](std::string_view option) -> std::optional<std::string_view>
+                {
+                    if (arg == option)
+                    {
+                        if (i + 1 == argc)
+                            throw std::invalid_argument(to_string(option, " requires a value"));
+                        return argv[++i];
+                    }
+                    if (arg.starts_with(option) && arg.size() > option.size() && arg[option.size()] == '=')
+                        return arg.substr(option.size() + 1);
+                    return std::nullopt;
+                };
+
+                if (arg == "--list")
+                    options.list = true;
+                else if (arg == "--help")
+                    options.help = true;
+                else if (auto suite = value_of("--suite"))
+                    select_suite(*suite);
+                else if (auto test = value_of("--test"))
+                {
+                    const auto dot = test->find('.');
+                    if (dot == std::string_view::npos || dot == 0 || dot + 1 == test->size())
+                        throw std::invalid_argument(to_string("--test expects <suite>.<name>, not \"", *test, "\""));
+                    select_test(test->substr(0, dot), test->substr(dot + 1));
+                }
+                else
+                    options.unrecognized.emplace_back(arg);
+            }
+            return options;
+        }
 
         bool _statistics() const
         {

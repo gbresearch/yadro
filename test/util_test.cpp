@@ -581,7 +581,7 @@ unset multiplot)*";
         test_harness_probe() { t._log(out); }
 
         // runs t with the command-line arguments
-        bool run(std::vector<const char*> args, std::initializer_list<std::string_view> app_options = {})
+        bool run(std::vector<const char*> args, std::initializer_list<tester::app_option> app_options = {})
         {
             args.insert(args.begin(), "probe.exe");
             return t.run_command_line(static_cast<int>(args.size()), args.data(), app_options);
@@ -633,6 +633,15 @@ unset multiplot)*";
             test_harness_probe p;
             gbassert(p.run({ "--help" }));
             gbassert(p.logged(tester::usage()));
+        }
+        {
+            // the caller's own options are listed in the help, after the tester's
+            test_harness_probe p;
+            gbassert(p.run({ "--help" }, { { "--run-all", "also run the disabled tests" }, { "--quiet" } }));
+            gbassert(p.logged("  --help                  print this help\n"
+                "  --run-all               also run the disabled tests\n"
+                "  --quiet\n"
+                "names may use"), [&] { return p.out.str(); });
         }
     }
 
@@ -686,6 +695,7 @@ unset multiplot)*";
             // the caller's own options are left to it
             test_harness_probe p;
             gbassert(p.run({ "--run-all", "--suite", "beta" }, { "--run-all" }));
+            gbassert(!p.logged("error"), [&] { return p.out.str(); });
             gbassert(p.runs() == std::vector{ 1, 0, 1, 0, 0 });
 
             test_harness_probe q;
@@ -716,6 +726,28 @@ unset multiplot)*";
         rejects({ "--suite=" }, "error: no registered suite matches \"\"");
         rejects({ "--bogus" }, "error: unknown argument \"--bogus\"");
         rejects({ "--list", "extra" }, "error: unknown argument \"extra\"");
+
+        {
+            // a rejected command line leaves no partial selection behind, whichever option it fails on
+            test_harness_probe p;
+            gbassert(!p.run({ "--suite", "alpha", "--suite", "typo" }));
+            gbassert(!p.run({ "--test", "alpha.one", "--test", "alpha" }));
+            gbassert(!p.run({ "--suite", "alpha", "--suite" }));
+            gbassert(!p.run({ "--suite", "alpha", "--bogus" }));
+            const char* args[] = { "probe.exe", "--suite", "beta", "--test", "gamma.typo" };
+            must_throw<std::invalid_argument>([&] { p.t.apply_command_line(5, args); });
+            p.out.str({});
+            gbassert(p.run({ "--list" }));
+            gbassert(p.lines() == std::vector<std::string>{ "beta.one", "beta.two", "alpha.one", "alpha.two", "gamma.odd" },
+                [&] { return p.out.str(); });
+
+            // and keeps the selection made before it
+            p.t.select_suite("gamma");
+            gbassert(!p.run({ "--suite", "alpha", "--suite", "typo" }));
+            p.out.str({});
+            gbassert(p.run({ "--list" }));
+            gbassert(p.lines() == std::vector<std::string>{ "gamma.odd" }, [&] { return p.out.str(); });
+        }
 
         test_harness_probe p;
         must_throw<std::invalid_argument>([&] { p.t.select_suite("delta"); });
