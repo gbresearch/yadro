@@ -1168,18 +1168,20 @@ All eleven tasks (0–10) are complete and committed on `feature/json-value`, wh
 
 - **Yadro:** the plan started from `master` `d511885`. The final rebase (Task 10, Step 6) was onto `master` `af9d52d` and was clean.
 - **AXE:** `master` `c602171` ("Return composite sub-rules by reference from r_binary_fn_t::get()"), which includes P1 (`09b0883`, `4e93d14`). The composite defect is therefore historical. The front end never relies on the fix: its depth wrapper is invoked directly.
-- **Tested source commit:** `29ec2f4`. The handoff commit that follows changes only this document.
+- **Tested source commit:** `19ebd5b`, which includes the operator's second review round below. The handoff commit that follows changes only this document.
 
 ### Verification (first-hand, 2026-09-24, MSVC v145)
 
-| Configuration | Task 0 baseline | Final `/t:Rebuild` at `29ec2f4` |
+| Configuration | Task 0 baseline | Final `/t:Rebuild` at `19ebd5b` |
 |---|---|---|
-| x64 Debug | 276 passed, 0 failed, 2 disabled | 331 passed, 0 failed, 2 disabled |
-| x64 Release | 276 / 0 / 2 | 331 / 0 / 2 (and two more exe runs: 331 / 0 / 2) |
-| Win32 Debug | 276 / 0 / 2 | 331 / 0 / 2 |
-| Win32 Release | 276 / 0 / 2 | 331 / 0 / 2 |
+| x64 Debug | 276 passed, 0 failed, 2 disabled | 333 passed, 0 failed, 2 disabled |
+| x64 Release | 276 / 0 / 2 | 332 / 1 / 2 in the rebuild's post-build run, then 333 / 0 / 2 on both reruns of the same binary (see "Environment" below) |
+| Win32 Debug | 276 / 0 / 2 | 333 / 0 / 2 |
+| Win32 Release | 276 / 0 / 2 | 333 / 0 / 2 |
 
-- **New tests:** 55, all in `test/json_test.cpp`, suite `json`. The existing `container` tests pass unmodified.
+- **Earlier round:** at `29ec2f4`, before the second review round, all four configurations passed with 331 / 0 / 2, and x64 Release passed twice more.
+- **New tests:** 57, all in `test/json_test.cpp`, suite `json`. The existing `container` tests pass unmodified.
+- **Worst stack peaks after the second round:** unchanged, at 388, 132, 308 and 72 KiB.
 - **Warnings:** the four rebuilds produced no compiler warnings (the test project builds at `/W3 /WX`).
 - **`/W4` check (scratch, not committed):**
   - `json.h` and `json_parser.h` compile cleanly on their own at `/W4 /WX /permissive- /Zc:preprocessor`, with AXE as `/external:I ... /external:W0`.
@@ -1237,13 +1239,17 @@ The gate reports whole-parse peaks on a fresh 1 MiB-reservation thread, measured
    - `json_value` deletes conversions from non-character pointers and throws on a null `const char*`;
    - copying and comparing flat containers no longer allocates a worklist;
    - `json_lead_exponent` saturates at 2^50.
+
+   **Second review round** (operator, on `288ae8c`):
+   - `read_capped` computed `cap + 1`, which wraps to 0 for `max_input_bytes == SIZE_MAX`, and then looped forever requesting zero bytes, even from an empty stream. It now computes the remaining room without overflow. The regression test covers `SIZE_MAX` and `SIZE_MAX - 1` on empty, small and multi-chunk streams, and through `parse_json_value` and `read_json`. RED was confirmed as a hang; the watchdog killed the suite after 180 s.
+   - `write_json_path` ignored `ascii_only`. Keys, path keys, string values and string arrays now go through the shared escaper with the option. The regression test covers a non-ASCII path, member key, scalar and string array, with and without `ascii_only`.
 5. **Test corrections.**
    - `with_siblings` uses scalar siblings. The planned `"b":[true,null]` sibling would itself exceed the depth limit at the innermost level.
    - The `to_double` expectations are the exact fixed forms (`-9223372036854775808`, `18446744073709551616`), which `to_chars` prefers because they are shorter.
    - Test streams are `extraction_streambuf` and `chunked_streambuf`, as in plan revision 2.
 6. **Interface details.** `json_object` iterators are `json_member*` and `const json_member*`, as required by the declaration order. `json_parser.h` exposes `json_parser_axe_enabled` and `detail::json_null_handler`.
 7. **Process.** Task 4's RED compile was not run separately; its tests were written first. Task 3's "unchanged contracts" test pins only `{"a":[1,2]}` → `uint_array_ref`, the case the plan names.
-8. **Environment.** `util.win_pipe_client_checks_the_server_process_not_its_own` timed out once (30 s) during a Task 2 run and passed on every other run. It is unrelated to this change.
+8. **Environment.** `util.win_pipe_client_checks_the_server_process_not_its_own` (`test/util_test.cpp:2314`, from master's pipe-server-identity work) timed out at 30 s twice: once in a Task 2 run, and once in the final x64 Release rebuild at `19ebd5b`. Both reruns of that same binary passed, taking 35–50 ms. The test is intermittent and unrelated to this change.
 
 ### Public API (`gb::yadro::container`)
 
@@ -1290,13 +1296,12 @@ Also changed:
 - **Writers.**
   - `write_json` with `ascii_only` writes correct code-point escapes and surrogate pairs.
   - `write_json` and `write_json_path` throw `std::logic_error` for strings that are not valid UTF-8.
-  - `write_json_path` now escapes control characters in values instead of throwing `std::invalid_argument`.
-- **Streams.** A stream passed to `read_json` is no longer left in the fail state at end of input.
+  - `write_json_path` now escapes control characters in values instead of throwing `std::invalid_argument`, and honours `ascii_only`.
+- **Streams.** A stream passed to `read_json` is no longer left in the fail state at end of input. `max_input_bytes = SIZE_MAX` behaves as no practical limit.
 
 These are unchanged: the root must be an object or an array; a BOM is rejected; integer classification is the same; value-model limits (boolean arrays, nested arrays, mixed arrays) still throw `std::logic_error`; duplicate keys still throw `std::logic_error`; a file manifest cannot change read options.
 
 ### Follow-ups (deliberately out of scope)
 
 - json_db still writes an integral double such as `1.0` as `1`, which reads back as `uint64`.
-- `write_json_path` does not honour `ascii_only`.
 - `json_value`'s writer recurses once per nesting level. It measured 164–252 KiB for 256 levels in Debug. Values built programmatically deeper than that are the caller's responsibility, as documented.
