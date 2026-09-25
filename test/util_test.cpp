@@ -71,6 +71,13 @@ namespace
     static_assert(noexcept(std::declval<winpipe_client_t&>().disconnect()));
     static_assert(noexcept(std::declval<winpipe_client_t&>().shutdown()));
     static_assert(pipe_chunk_size >= 64 * 1024);
+
+    // A pipe name private to this process, so concurrently running test executables do not
+    // share pipes or the global mutexes start_server derives from the pipe name
+    std::wstring unique_test_pipe_name(std::wstring_view name)
+    {
+        return L"\\\\.\\pipe\\yadro\\" + std::wstring{ name } + L"_" + std::to_wstring(GetCurrentProcessId());
+    }
 #endif
 
     GB_TEST(util, logtest)
@@ -83,7 +90,8 @@ namespace
 
     GB_TEST(util, named_resource_lock_rejects_duplicate_owner)
     {
-        auto resource = std::filesystem::temp_directory_path() / "yadro_named_resource_lock_test.db";
+        auto resource = std::filesystem::temp_directory_path()
+            / ("yadro_named_resource_lock_test_" + std::to_string(get_process_id()) + ".db");
         auto lock = named_resource_lock::acquire("yadro_test_resource", resource);
         gbassert(lock);
         gbassert(is_named_resource_locked("yadro_test_resource", resource));
@@ -977,7 +985,7 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         // single server-client test
         auto f = std::async(std::launch::async, [] {
-            winpipe_server_t server(L"\\\\.\\pipe\\yadro\\pipe");
+            winpipe_server_t server(unique_test_pipe_name(L"pipe"));
             server.run(
                 [](int) {},
                 std::function([&](int i) { return reinterpret_cast<std::uint64_t>(server.get_handle()); }),
@@ -986,7 +994,7 @@ unset multiplot)*";
             );
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+        winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
         gbassert(client.request<void>(0, 1));
         gbassert(client.request<std::uint64_t>(1, 0));
         gbassert(client.request<std::array<int, 3>>(3, 1, 2, 3).value() == std::array{ 1,2,3 });
@@ -1005,7 +1013,7 @@ unset multiplot)*";
         // test multi-instance server
         auto f = std::async(std::launch::async, []
             {
-                start_server(L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                start_server(unique_test_pipe_name(L"pipe"), nullptr,
                     [](int) {},
                     [](const std::vector<int>& v) { return v; }, // echo vector
                     [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; },
@@ -1014,7 +1022,7 @@ unset multiplot)*";
                     );
             });
         {   // first client
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
             gbassert(client.request<void>(0, 1));
             gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
             gbassert(client.request<void>(3));
@@ -1022,15 +1030,15 @@ unset multiplot)*";
             client.disconnect();
         }
         {   // second client
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
             gbassert(client.request<void>(0, 1));
             gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
             client.disconnect();
         }
         {   // two clients, overlaping requests
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), "first client", 5);
             gbassert(client.request<void>(0, 1));
-            winpipe_client_t client1(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+            winpipe_client_t client1(unique_test_pipe_name(L"pipe"), "second client", 5);
             gbassert(client.request<std::array<int, 3>>(2, 1, 2, 3).value() == std::array{ 1,2,3 });
             client.disconnect();
             gbassert(client1.request<void>(0, 1));
@@ -1039,7 +1047,7 @@ unset multiplot)*";
         {   // three clients async access
             auto f1 = std::async(std::launch::async, []
                 {
-                    winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+                    winpipe_client_t client(unique_test_pipe_name(L"pipe"), "first client", 5);
                     for (auto i = 0; i < 5; ++i)
                     {
                         std::vector<int> vec(1'000'000, 0);
@@ -1050,7 +1058,7 @@ unset multiplot)*";
                 });
             auto f2 = std::async(std::launch::async, []
                 {
-                    winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+                    winpipe_client_t client(unique_test_pipe_name(L"pipe"), "second client", 5);
                     for (auto i = 0; i < 5; ++i)
                     {
                         std::vector<int> vec(1'000'000, 0);
@@ -1061,7 +1069,7 @@ unset multiplot)*";
                 });
             auto f3 = std::async(std::launch::async, []
                 {
-                    winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "third client", 5);
+                    winpipe_client_t client(unique_test_pipe_name(L"pipe"), "third client", 5);
                     for (auto i = 0; i < 5; ++i)
                     {
                         std::vector<int> vec(1'000'000, 0);
@@ -1072,7 +1080,7 @@ unset multiplot)*";
                 });
         }
 
-        shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10);
+        shutdown_server(unique_test_pipe_name(L"pipe"), 10);
 #endif
     }
 
@@ -1083,7 +1091,7 @@ unset multiplot)*";
         // test named functions
         auto f = std::async(std::launch::async, []
             {
-                start_server(L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                start_server(unique_test_pipe_name(L"pipe"), nullptr,
                     std::tuple{ "zero", [](int) {} },
                     std::tuple{ "one", [](const std::vector<int>& v) { return v; } }, // echo vector
                     std::tuple{ "two", [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; } },
@@ -1092,7 +1100,7 @@ unset multiplot)*";
                     );
             });
         {   // first client
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
             gbassert(client.request<void>("zero", 1));
             gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
             gbassert(client.request<void>("three"));
@@ -1100,15 +1108,15 @@ unset multiplot)*";
             client.disconnect();
         }
         {   // second client
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
             gbassert(client.request<void>("zero", 1));
             gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
             client.disconnect();
         }
         {   // two clients, overlaping requests
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), "first client", 5);
             gbassert(client.request<void>("zero", 1));
-            winpipe_client_t client1(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+            winpipe_client_t client1(unique_test_pipe_name(L"pipe"), "second client", 5);
             gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
             client.disconnect();
             gbassert(client1.request<void>("zero", 1));
@@ -1117,7 +1125,7 @@ unset multiplot)*";
         {   // three clients async access
             auto f1 = std::async(std::launch::async, []
                 {
-                    winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+                    winpipe_client_t client(unique_test_pipe_name(L"pipe"), "first client", 5);
                     for (auto i = 0; i < 5; ++i)
                     {
                         std::vector<int> vec(1'000'000, 0);
@@ -1128,7 +1136,7 @@ unset multiplot)*";
                 });
             auto f2 = std::async(std::launch::async, []
                 {
-                    winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+                    winpipe_client_t client(unique_test_pipe_name(L"pipe"), "second client", 5);
                     for (auto i = 0; i < 5; ++i)
                     {
                         std::vector<int> vec(1'000'000, 0);
@@ -1139,7 +1147,7 @@ unset multiplot)*";
                 });
             auto f3 = std::async(std::launch::async, []
                 {
-                    winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "third client", 5);
+                    winpipe_client_t client(unique_test_pipe_name(L"pipe"), "third client", 5);
                     for (auto i = 0; i < 5; ++i)
                     {
                         std::vector<int> vec(1'000'000, 0);
@@ -1151,10 +1159,10 @@ unset multiplot)*";
         }
         
         // the server is running, starting another one must fail
-        must_throw([&] { start_server(L"\\\\.\\pipe\\yadro\\pipe", std::make_unique<logger>(std::cout), [] {}); });
-        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
+        must_throw([&] { start_server(unique_test_pipe_name(L"pipe"), std::make_unique<logger>(std::cout), [] {}); });
+        gbassert(shutdown_server(unique_test_pipe_name(L"pipe"), 10));
         // shutting down server multiple times should succeed
-        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
+        gbassert(shutdown_server(unique_test_pipe_name(L"pipe"), 10));
 #endif
     }
 
@@ -1165,7 +1173,7 @@ unset multiplot)*";
         // test named functions, using throttling threadpool
         auto f = std::async(std::launch::async, []
             {
-                start_server(2, L"\\\\.\\pipe\\yadro\\pipe", nullptr,
+                start_server(2, unique_test_pipe_name(L"pipe"), nullptr,
                     std::tuple{ "zero", [](int) {} },
                     std::tuple{ "one", [](const std::vector<int>& v) { return v; } }, // echo vector
                     std::tuple{ "two", [](int i1, int i2, int i3) { return std::array{ i1, i2, i3 }; } },
@@ -1174,7 +1182,7 @@ unset multiplot)*";
                     );
             });
         {   // first client
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
             gbassert(client.request<void>("zero", 1));
             gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
             gbassert(client.request<void>("three"));
@@ -1182,15 +1190,15 @@ unset multiplot)*";
             client.disconnect();
         }
         {   // second client
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), 5);
             gbassert(client.request<void>("zero", 1));
             gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
             client.disconnect();
         }
         {   // two clients, overlaping requests
-            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", "first client", 5);
+            winpipe_client_t client(unique_test_pipe_name(L"pipe"), "first client", 5);
             gbassert(client.request<void>("zero", 1));
-            winpipe_client_t client1(L"\\\\.\\pipe\\yadro\\pipe", "second client", 5);
+            winpipe_client_t client1(unique_test_pipe_name(L"pipe"), "second client", 5);
             gbassert(client.request<std::array<int, 3>>("two", 1, 2, 3).value() == std::array{ 1,2,3 });
             client.disconnect();
             gbassert(client1.request<void>("zero", 1));
@@ -1201,7 +1209,7 @@ unset multiplot)*";
                 {
                     return std::async(std::launch::async, [name]
                         {
-                            winpipe_client_t client(L"\\\\.\\pipe\\yadro\\pipe", name, 5);
+                            winpipe_client_t client(unique_test_pipe_name(L"pipe"), name, 5);
                             for (auto i = 0; i < 5; ++i)
                             {
                                 std::vector<int> vec(1'000'000, 0);
@@ -1220,7 +1228,7 @@ unset multiplot)*";
                     f.get();
         }
      
-        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro\\pipe", 10));
+        gbassert(shutdown_server(unique_test_pipe_name(L"pipe"), 10));
 #endif
     }
 
@@ -1230,13 +1238,13 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
             {
-                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\shared_client");
+                winpipe_server_t server(unique_test_pipe_name(L"shared_client"));
                 server.run(
                     [](int i) { return i; }
                     );
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\shared_client", "shared client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"shared_client"), "shared client", 10);
 
         auto worker = [&](int base)
             {
@@ -1276,7 +1284,7 @@ unset multiplot)*";
 
         auto server = std::async(std::launch::async, [&]
             {
-                start_server(tp, L"\\\\.\\pipe\\yadro\\shutdown_wait", nullptr,
+                start_server(tp, unique_test_pipe_name(L"shutdown_wait"), nullptr,
                     std::tuple{ "hold", [&](int value)
                         {
                             if (!set_started.exchange(true))
@@ -1288,14 +1296,14 @@ unset multiplot)*";
                     );
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\shutdown_wait", "held client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"shutdown_wait"), "held client", 10);
         auto held_request = std::async(std::launch::async, [&]
             {
                 return client.request<int>("hold", 42).value();
             });
 
         gbassert(started.wait_for(5s) == std::future_status::ready);
-        winpipe_client_t(L"\\\\.\\pipe\\yadro\\shutdown_wait", "shutdown client", 10).shutdown();
+        winpipe_client_t(unique_test_pipe_name(L"shutdown_wait"), "shutdown client", 10).shutdown();
 
         gbassert(server.wait_for(100ms) == std::future_status::timeout);
         release_handler.set_value();
@@ -1311,14 +1319,14 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
             {
-                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\byte_mode");
+                winpipe_server_t server(unique_test_pipe_name(L"byte_mode"));
                 DWORD flags{};
                 gbassert(GetNamedPipeInfo(server.get_handle(), &flags, nullptr, nullptr, nullptr));
                 gbassert((flags & PIPE_TYPE_MESSAGE) == 0);
                 server.run([] { return 7; });
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\byte_mode", "byte mode client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"byte_mode"), "byte mode client", 10);
         DWORD state{};
         gbassert(GetNamedPipeHandleState(client.get_handle(), &state, nullptr, nullptr, nullptr, nullptr, 0));
         gbassert((state & PIPE_READMODE_MESSAGE) == 0);
@@ -1333,13 +1341,13 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
             {
-                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\missing_function");
+                winpipe_server_t server(unique_test_pipe_name(L"missing_function"));
                 server.run(
                     std::tuple{ "known", [] { return 1; } }
                     );
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\missing_function", "missing function client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"missing_function"), "missing function client", 10);
         auto response = client.request<int>("unknown");
         gbassert(!response);
         gbassert(response.error().find("unknown") != std::string::npos);
@@ -1356,14 +1364,14 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
             {
-                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\sequential");
+                winpipe_server_t server(unique_test_pipe_name(L"sequential"));
                 server.run(
                     std::tuple{ "echo_int", [](int i) { return i; } },
                     std::tuple{ "echo_vec", [](std::vector<char> v) { return v; } }
                     );
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\sequential", "sequential client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"sequential"), "sequential client", 10);
 
         for (int i = 0; i < 500; ++i)
             gbassert(client.request<int>("echo_int", i).value() == i);
@@ -1391,26 +1399,26 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         auto server1 = std::async(std::launch::async, []
             {
-                start_server(L"\\\\.\\pipe\\yadro_full_name_a\\same", nullptr,
+                start_server(unique_test_pipe_name(L"full_name_a\\same"), nullptr,
                     std::tuple{ "value", [] { return 1; } }
                     );
             });
 
         auto server2 = std::async(std::launch::async, []
             {
-                start_server(L"\\\\.\\pipe\\yadro_full_name_b\\same", nullptr,
+                start_server(unique_test_pipe_name(L"full_name_b\\same"), nullptr,
                     std::tuple{ "value", [] { return 2; } }
                     );
             });
 
-        winpipe_client_t client1(L"\\\\.\\pipe\\yadro_full_name_a\\same", "full name client 1", 10);
-        winpipe_client_t client2(L"\\\\.\\pipe\\yadro_full_name_b\\same", "full name client 2", 10);
+        winpipe_client_t client1(unique_test_pipe_name(L"full_name_a\\same"), "full name client 1", 10);
+        winpipe_client_t client2(unique_test_pipe_name(L"full_name_b\\same"), "full name client 2", 10);
         gbassert(client1.request<int>("value").value() == 1);
         gbassert(client2.request<int>("value").value() == 2);
         client1.disconnect();
         client2.disconnect();
-        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro_full_name_a\\same", 10));
-        gbassert(shutdown_server(L"\\\\.\\pipe\\yadro_full_name_b\\same", 10));
+        gbassert(shutdown_server(unique_test_pipe_name(L"full_name_a\\same"), 10));
+        gbassert(shutdown_server(unique_test_pipe_name(L"full_name_b\\same"), 10));
         server1.get();
         server2.get();
 #endif
@@ -1427,7 +1435,7 @@ unset multiplot)*";
     GB_TEST(util, win_pipe_client_error_uses_utf8_pipe_name)
     {
 #if defined(GBWINDOWS)
-        const std::wstring pipename = L"\\\\.\\pipe\\yadro\\unicode_\u0436";
+        const std::wstring pipename = unique_test_pipe_name(L"unicode_\u0436");
         try
         {
             winpipe_client_t client(pipename, "unicode error client", 1);
@@ -1512,13 +1520,13 @@ unset multiplot)*";
 
         auto server = std::async(std::launch::async, [log]
             {
-                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\move_logging", log);
+                winpipe_server_t server(unique_test_pipe_name(L"move_logging"), log);
                 server.set_send_receive_log(true);
                 winpipe_server_t moved{ std::move(server) };
                 moved.run([](int value) { return value + 1; });
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\move_logging", "move logging client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"move_logging"), "move logging client", 10);
         gbassert(client.request<int>(0, 41).value() == 42);
         client.disconnect();
         server.get();
@@ -1538,7 +1546,7 @@ unset multiplot)*";
 
         auto accept_result = std::async(std::launch::async, [&]
             {
-                return winpipe_server_t::accept(L"\\\\.\\pipe\\yadro\\cancel_accept", shutdown_event.get(), nullptr).has_value();
+                return winpipe_server_t::accept(unique_test_pipe_name(L"cancel_accept"), shutdown_event.get(), nullptr).has_value();
             });
 
         std::this_thread::sleep_for(50ms);
@@ -1553,8 +1561,7 @@ unset multiplot)*";
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
-        const auto pipename = L"\\\\.\\pipe\\yadro\\retry_before_accept_"
-            + std::to_wstring(GetCurrentProcessId());
+        const auto pipename = unique_test_pipe_name(L"retry_before_accept");
         unique_win_handle first_created{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
         unique_win_handle release_first{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
         unique_win_handle retry_created{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
@@ -1630,8 +1637,7 @@ unset multiplot)*";
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
-        const auto pipename = L"\\\\.\\pipe\\yadro\\cancel_retry_"
-            + std::to_wstring(GetCurrentProcessId());
+        const auto pipename = unique_test_pipe_name(L"cancel_retry");
         unique_win_handle shutdown_event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
         unique_win_handle pipe_created{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
         unique_win_handle release_connect{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
@@ -1683,10 +1689,10 @@ unset multiplot)*";
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
-        const auto pipename = L"\\\\.\\pipe\\yadro\\read_timeout";
+        const auto pipename = unique_test_pipe_name(L"read_timeout");
 
         unique_win_handle server_pipe{ CreateNamedPipe(
-            pipename,
+            pipename.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             pipe_mode,
             1,
@@ -1697,7 +1703,7 @@ unset multiplot)*";
         gbassert(server_pipe.valid());
 
         unique_win_handle client_pipe{ CreateFile(
-            pipename,
+            pipename.c_str(),
             GENERIC_READ | GENERIC_WRITE,
             0,
             nullptr,
@@ -1736,14 +1742,14 @@ unset multiplot)*";
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
             {
-                winpipe_server_t server(L"\\\\.\\pipe\\yadro\\named_exception");
+                winpipe_server_t server(unique_test_pipe_name(L"named_exception"));
                 server.run(
                     std::tuple{ "boom", []() -> int { throw std::runtime_error{ "named failure" }; } },
                     std::tuple{ "ok", [] { return 3; } }
                     );
             });
 
-        winpipe_client_t client(L"\\\\.\\pipe\\yadro\\named_exception", "named exception client", 10);
+        winpipe_client_t client(unique_test_pipe_name(L"named_exception"), "named exception client", 10);
         auto failed = client.request<int>("boom");
         gbassert(!failed);
         gbassert(failed.error().find("named failure") != std::string::npos);
@@ -1795,11 +1801,6 @@ unset multiplot)*";
     std::map<std::wstring, ACCESS_MASK> expected_default_dacl()
     {
         return { { current_process_user_sid(), FILE_ALL_ACCESS }, { std::wstring{ local_system_sid }, FILE_ALL_ACCESS } };
-    }
-
-    std::wstring unique_test_pipe_name(std::wstring_view name)
-    {
-        return L"\\\\.\\pipe\\yadro\\" + std::wstring{ name } + L"_" + std::to_wstring(GetCurrentProcessId());
     }
 
     unique_win_handle create_squatting_pipe(const std::wstring& pipename, DWORD extra_open_mode = 0)
@@ -2009,8 +2010,8 @@ unset multiplot)*";
         gbassert(dacl.allowed == expected);
 
         // ambiguous and malformed security are rejected before any pipe is created
-        must_throw([&] { pipe_listener_t{ L"\\\\.\\pipe\\yadro\\unused", pipe_server_options{ .sddl = sddl, .security_attributes = &attributes } }; });
-        must_throw([] { pipe_listener_t{ L"\\\\.\\pipe\\yadro\\unused", pipe_server_options{ .sddl = L"D:P(not sddl" } }; });
+        must_throw([&] { pipe_listener_t{ unique_test_pipe_name(L"unused"), pipe_server_options{ .sddl = sddl, .security_attributes = &attributes } }; });
+        must_throw([] { pipe_listener_t{ unique_test_pipe_name(L"unused"), pipe_server_options{ .sddl = L"D:P(not sddl" } }; });
 #endif
     }
 
@@ -2284,7 +2285,7 @@ unset multiplot)*";
             };
 
         // a malformed expected SID is refused before any connection is attempted
-        gbassert(connect_error(L"\\\\.\\pipe\\yadro\\unused", pipe_client_options{ .expected_server_sid = L"not a sid" })
+        gbassert(connect_error(unique_test_pipe_name(L"unused"), pipe_client_options{ .expected_server_sid = L"not a sid" })
             .find("invalid expected pipe server SID") != std::string::npos);
 
         const auto pipename = unique_test_pipe_name(L"reject_server");
