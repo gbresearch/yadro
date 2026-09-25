@@ -28,6 +28,9 @@
 
 #include "../include/yadro.h"
 #include <thread>
+#include <fstream>
+#include <format>
+#include <stdexcept>
 #include <chrono>
 
 #pragma comment(lib, "yadro")
@@ -85,7 +88,23 @@ int main(int argc, char* argv[])
 #endif
 
     tester::set_verbose(true);
+#if defined(GBWINDOWS)
+    // A concurrent run (another session, a post-build run) must not truncate or overwrite this
+    // run's log. The run that opens yadro-test.log denies other writers for as long as it runs,
+    // and a run that finds the file held logs to yadro-test_<pid>.log instead.
+    std::ofstream log_file("yadro-test.log", std::ios::out, _SH_DENYWR);
+    if (!log_file)
+    {
+        const auto fallback_name = std::format("yadro-test_{}.log", get_process_id());
+        log_file.clear();
+        log_file.open(fallback_name, std::ios::out, _SH_DENYWR);
+        if (!log_file)
+            throw std::runtime_error("failed to open log file: " + fallback_name);
+    }
+    tester::set_logger(log_file, std::cout);
+#else
     tester::set_logger("yadro-test.log", std::cout);
+#endif
 #ifndef GBWINDOWS
     tester::disable_tests("util", "win_pipe1");
     tester::disable_tests("util", "win_pipe2");
