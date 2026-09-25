@@ -120,7 +120,7 @@ Existing tests in `test/container_test.cpp` must pass unmodified. If a test depe
 **Files:**
 - Modify: `vs/yadro_test.vcxproj` (4 `AdditionalIncludeDirectories` entries plus a property group).
 
-- [ ] **Step 1: Rebase onto the current master and check AXE**
+- [x] **Step 1: Rebase onto the current master and check AXE**
 
   ```powershell
   git rebase master
@@ -133,7 +133,7 @@ Existing tests in `test/container_test.cpp` must pass unmodified. If a test depe
   - AXE `master` is at or after `4e93d14`, and `include\axe_depth.h` and `include\axe_utf8.h` exist.
 
   Record both hashes in the handoff.
-- [ ] **Step 2: Add `AxeIncludeDir`**
+- [x] **Step 2: Add `AxeIncludeDir`**
   1. Add a global property group near the top of `vs/yadro_test.vcxproj`:
 
      ```xml
@@ -143,13 +143,13 @@ Existing tests in `test/container_test.cpp` must pass unmodified. If a test depe
      ```
 
   2. Replace each of the four `$(ProjectDir)..\..\axe\include` occurrences with `$(AxeIncludeDir)`. In the two configurations that currently omit it, keep `;%(AdditionalIncludeDirectories)` unchanged.
-- [ ] **Step 3: Baseline, before any JSON change**
+- [x] **Step 3: Baseline, before any JSON change**
 
   Build x64 Debug, x64 Release, Win32 Debug, and Win32 Release with the command above.
   - Record `tests passed/failed/disabled` for each configuration.
   - If Win32 fails to build or has failing tests at baseline, record the exact error. Win32 then drops out of the acceptance criteria, as the spec's "if it builds today" allows. Do not fix unrelated Win32 issues.
   - From the main checkout (`C:\Projects\GitHub\yadro`), confirm that a build without `/p:AxeIncludeDir` still resolves AXE. Use a compile-only build of `vs\yadro_test.vcxproj`.
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
   ```powershell
   git add -- vs/yadro_test.vcxproj
@@ -210,7 +210,7 @@ namespace detail {
 }
 ```
 
-- [ ] **Step 1: Write the failing tests** in the new `test/json_test.cpp`, suite `json`
+- [x] **Step 1: Write the failing tests** in the new `test/json_test.cpp`, suite `json`
 
   1. Copy the license header and the `namespace { using namespace gb::yadro::container; using namespace gb::yadro::util; ...` scaffold from `test/container_test.cpp`.
   2. Add the file to `vs/yadro_test.vcxproj` and its `.filters` file (filter `Source Files`, like the other tests).
@@ -246,8 +246,8 @@ namespace detail {
        - on a 1 MiB source with cap 10: `extracted() <= cap + 1` **exactly**, on both buffers. That is the spec's bound; there is no allowance for refill buffering;
        - on a 1 MiB source with cap 70,000, which spans more than one 64 KiB read chunk and many 4 KiB refills: `extracted() <= cap + 1`, and the error's line and column equal `position_of(source, cap)`;
        - a stream in fail state (not EOF) throws `std::runtime_error("Failed to read JSON stream")`.
-- [ ] **Step 2: Confirm RED.** Run a compile-only Debug x64 build. Expected: errors naming `json_parse_errc`, `append_json_string`, and the `detail::` helpers.
-- [ ] **Step 3: Implement `json_parser.h`**
+- [x] **Step 2: Confirm RED.** Run a compile-only Debug x64 build. Expected: errors naming `json_parse_errc`, `append_json_string`, and the `detail::` helpers.
+- [x] **Step 3: Implement `json_parser.h`**
   1. Add the Boost license header, `#pragma once`, and the standard headers.
   2. Add the AXE opt-in block (`GB_YADRO_ENABLE_AXE_JSON` → `<axe.h>`, with the same `#error` when AXE is missing). It defines `GB_YADRO_JSON_PARSER_HAS_AXE` and exports `inline constexpr bool json_parser_axe_enabled`. Undefine the macro at the end of the file, as `gbdb_json.h` does with its own `GB_YADRO_GBDB_JSON_HAS_AXE`.
   3. `gbdb_json.h` keeps its own block and its `gbdb_json_axe_enabled` constant, unchanged. `parse_json_events` is declared in both modes; in the non-AXE mode it throws. As a result, `json.h` needs no AXE macro of its own.
@@ -271,12 +271,12 @@ namespace detail {
     - throws `input_too_large` through `throw_parse_error(buffer, cap, ...)` as soon as `size > cap`, computing line and column over the buffer;
     - throws the existing `runtime_error` message when `!in && !in.eof()`.
   - **`throw_parse_error`** computes the line and column from `position_of`.
-- [ ] **Step 4: Update `gbdb_json.h` and the project files**
+- [x] **Step 4: Update `gbdb_json.h` and the project files**
   - Delete the local `json_parse_error` struct and add `#include "json_parser.h"`.
   - Add both new headers to `vs/yadro.vcxproj` and its `.filters` file under filter `container`. `json.h` is created empty with just its license header and `#pragma once` here, so that the project entries stay valid.
   - Add both headers to `gbcontainer.h` after `gbdb_json_path.h`.
-- [ ] **Step 5: GREEN.** Build Debug x64 and Release x64. Expected: exit 0, `failed: 0`, and all existing container JSON tests pass, since only the error type moved.
-- [ ] **Step 6: Commit**
+- [x] **Step 5: GREEN.** Build Debug x64 and Release x64. Expected: exit 0, `failed: 0`, and all existing container JSON tests pass, since only the error type moved.
+- [x] **Step 6: Commit**
 
   ```powershell
   git add -- container/json_parser.h container/json.h container/gbdb_json.h container/gbcontainer.h test/json_test.cpp vs/yadro.vcxproj vs/yadro.vcxproj.filters vs/yadro_test.vcxproj vs/yadro_test.vcxproj.filters
@@ -296,7 +296,7 @@ namespace detail {
 - **With AXE enabled:** as specified below.
 - **Without AXE:** it throws `std::logic_error("JSON parsing requires opt-in AXE support: define GB_YADRO_ENABLE_AXE_JSON and add AXE include directory")`.
 
-- [ ] **Step 1: Write the failing tests** (all inside `if constexpr (gbdb_json_axe_enabled)`)
+- [x] **Step 1: Write the failing tests** (all inside `if constexpr (gbdb_json_axe_enabled)`)
 
   **Test helpers.** `event_recorder` implements the handler concept and appends compact tokens to a `std::string`:
   - `{`, `}`, `[`, `]`;
@@ -414,8 +414,8 @@ namespace detail {
   - **`json_events_line_column_test`.** `"{
 \"a\":1,
 \"Ã©\" 2}"`. Line 3 is `"é" 2}`, where `é` takes two bytes, so the missing `:` is reported at the byte `2`: `code == syntax`, `line == 3`, `column == 6`.
-- [ ] **Step 2: Confirm RED.** Run a compile-only build. Expected: `parse_json_events` is undeclared.
-- [ ] **Step 3: Implement the front end** (`#if GB_YADRO_JSON_PARSER_HAS_AXE`, in `detail::json_front_end<H>`)
+- [x] **Step 2: Confirm RED.** Run a compile-only build. Expected: `parse_json_events` is undeclared.
+- [x] **Step 3: Implement the front end** (`#if GB_YADRO_JSON_PARSER_HAS_AXE`, in `detail::json_front_end<H>`)
 
   **Parser object state:**
   - `text` (a `std::string_view`), `const char* begin`, `const char* end`, `H& handler`, and `options`;
@@ -496,8 +496,8 @@ namespace detail {
   **Final wiring:**
   - `parse_json_events` constructs `json_front_end<H>` on the stack and calls `parse()`.
   - Header comment: the grammar shape, the AXE-defect rule, the depth definition, and the documented stack cost. The measured figures are filled in during Task 9.
-- [ ] **Step 4: GREEN** on Debug x64 and Release x64. If a string-error offset in the tests disagrees with the rule above, fix the implementation, not the tests. The spec defines the offsets.
-- [ ] **Step 5: Commit** with `git commit -m "feat: add hardened AXE JSON front end with SAX handler interface"`, after adding `container/json_parser.h` and `test/json_test.cpp`.
+- [x] **Step 4: GREEN** on Debug x64 and Release x64. If a string-error offset in the tests disagrees with the rule above, fix the implementation, not the tests. The spec defines the offsets.
+- [x] **Step 5: Commit** with `git commit -m "feat: add hardened AXE JSON front end with SAX handler interface"`, after adding `container/json_parser.h` and `test/json_test.cpp`.
 
 ---
 
@@ -511,7 +511,7 @@ namespace detail {
 - `json_read_options` gains `max_depth = 256`, `max_input_bytes = 0`, and `big_integers = json_big_integer_policy::error`.
 - In `detail`: `to_string(json_big_integer_policy)` returns `"error"` or `"to_double"`, and `parse_json_big_integer_policy(std::string_view)` parses it.
 
-- [ ] **Step 1: Write the failing tests** (suite `json`; test names prefixed `gbdb_`)
+- [x] **Step 1: Write the failing tests** (suite `json`; test names prefixed `gbdb_`)
   - **`gbdb_read_rejects_hardened_inputs_test`.** Each of the following gives `json_parse_error` with the expected code:
     - a raw control character in a value and in a key;
     - each invalid UTF-8 class from Task 2;
@@ -559,8 +559,8 @@ namespace detail {
     - `ascii_only` writes `"é😀"` as `\u00e9\ud83d\ude00`, and the result reads back to the same bytes;
     - a string holding `"\xC0\xAF"` makes `write_json` throw `std::logic_error`, in both `ascii_only` modes;
     - NaN still throws `std::logic_error`.
-- [ ] **Step 2: Confirm RED.** Run a compile-only build and the failing assertions. The hardening tests fail on the current reader, and the new option fields are missing.
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Confirm RED.** Run a compile-only build and the failing assertions. The hardening tests fail on the current reader, and the new option fields are missing.
+- [x] **Step 3: Implement**
   - **`read_json(std::string_view, options)`:**
 
     ```cpp
@@ -589,8 +589,8 @@ namespace detail {
     - `auto r = append_json_string(s, value, _options.ascii_only, json_invalid_utf8::error)`;
     - if `!r.ok`, throw `std::logic_error("JSON writer cannot represent invalid UTF-8 at byte " + std::to_string(r.invalid_offset) + " of a string")`;
     - otherwise `_out << s`.
-- [ ] **Step 4: GREEN.** Build Debug and Release x64. Every existing `container` suite test must pass unmodified; list any that fail and stop if the cause is newly rejected input.
-- [ ] **Step 5: Commit** with `git commit -m "feat: route json_db reading through the hardened front end with input caps"`, after adding `container/gbdb_json.h` and `test/json_test.cpp`.
+- [x] **Step 4: GREEN.** Build Debug and Release x64. Every existing `container` suite test must pass unmodified; list any that fail and stop if the cause is newly rejected input.
+- [x] **Step 5: Commit** with `git commit -m "feat: route json_db reading through the hardened front end with input caps"`, after adding `container/gbdb_json.h` and `test/json_test.cpp`.
 
 ---
 
@@ -671,7 +671,7 @@ private:
 
 `char` is excluded from the integral constructor so that `json_value('x')` does not silently become a number. `get_if<T>` accepts `bool`, `std::int64_t`, `std::uint64_t`, `double`, `std::string`, `json_array`, and `json_object`; a `static_assert` rejects any other type.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - **`json_value_construction_test`:**
     - `json_value(std::uint64_t{5}).kind() == int64`;
     - `json_value(std::uint64_t{1} << 63).kind() == uint64`;
@@ -704,8 +704,8 @@ private:
     - an object is order-insensitive, including for 40-member objects built in reversed order, which exercises the sorted path;
     - objects with different key sets are not equal;
     - nesting works.
-- [ ] **Step 2: Confirm RED.** Run a compile-only build.
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Confirm RED.** Run a compile-only build.
+- [x] **Step 3: Implement**
   - **Declaration order.** Follow the order in the interface block. Each step is valid because:
     - **(1)** `using json_array = std::vector<json_value>` only names a specialization.
     - **(2)** `json_object`'s data member `std::vector<json_member>` instantiates the vector class with an incomplete element type. The standard permits this for `vector`, `list`, and `forward_list` when the element type is complete before any member of the specialization is referenced. `json_object` must therefore declare every special member, and must define no in-class function body that uses `members_`. Otherwise an implicit or inline definition would instantiate `vector<json_member>` members while `json_member` is incomplete.
@@ -730,8 +730,8 @@ private:
     - With up to 16 members, look up each key of the left object in the right one.
     - Otherwise, build two vectors of `const json_member*`, sort both by key, and compare them pairwise.
   - **No `noexcept` on equality.** `operator==` is deliberately **not** `noexcept`, because the sorted path allocates and may throw `std::bad_alloc`. The numeric and scalar helpers it calls may be `noexcept`.
-- [ ] **Step 4: GREEN.** Build Debug and Release x64.
-- [ ] **Step 5: Commit** with `git commit -m "feat: add general JSON value type with checked accessors and structural equality"`.
+- [x] **Step 4: GREEN.** Build Debug and Release x64.
+- [x] **Step 5: Commit** with `git commit -m "feat: add general JSON value type with checked accessors and structural equality"`.
 
 ---
 
@@ -751,7 +751,7 @@ void append_json_pointer_token(std::string& pointer, std::string_view key);   //
 void append_json_pointer_index(std::string& pointer, std::size_t index);
 ```
 
-- [ ] **Step 1: Write the failing tests.** Use an in-house document that exercises every RFC 6901 feature:
+- [x] **Step 1: Write the failing tests.** Use an in-house document that exercises every RFC 6901 feature:
 
   ```json
   {"list":["x","y"],"":1,"s/l":2,"p%c":3,"c^f":4,"b|r":5,"b\\s":6,"q\"t":7," ":8,"t~n":9,"obj":{"a":{"b":10}}}
@@ -777,12 +777,12 @@ void append_json_pointer_index(std::string& pointer, std::size_t index);
     - `"/obj/a/b/c"` → `not_a_container`, token 3.
   - **Mutable overload.** Assign through the mutable overload and observe the change.
   - **Builders.** `append_json_pointer_token(p, "a/b~c")` gives `/a~1b~0c`, and a pointer built this way round-trips through `at_pointer`.
-- [ ] **Step 2: Confirm RED.**
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Confirm RED.**
+- [x] **Step 3: Implement.**
   - Parse the pointer token by token without allocating, except for unescaping into a small reused `std::string` when a token contains `~`.
   - Parse indices with `std::from_chars` into `std::size_t` and reject leading zeros.
-- [ ] **Step 4: GREEN.** Build Debug and Release x64.
-- [ ] **Step 5: Commit** with `git commit -m "feat: add RFC 6901 JSON pointer lookup to json_value"`.
+- [x] **Step 4: GREEN.** Build Debug and Release x64.
+- [x] **Step 5: Commit** with `git commit -m "feat: add RFC 6901 JSON pointer lookup to json_value"`.
 
 ---
 
@@ -801,7 +801,7 @@ void append_json_pointer_index(std::string& pointer, std::size_t index);
 
 The stream form throws `std::runtime_error("Failed to write JSON stream")` on a stream failure, matching `write_stream`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - **Compact golden output:** `{"a":[1,-2,3.5,"x",true,false,null],"b":{},"c":[],"d":1.0,"e":-0.0,"f":1e+300,"g":18446744073709551615}` from a value built in code. Note `1.0` and `-0.0`.
   - **Pretty golden output** with `indent = 2`:
 
@@ -825,14 +825,14 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - an invalid-UTF-8 string value, and an invalid-UTF-8 object key → `json_write_error`, whose message contains the JSON pointer (`/k` for a value; for a key, the pointer of the containing object plus " (key)") and the byte offset;
     - with `replace`, output succeeds with U+FFFD.
   - **`append_json`** appends to existing content, and does not clear it.
-- [ ] **Step 2: Confirm RED.**
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Confirm RED.**
+- [x] **Step 3: Implement.**
   - Recurse with a `std::string& out`.
   - Track the current JSON pointer in a `std::string` only on the error path: rebuild it by passing a small path stack (a vector of keys or indices) down the recursion, and format it only when throwing.
   - Doubles: `std::to_chars(buf, buf + 32, d)`. If the result has none of `.`, `e`, `E`, `n`, or `i`, append `.0`.
   - Integers use `std::to_chars`.
-- [ ] **Step 4: GREEN.** Build Debug and Release x64.
-- [ ] **Step 5: Commit** with `git commit -m "feat: add compact, pretty and ASCII-only JSON writer for json_value"`.
+- [x] **Step 4: GREEN.** Build Debug and Release x64.
+- [x] **Step 5: Commit** with `git commit -m "feat: add compact, pretty and ASCII-only JSON writer for json_value"`.
 
 ---
 
@@ -855,7 +855,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
 
   The `try_` forms catch only `json_parse_error`. Without AXE, all four throw `std::logic_error`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - **`json_parse_value_basic_test`.** Parse a mixed document and check it with `at_pointer` and the kinds:
     - an unsigned integer ≤ INT64_MAX becomes `int64`;
     - `18446744073709551615` becomes `uint64`;
@@ -877,8 +877,8 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - a review-findings array, `[{"file":"a.cpp","location":{"line":10,"column":4},"severity":"high","summary":"x"},{"file":"b.h","location":{"line":1,"column":1},"severity":"low","summary":"y"}]`.
 
     Navigate them with `at_pointer` (`/message/content/1/input/timeout`, `/1/location/line`) and check round-trip equality through `format_json`.
-- [ ] **Step 2: Confirm RED.**
-- [ ] **Step 3: Implement `json_value_builder`**
+- [x] **Step 2: Confirm RED.**
+- [x] **Step 3: Implement `json_value_builder`**
   - **Frame stack.** Keep `std::vector<frame>`. A frame holds:
     - a `json_value`, the array or object being built;
     - an `std::optional<std::string> pending_key`;
@@ -914,8 +914,8 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
   - **Canonicalization.** `uint_value(u)` with `u <= INT64_MAX` stores an int64.
   - **`finish()`** requires an empty stack and a set root.
   - **`parse_json_value`** builds the options, constructs the builder with `options.duplicate_keys`, calls `parse_json_events`, and then `finish()`.
-- [ ] **Step 4: GREEN.** Build Debug and Release x64.
-- [ ] **Step 5: Commit** with `git commit -m "feat: add json_value builder and parse entry points on the shared front end"`.
+- [x] **Step 4: GREEN.** Build Debug and Release x64.
+- [x] **Step 5: Commit** with `git commit -m "feat: add json_value builder and parse entry points on the shared front end"`.
 
 ---
 
@@ -924,7 +924,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
 **Files:**
 - Test: `test/json_test.cpp`. If the file grows past about 2,500 lines, move the corpus to a new `test/json_conformance_test.cpp`, added to both test project files.
 
-- [ ] **Step 1: The conformance table**
+- [x] **Step 1: The conformance table**
 
   ```cpp
   enum class expect { accept, reject };
@@ -1019,7 +1019,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
       - Cases marked `json_db_code_required` must throw `json_parse_error` with the expected code. These are object-rooted string, UTF-8, surrogate, number, and nested-object depth cases, in which the builder cannot object first.
       - A `y_` case either succeeds or throws `std::logic_error`.
     - On failure, print the case name to `std::cout` before calling `gbassert`.
-- [ ] **Step 2: Round-trip property test (`json_round_trip_property_test`)**
+- [x] **Step 2: Round-trip property test (`json_round_trip_property_test`)**
   - **Generator.** `std::mt19937_64 rng{ 0x5eed'1234'abcd'0001 }` generates 2,000 values with depth ≤ 6 and width ≤ 6. Kinds are weighted evenly.
   - **Strings.** Random length ≤ 24, drawn from ASCII, controls, `"`, `\`, U+0080, U+07FF, U+0800, U+FFFD, U+FFFF, U+10000, U+10FFFF, and random BMP characters outside the surrogate range. Keys are drawn the same way and deduplicated.
   - **Integers.** Edge values (0, ±1, INT64_MIN, INT64_MAX, 2^53±1, and uint64 values above INT64_MAX) plus random values.
@@ -1027,9 +1027,9 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
   - **Checks.** For each value and for each of compact, `pretty` with indent 2, and `ascii_only`:
     - `identical(parse_json_value(format_json(v, f)), v)`, where the test-local `identical` requires the same kind at every node, the same member order, and bitwise-equal doubles;
     - `format_json(parse_json_value(s), f) == s`, where `s = format_json(v, f)`.
-- [ ] **Step 3: Fixed-point test.** For every accepted `y_` case: `format(parse(format(parse(x)))) == format(parse(x))`.
-- [ ] **Step 4: Build.** Run the Debug and Release x64 builds, then fix any front-end or writer defects the corpus exposes. Give each fix its own focused regression test in the relevant earlier test group.
-- [ ] **Step 5: Commit** with `git commit -m "test: add in-house JSON conformance corpus and round-trip property tests"`.
+- [x] **Step 3: Fixed-point test.** For every accepted `y_` case: `format(parse(format(parse(x)))) == format(parse(x))`.
+- [x] **Step 4: Build.** Run the Debug and Release x64 builds, then fix any front-end or writer defects the corpus exposes. Give each fix its own focused regression test in the relevant earlier test group.
+- [x] **Step 5: Commit** with `git commit -m "test: add in-house JSON conformance corpus and round-trip property tests"`.
 
 ---
 
@@ -1039,7 +1039,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
 - Test: `test/json_test.cpp`
 - Modify: `container/json_parser.h` (header comment: the measured stack cost)
 
-- [ ] **Step 1: The stack tests** (inside `#if defined(GBWINDOWS)` and `if constexpr (gbdb_json_axe_enabled)`)
+- [x] **Step 1: The stack tests** (inside `#if defined(GBWINDOWS)` and `if constexpr (gbdb_json_axe_enabled)`)
   - **Test helper `run_on_thread_with_stack(std::size_t reserve, F f)`:**
     - creates the thread with `CreateThread(nullptr, reserve, thunk, &ctx, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr)`;
     - waits with `WaitForSingleObject(INFINITE)` and closes the handle through `unique_win_handle`;
@@ -1075,7 +1075,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - It logs `json stack slope: <config> arrays=<n> objects=<n> bytes/level`, and it asserts only that the slope is positive and finite, which guards the measurement itself.
 
     **Gate failure.** If the gate fails in x64 Debug, stop and report the numbers to the operator. Do not change `max_depth`'s default, and do not weaken the test.
-- [ ] **Step 2: Performance smoke test (`json_performance_smoke_test`)**
+- [x] **Step 2: Performance smoke test (`json_performance_smoke_test`)**
   - **Sizes.** Use `#ifdef NDEBUG` to choose the scale: `S = 50 MiB` in Release and `S = 50 MiB / 8` in Debug.
   - **Generators** (deterministic, from a fixed seed):
     - `records(target_bytes)`: `[` then `{"id":<n>,"name":"<16 chars incl. \\n and é>","vals":[1.5,-2,3e10],"ok":true,"nested":{"k":null}}` repeated, then `]`.
@@ -1088,8 +1088,8 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - `wide_object` with 125,000 and 500,000 keys (divided by 8 in Debug), parsed by DOM, which exercises the duplicate-detection hash path.
   - **Assertions and output.** For each set, assert `t4 / t1 < 8.0`. Print the MiB/s figures to `std::cout`, and record them in the handoff.
   - **Win32.** If the 50 MiB DOM parse fails with `std::bad_alloc` there, pass `S/2` for Win32 only (`#if !defined(_WIN64)`) and record the deviation. Do not skip the SAX runs.
-- [ ] **Step 3: Build and run.** Run the Debug and Release builds on x64 and Win32. Copy the peak, slope, and throughput lines into the handoff notes. Also copy the peak and slope figures into the `json_parser.h` header comment ("measured peak stack for 256 levels: ..."), with the date and toolset.
-- [ ] **Step 4: Commit** with `git commit -m "test: gate JSON parser stack use and check linear parse time"`.
+- [x] **Step 3: Build and run.** Run the Debug and Release builds on x64 and Win32. Copy the peak, slope, and throughput lines into the handoff notes. Also copy the peak and slope figures into the `json_parser.h` header comment ("measured peak stack for 256 levels: ..."), with the date and toolset.
+- [x] **Step 4: Commit** with `git commit -m "test: gate JSON parser stack use and check linear parse time"`.
 
 ---
 
@@ -1099,7 +1099,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
 - Modify: `README.md`, `container/json.h`, `container/json_parser.h`, `container/gbdb_json.h` (header comments)
 - Modify: this plan (execution handoff)
 
-- [ ] **Step 1: Header documentation**
+- [x] **Step 1: Header documentation**
   - **`json_parser.h`:**
     - the front-end structure;
     - why the depth wrapper is invoked directly (the AXE `get()` by-value copy);
@@ -1110,17 +1110,17 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
     - the number-conversion contract.
   - **`json.h`:** the invariants (integer canonicalization, unique keys, linear lookup), the equality semantics, the writer rules, and the recursion ownership for values built programmatically.
   - **`gbdb_json.h`:** a short note on `read_json` hardening and the new options.
-- [ ] **Step 2: `README.md`**
+- [x] **Step 2: `README.md`**
   - Add `json.h` and `json_parser.h` entries to the container table.
   - Add a gbdb bullet noting that `read_json` shares the hardened front end, with the stricter-input list and the new `json_read_options` fields.
   - Add a short `json_value` example: parse, `at_pointer`, and `format_json`.
-- [ ] **Step 3: Check at `/W4` and without AXE** (scratch only, not committed)
+- [x] **Step 3: Check at `/W4` and without AXE** (scratch only, not committed)
   1. Write two scratch translation units (TUs) in the session scratchpad:
      - `w4.cpp` includes `container/json.h` and `container/gbdb_json.h` with `GB_YADRO_ENABLE_AXE_JSON`, and instantiates `parse_json_events` with `json_value_builder` and `json_db_builder`, plus `format_json`.
      - `noaxe.cpp` is the same without the macro. It calls `parse_json_value` and `read_json` and expects `std::logic_error`.
   2. Compile both with `cl /nologo /std:c++latest /EHsc /utf-8 /Zc:__cplusplus /permissive- /W4 /WX /c` through a `vcvars64.bat` wrapper (the pattern the spec's stack probe used). For `w4.cpp`, pass `/external:I C:\Projects\GitHub\axe\include /external:W0`, which is how the orchestrator consumes AXE.
   3. Expected: zero warnings, and both TUs compile. Link and run `noaxe.cpp` to confirm the `logic_error` messages.
-- [ ] **Step 4: Independent code review.** Review against every section of the spec. Pay particular attention to:
+- [x] **Step 4: Independent code review.** Review against every section of the spec. Pay particular attention to:
   - the depth-wrapper placement: no composite, no `r_rule`;
   - the error offsets;
   - the stream-cap byte bound;
@@ -1131,11 +1131,11 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
   - object equality on large objects.
 
   Apply technically valid findings with fresh RED/GREEN cycles, and commit them.
-- [ ] **Step 5: Mutation checks.** These run on the committed tree, before the final rebuild, and are reverted afterwards.
+- [x] **Step 5: Mutation checks.** These run on the committed tree, before the final rebuild, and are reverted afterwards.
   1. **Required, and independent of the AXE version.** Change `value()` so that it invokes a freshly constructed local copy of the depth wrapper, `auto copy = limited; return copy(i, end);`, instead of the member. This reproduces the copy-per-call defect. Build x64 Debug with `/p:PostBuildEventUseInBuild=false` and run the exe. The Task 2 depth boundary tests and the hostile-input tests must fail. If the hostile-input run crashes the process, that is the expected failure.
   2. **Informational.** Nest the wrapper inside a composite (`limited | r_fail(...)`) and record whether the depth tests fail. The result depends on whether AXE `master` contains the `get()` fix at that time; record the AXE hash.
   3. **Revert both.** Confirm `git diff --exit-code` and `git status --short` show a clean tree. The binaries built with the mutations are now stale, and Step 6 rebuilds everything from the committed source.
-- [ ] **Step 6: Final rebase and full verification** (from the clean, committed tree)
+- [x] **Step 6: Final rebase and full verification** (from the clean, committed tree)
 
   ```powershell
   git rebase master          # the then-current local master
@@ -1147,7 +1147,7 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
   - Rebuild all four configurations with `/t:Rebuild` and the `AxeIncludeDir` form. Every configuration that was green at the Task 0 baseline must report `failed: 0`. Record `passed`, `failed`, and `disabled` against the baseline.
   - Rerun the Release x64 exe twice more to check that the timing gates are stable.
   - Record `git rev-parse HEAD`. The binaries tested in this step correspond to that commit. The handoff commit that follows changes only this plan document.
-- [ ] **Step 7: Write the Execution Handoff section** at the end of this plan. It records:
+- [x] **Step 7: Write the Execution Handoff section** at the end of this plan. It records:
   - the base master and AXE hashes;
   - the baseline and final test counts per configuration;
   - the stack and throughput measurements;
@@ -1162,4 +1162,141 @@ The stream form throws `std::runtime_error("Failed to write JSON stream")` on a 
 
 ## Execution Handoff
 
-_To be completed after execution (Task 10, Step 7)._
+All eleven tasks (0–10) are complete and committed on `feature/json-value`, which is not pushed. The working tree is clean.
+
+### Bases
+
+- **Yadro:** the plan started from `master` `d511885`. The final rebase (Task 10, Step 6) was onto `master` `af9d52d` and was clean.
+- **AXE:** `master` `c602171` ("Return composite sub-rules by reference from r_binary_fn_t::get()"), which includes P1 (`09b0883`, `4e93d14`). The composite defect is therefore historical. The front end never relies on the fix: its depth wrapper is invoked directly.
+- **Tested source commit:** `29ec2f4`. The handoff commit that follows changes only this document.
+
+### Verification (first-hand, 2026-09-24, MSVC v145)
+
+| Configuration | Task 0 baseline | Final `/t:Rebuild` at `29ec2f4` |
+|---|---|---|
+| x64 Debug | 276 passed, 0 failed, 2 disabled | 331 passed, 0 failed, 2 disabled |
+| x64 Release | 276 / 0 / 2 | 331 / 0 / 2 (and two more exe runs: 331 / 0 / 2) |
+| Win32 Debug | 276 / 0 / 2 | 331 / 0 / 2 |
+| Win32 Release | 276 / 0 / 2 | 331 / 0 / 2 |
+
+- **New tests:** 55, all in `test/json_test.cpp`, suite `json`. The existing `container` tests pass unmodified.
+- **Warnings:** the four rebuilds produced no compiler warnings (the test project builds at `/W3 /WX`).
+- **`/W4` check (scratch, not committed):**
+  - `json.h` and `json_parser.h` compile cleanly on their own at `/W4 /WX /permissive- /Zc:preprocessor`, with AXE as `/external:I ... /external:W0`.
+  - Full translation units that also include `gbdb_json.h` and `gbdb_json_path.h` show no warnings in any JSON header, with AXE enabled or disabled. The only warnings come from pre-existing headers (`archive.h`, `util/string_util.cpp`).
+- **Without AXE:** the headers compile. `parse_json_value`, `try_parse_json_value` and `read_json` throw `std::logic_error`, and the value type and writer work.
+
+### Stack gate (Task 9)
+
+The gate reports whole-parse peaks on a fresh 1 MiB-reservation thread, measured from the lowest committed stack page. The workloads include error paths at depth 256 and a copy, compare and write of a 256-deep value.
+
+| Configuration | Worst peak | Slope | Gate (640 KiB) |
+|---|---:|---:|---|
+| x64 Debug | 388 KiB | 1344 B/level | pass |
+| x64 Debug, `_ITERATOR_DEBUG_LEVEL=2` (scratch probe of the same workloads) | 392 KiB | – | pass |
+| Win32 Debug | 308 KiB | 1112 B/level | pass |
+| Win32 Debug, `_ITERATOR_DEBUG_LEVEL=2` (scratch probe) | 312 KiB | – | pass |
+| x64 Release | 132 KiB | 352 B/level | pass |
+| Win32 Release | 72 KiB | 208 B/level | pass |
+
+### Performance smoke test (final x64 Release runs)
+
+| Workload | Throughput | t(4x)/t(1x) |
+|---|---|---|
+| 50 MiB records, SAX | 105–131 MiB/s | 3.9–4.6 |
+| 50 MiB records, DOM | 30–38 MiB/s | 3.8–4.8 |
+| 12.5 MiB long string, SAX | 107–119 MiB/s | 3.9–5.0 |
+| 500,000-key object, DOM | 14–15 MiB/s | 4.7–5.2 |
+
+- **Win32 Release:** records reach 82 MiB/s through SAX and 29 MiB/s through the DOM. The 50 MiB DOM fits, so the Win32 size fallback was not needed.
+- **Debug builds** run at one eighth of the size and at 0.3–3 MiB/s. Every ratio is below 8.
+
+### Mutation checks (Task 10, Step 5)
+
+- **Required mutation:** `value()` invoked a fresh local copy of the depth wrapper. 6 tests failed: the depth boundaries, json_db hardening, the manifest limits, the conformance corpus, and the stack gate. The mutation was reverted, and `git diff --exit-code` was clean before the final rebuild.
+- **Informational composite-nesting mutation:** not run, because AXE `master` already contains `c602171`. The required mutation covers the same copy-per-call failure mode regardless of the AXE version.
+
+### Deviations from the plan as written
+
+1. **Stack.** The first full parse measured 872 KiB for 256 levels in x64 Debug, and destroying, copying or comparing a 256-deep `json_value` took 1.1–1.9 MiB, which crashed the test process. So:
+   - the recursive front-end frames (`container`, `value`) now keep only the dispatch;
+   - `json_value` destruction, copy and `operator==` now use explicit worklists instead of recursion (the spec described them as recursive);
+   - copy, compare and write were added to the gate's workloads.
+2. **AXE grammar construction.**
+   - The grammar factories declare the AXE operators at block scope. Otherwise unqualified lookup in `gb::yadro::container` finds the matrix `operator+`/`operator-`, whose `matrix_c` check against an AXE rule is a hard error.
+   - Each grammar is one prvalue expression, because AXE's mixed literal/rule operators keep an lvalue rule operand by reference, which dangled.
+   - `\u` takes exactly four hex digits (`r_many(r_hex(), 4, 4)`).
+3. **`gbdb_json_path.h`** (not in the File Map):
+   - `insert_json_at_path` validates the caller's text on its own first, with the caller's size and depth limits; the path wrapper doesn't count against them;
+   - `insert_json_file_at_path` uses `read_capped`;
+   - `write_json_path` uses the shared escaper.
+4. **Review findings applied** (Task 10, Step 4):
+   - the duplicate-key index is an ordered `std::map` (the hash index was open to hash flooding);
+   - `read_capped` reads through `rdbuf()->sgetn` and leaves the stream's state and exception mask alone;
+   - text passed to `insert_json_at_path` can no longer close the wrapper and insert outside its path;
+   - `json_value` deletes conversions from non-character pointers and throws on a null `const char*`;
+   - copying and comparing flat containers no longer allocates a worklist;
+   - `json_lead_exponent` saturates at 2^50.
+5. **Test corrections.**
+   - `with_siblings` uses scalar siblings. The planned `"b":[true,null]` sibling would itself exceed the depth limit at the innermost level.
+   - The `to_double` expectations are the exact fixed forms (`-9223372036854775808`, `18446744073709551616`), which `to_chars` prefers because they are shorter.
+   - Test streams are `extraction_streambuf` and `chunked_streambuf`, as in plan revision 2.
+6. **Interface details.** `json_object` iterators are `json_member*` and `const json_member*`, as required by the declaration order. `json_parser.h` exposes `json_parser_axe_enabled` and `detail::json_null_handler`.
+7. **Process.** Task 4's RED compile was not run separately; its tests were written first. Task 3's "unchanged contracts" test pins only `{"a":[1,2]}` → `uint_array_ref`, the case the plan names.
+8. **Environment.** `util.win_pipe_client_checks_the_server_process_not_its_own` timed out once (30 s) during a Task 2 run and passed on every other run. It is unrelated to this change.
+
+### Public API (`gb::yadro::container`)
+
+- **`json_parser.h`:**
+  - `json_parse_errc`, `to_string(json_parse_errc)`;
+  - `json_parse_error { offset, line, column, code }` (moved from `gbdb_json.h`; source-compatible);
+  - `json_handler_error`;
+  - `json_big_integer_policy`, `json_duplicate_keys`, `json_parse_options { max_depth = 256, max_input_bytes = 0, big_integers = error, allow_scalar_root = true, duplicate_keys = reject }`;
+  - the `json_handler` concept, `parse_json_events(text, handler, options)`;
+  - `json_invalid_utf8`, `json_escape_result`, `append_json_string(out, text, ascii_only, policy)`;
+  - `json_parser_axe_enabled`.
+- **`json.h`:**
+  - `json_kind`, `json_value`, `json_array` (`std::vector<json_value>`), `json_member`, `json_object`;
+  - `json_access_error` and `json_value::as_bool/as_int64/as_uint64/as_double/as_string/as_array/as_object`, plus `get_if<T>`, `kind`, and the `is_*` predicates;
+  - `json_pointer_error`, `json_value::at_pointer`, `append_json_pointer_token`, `append_json_pointer_index`;
+  - `operator==`;
+  - `json_format`, `json_write_error`, `format_json` (string and ostream forms), `append_json`;
+  - `json_value_builder`;
+  - `parse_json_value` and `try_parse_json_value` (`string_view` and `istream` forms).
+- **`gbdb_json.h`:** `json_read_options` gains `max_depth = 256`, `max_input_bytes = 0`, and `big_integers = error`, persisted by `write_json_defaults` and `read_json_defaults`.
+
+### Behaviour changes for existing gbdb_json users
+
+`read_json`, `read_json_file`, `insert_json`, `insert_json_file`, `insert_json_at_path` and `insert_json_file_at_path` now reject:
+
+1. Raw control characters U+0000–U+001F in strings or keys (`control_character`).
+2. Invalid UTF-8 in strings or keys (`invalid_utf8`):
+   - overlong forms;
+   - encoded surrogates (`ED A0 80`);
+   - code points above U+10FFFF;
+   - bytes C0, C1, and F5–FF;
+   - stray continuation bytes;
+   - truncated sequences.
+3. Lone UTF-16 surrogate escapes (`lone_surrogate`).
+4. More than `max_depth` (256) simultaneously open objects (`depth_exceeded`). Very deep input used to crash. For `insert_json_at_path`, the path's own wrapper levels are not counted.
+5. Input larger than `max_input_bytes`, when it is set (`input_too_large`). Streams and files never read more than the cap plus one byte.
+6. For `insert_json_at_path` only: text that is not exactly one complete JSON value, such as text that would close the path wrapper.
+
+Also changed:
+
+- **Surrogate pairs** are now stored as one 4-byte UTF-8 sequence, not CESU-8.
+- **Non-zero doubles that round to zero** (for example `1e-400`) now read as a signed zero. They used to be rejected.
+- **Error reporting.** Error messages are more specific and carry `json_parse_error::code`. Offsets point at the offending byte. For `insert_json_at_path`, they are relative to the caller's text.
+- **Writers.**
+  - `write_json` with `ascii_only` writes correct code-point escapes and surrogate pairs.
+  - `write_json` and `write_json_path` throw `std::logic_error` for strings that are not valid UTF-8.
+  - `write_json_path` now escapes control characters in values instead of throwing `std::invalid_argument`.
+- **Streams.** A stream passed to `read_json` is no longer left in the fail state at end of input.
+
+These are unchanged: the root must be an object or an array; a BOM is rejected; integer classification is the same; value-model limits (boolean arrays, nested arrays, mixed arrays) still throw `std::logic_error`; duplicate keys still throw `std::logic_error`; a file manifest cannot change read options.
+
+### Follow-ups (deliberately out of scope)
+
+- json_db still writes an integral double such as `1.0` as `1`, which reads back as `uint64`.
+- `write_json_path` does not honour `ascii_only`.
+- `json_value`'s writer recurses once per nesting level. It measured 164–252 KiB for 256 levels in Debug. Values built programmatically deeper than that are the caller's responsibility, as documented.
