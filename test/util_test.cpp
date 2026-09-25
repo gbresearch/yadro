@@ -2331,12 +2331,12 @@ unset multiplot)*";
         const auto pipename = unique_test_pipe_name(L"low_integrity_server");
         low_integrity_pipe_server child{ pipename };
         gbassert(child.pid != GetCurrentProcessId());
-        constexpr auto startup_attempts = 1000u; // the child creates the pipe after it starts
+        constexpr auto child_attempts = 1000u; // the child is slow to (re)publish the pipe, see below
 
         // the same user at a level the client accepts: admitted, and the connection reaches the child
         {
             winpipe_client_t client(pipename, pipe_client_options{ .verify_server_user = true,
-                .min_server_integrity = SECURITY_MANDATORY_LOW_RID }, "low server client", startup_attempts);
+                .min_server_integrity = SECURITY_MANDATORY_LOW_RID }, "low server client", child_attempts);
             gbassert(client.request<std::uint32_t>(0).value() == child.pid);
         }
 
@@ -2355,7 +2355,10 @@ unset multiplot)*";
         gbassert(error.find(std::format("server process {} integrity level {:#x} is below the required {:#x}",
             child.pid, SECURITY_MANDATORY_LOW_RID, *own_integrity)) != std::string::npos);
 
-        winpipe_client_t(pipename, "low server shutdown", 10).shutdown();
+        // The child creates the pipe only after it starts, and it serves one connection at a time,
+        // publishing the next instance only once it takes up the rejected one: on a busy machine
+        // the name can be unavailable for a while.
+        winpipe_client_t(pipename, "low server shutdown", child_attempts).shutdown();
         gbassert(WaitForSingleObject(child.process, 30'000) == WAIT_OBJECT_0);
         DWORD exit_code{};
         gbassert(GetExitCodeProcess(child.process, &exit_code));
