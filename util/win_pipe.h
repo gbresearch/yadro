@@ -1338,6 +1338,11 @@ namespace gb::yadro::util
             // blocking single-instance server constructor.
             if (last_error == ERROR_NO_DATA)
             {
+                if (cancellation_requested())
+                {
+                    close();
+                    return std::nullopt;
+                }
                 // What the client wrote before closing is still buffered and readable, e.g. a whole
                 // shutdown request sent while the server was busy with an earlier connection. Such
                 // an instance is served; only one the client left empty is replaced.
@@ -1346,11 +1351,6 @@ namespace gb::yadro::util
                 {
                     log_pipe(_listening.get(), "server connected client that already closed");
                     return std::exchange(_listening, unique_win_handle{});
-                }
-                if (cancellation_requested())
-                {
-                    close();
-                    return std::nullopt;
                 }
                 log_pipe(_listening.get(), "client disconnected before server accept");
                 auto replacement = create_instance();
