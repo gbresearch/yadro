@@ -50,9 +50,16 @@ namespace gb::yadro::container
             return result;
         }
 
+        // Quoted JSON string for keys and values in output, through the escaper that write_json uses:
+        // control characters are escaped, and invalid UTF-8 throws std::logic_error.
         [[nodiscard]] inline std::string json_string(std::string_view text)
         {
-            return "\"" + escape_json_key(text) + "\"";
+            std::string result;
+            auto escaped = append_json_string(result, text, false, json_invalid_utf8::error);
+            if (!escaped.ok)
+                throw std::logic_error("JSON writer cannot represent invalid UTF-8 at byte " + std::to_string(escaped.invalid_offset)
+                    + " of a string");
+            return result;
         }
 
         template<class T>
@@ -274,11 +281,17 @@ namespace gb::yadro::container
     inline void insert_json_at_path(json_db& target, std::string_view path, std::string_view text,
         json_merge_policy policy = json_merge_policy::replace_existing, const json_read_options& options = {})
     {
-        // The path wrapper is not part of the caller's input: the size cap applies to text alone,
-        // and the wrapper objects do not consume the caller's depth budget.
-        if (options.max_input_bytes != 0 && text.size() > options.max_input_bytes)
-            detail::throw_parse_error(text, options.max_input_bytes, json_parse_errc::input_too_large,
-                "JSON input exceeds the maximum size of " + std::to_string(options.max_input_bytes) + " bytes");
+        // The text is first validated on its own as exactly one JSON value, with the caller's
+        // limits. A complete value cannot close the path wrapper objects, so the text cannot insert
+        // anything outside the path, and parse errors report positions in the caller's text. The
+        // wrapper objects then do not count against the caller's size or depth limits.
+        json_parse_options validation;
+        validation.max_depth = options.max_depth;
+        validation.max_input_bytes = options.max_input_bytes;
+        validation.big_integers = options.big_integers;
+        detail::json_null_handler validator;
+        parse_json_events(text, validator, validation);
+
         auto normalized_path = normalize_json_path(path);
         auto wrapped = detail::wrap_json_at_path(normalized_path, text);
         auto wrapped_options = options;

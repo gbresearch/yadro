@@ -294,9 +294,14 @@ namespace gb::yadro::container
         }
 
         // Reads the whole stream, or throws input_too_large after extracting at most cap + 1 bytes
-        // (cap == 0 means unlimited). A stream failure other than end of file throws runtime_error.
+        // (cap == 0 means unlimited). It reads through the stream buffer, as copying rdbuf() does,
+        // so the stream's state and exception mask are left alone; a stream that is already failed
+        // or has no buffer throws runtime_error.
         [[nodiscard]] inline std::string read_capped(std::istream& in, std::size_t cap)
         {
+            auto* source = in.rdbuf();
+            if (!in || !source)
+                throw std::runtime_error("Failed to read JSON stream");
             constexpr std::size_t chunk = 64 * 1024;
             std::string buffer;
             for (;;) {
@@ -308,14 +313,11 @@ namespace gb::yadro::container
                 }
                 auto old_size = buffer.size();
                 buffer.resize(old_size + want);
-                in.read(buffer.data() + old_size, static_cast<std::streamsize>(want));
-                auto got = static_cast<std::size_t>(in.gcount());
+                auto got = static_cast<std::size_t>(source->sgetn(buffer.data() + old_size, static_cast<std::streamsize>(want)));
                 buffer.resize(old_size + got);
                 if (got < want)
                     break;
             }
-            if (!in && !in.eof())
-                throw std::runtime_error("Failed to read JSON stream");
             if (cap != 0 && buffer.size() > cap)
                 throw_parse_error(buffer, cap, json_parse_errc::input_too_large,
                     "JSON input exceeds the maximum size of " + std::to_string(cap) + " bytes");
@@ -433,11 +435,13 @@ namespace gb::yadro::container
     //-------------------------------------------------------------------------
     namespace detail
     {
-        // Decimal exponent of the first non-zero significant digit of a JSON number token,
-        // saturated to +/-2^30. A token whose digits are all zero returns 0.
+        // Decimal exponent of the first non-zero significant digit of a JSON number token. The
+        // explicit exponent saturates at +/-2^50, far beyond the digit count of any input that fits
+        // in memory, so adding the digit position can never cross zero because of the saturation.
+        // A token whose digits are all zero returns 0.
         [[nodiscard]] inline long long json_lead_exponent(std::string_view token) noexcept
         {
-            constexpr long long limit = 1LL << 30;
+            constexpr long long limit = 1LL << 50;
             std::size_t k = 0;
             if (k < token.size() && token[k] == '-')
                 ++k;
@@ -594,7 +598,7 @@ namespace gb::yadro::container
             {
                 const bool is_object = *i == '{';
                 begin_container(i, is_object);
-                i = after_open(i);
+                i = skip_after(i);
                 if (*i == (is_object ? '}' : ']'))
                     return end_container(i, is_object);
                 for (;;) {
@@ -602,7 +606,7 @@ namespace gb::yadro::container
                         i = member_key(i);
                     i = after_value(value(i), is_object);
                     if (*i == ',') {
-                        i = next_element(i);
+                        i = skip_after(i);
                         continue;
                     }
                     return end_container(i, is_object);
@@ -614,8 +618,8 @@ namespace gb::yadro::container
                 emit(i, [&] { is_object ? _handler.begin_object() : _handler.begin_array(); });
             }
 
-            // position of the first member or element, or of the closing bracket
-            iterator after_open(iterator i) const
+            // position of the next token after the '{', '[' or ',' at i
+            iterator skip_after(iterator i) const
             {
                 i = skip_ws(i + 1);
                 if (i == _end)
@@ -649,15 +653,6 @@ namespace gb::yadro::container
                     fail_end();
                 if (*i != ',' && *i != (is_object ? '}' : ']'))
                     fail(i, json_parse_errc::syntax, is_object ? "expected ',' or '}' in a JSON object" : "expected ',' or ']' in a JSON array");
-                return i;
-            }
-
-            // *i is ','; position of the next member or element
-            iterator next_element(iterator i) const
-            {
-                i = skip_ws(i + 1);
-                if (i == _end)
-                    fail_end();
                 return i;
             }
 
@@ -861,6 +856,25 @@ namespace gb::yadro::container
             axe::r_depth_limit_t<structural_rule> _limited;
         };
 #endif
+    }
+
+    namespace detail
+    {
+        // accepts every event; parsing with it only validates the text
+        struct json_null_handler
+        {
+            void begin_object() noexcept {}
+            void end_object() noexcept {}
+            void begin_array() noexcept {}
+            void end_array() noexcept {}
+            void key(std::string_view) noexcept {}
+            void null_value() noexcept {}
+            void bool_value(bool) noexcept {}
+            void int_value(std::int64_t) noexcept {}
+            void uint_value(std::uint64_t) noexcept {}
+            void double_value(double) noexcept {}
+            void string_value(std::string_view) noexcept {}
+        };
     }
 
     // Parses text and reports it to handler as a sequence of events. Throws json_parse_error on

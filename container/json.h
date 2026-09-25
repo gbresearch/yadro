@@ -64,6 +64,7 @@
 #include <functional>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -72,7 +73,6 @@
 #include <string_view>
 #include <tuple>
 #include <type_traits>
-#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -197,7 +197,12 @@ namespace gb::yadro::container
         json_value(float value) noexcept;
         json_value(std::string value) noexcept;
         json_value(std::string_view value);
-        json_value(const char* value);
+        json_value(const char* value);     // throws std::invalid_argument for a null pointer
+
+        // any other pointer would otherwise convert silently to a boolean
+        template<class T>
+            requires (!std::same_as<std::remove_cv_t<T>, char>)
+        json_value(T*) = delete;
         json_value(json_array value) noexcept;
         json_value(json_object value) noexcept;
 
@@ -345,67 +350,6 @@ namespace gb::yadro::container
     inline json_value::json_value(json_value&&) noexcept = default;
     inline json_value& json_value::operator=(json_value&&) noexcept = default;
 
-    // a copy of a scalar, or an empty container of the same kind
-    inline json_value json_value::shallow_copy(const json_value& source)
-    {
-        json_value result;
-        switch (source.kind()) {
-        case json_kind::array:
-            result._value.emplace<json_array>();
-            break;
-        case json_kind::object:
-            result._value.emplace<json_object>();
-            break;
-        default:
-            result._value = source._value;
-            break;
-        }
-        return result;
-    }
-
-    // Copies one level at a time from a worklist, so copying a deeply nested value takes no stack
-    // in proportion to its depth. Each container reserves its exact size before its children are
-    // queued, so the queued target pointers stay valid.
-    inline json_value::json_value(const json_value& other)
-        : json_value(shallow_copy(other))
-    {
-        if (!other.is_array() && !other.is_object())
-            return;
-        std::vector<std::pair<const json_value*, json_value*>> pending{ { &other, this } };
-        while (!pending.empty()) {
-            auto [source, target] = pending.back();
-            pending.pop_back();
-            if (auto* from = source->get_if<json_array>()) {
-                auto& to = *target->get_if<json_array>();
-                to.reserve(from->size());
-                for (auto& element : *from)
-                    to.push_back(shallow_copy(element));
-                for (std::size_t i = 0; i < from->size(); ++i)
-                    if ((*from)[i].is_array() || (*from)[i].is_object())
-                        pending.emplace_back(&(*from)[i], &to[i]);
-            }
-            else {
-                auto& from_members = source->get_if<json_object>()->_members;
-                auto& to_members = target->get_if<json_object>()->_members;
-                to_members.reserve(from_members.size());
-                for (auto& member : from_members)
-                    to_members.push_back(json_member(member.key(), shallow_copy(member.value)));
-                for (std::size_t i = 0; i < from_members.size(); ++i)
-                    if (from_members[i].value.is_array() || from_members[i].value.is_object())
-                        pending.emplace_back(&from_members[i].value, &to_members[i].value);
-            }
-        }
-    }
-
-    inline json_value& json_value::operator=(const json_value& other)
-    {
-        if (this != &other) {
-            json_value copy(other);
-            *this = std::move(copy);
-        }
-        return *this;
-    }
-
     namespace detail
     {
         [[nodiscard]] inline bool json_is_nonempty_container(const json_value& value) noexcept
@@ -440,6 +384,70 @@ namespace gb::yadro::container
                         pending.push_back(std::move(member.value));
             }
         }
+    }
+
+    // a copy of a scalar, or an empty container of the same kind
+    inline json_value json_value::shallow_copy(const json_value& source)
+    {
+        json_value result;
+        switch (source.kind()) {
+        case json_kind::array:
+            result._value.emplace<json_array>();
+            break;
+        case json_kind::object:
+            result._value.emplace<json_object>();
+            break;
+        default:
+            result._value = source._value;
+            break;
+        }
+        return result;
+    }
+
+    // Copies nested containers one level at a time from a worklist, so copying a deeply nested
+    // value takes no stack in proportion to its depth. Each container reserves its exact size
+    // before its children are queued, so the queued target pointers stay valid.
+    inline json_value::json_value(const json_value& other)
+    {
+        // a scalar, or a container whose children are scalars or empty containers: one level, no worklist
+        if (!detail::json_has_nested_container(other)) {
+            _value = other._value;
+            return;
+        }
+        _value = shallow_copy(other)._value;
+        std::vector<std::pair<const json_value*, json_value*>> pending{ { &other, this } };
+        while (!pending.empty()) {
+            auto [source, target] = pending.back();
+            pending.pop_back();
+            if (auto* from = source->get_if<json_array>()) {
+                auto& to = *target->get_if<json_array>();
+                to.reserve(from->size());
+                for (auto& element : *from)
+                    to.push_back(shallow_copy(element));
+                for (std::size_t i = 0; i < from->size(); ++i)
+                    if ((*from)[i].is_array() || (*from)[i].is_object())
+                        pending.emplace_back(&(*from)[i], &to[i]);
+            }
+            else {
+                auto& from_members = source->get_if<json_object>()->_members;
+                auto& to_members = target->get_if<json_object>()->_members;
+                to_members.reserve(from_members.size());
+                for (auto& member : from_members)
+                    to_members.push_back(json_member(member.key(), shallow_copy(member.value)));
+                for (std::size_t i = 0; i < from_members.size(); ++i)
+                    if (from_members[i].value.is_array() || from_members[i].value.is_object())
+                        pending.emplace_back(&from_members[i].value, &to_members[i].value);
+            }
+        }
+    }
+
+    inline json_value& json_value::operator=(const json_value& other)
+    {
+        if (this != &other) {
+            json_value copy(other);
+            *this = std::move(copy);
+        }
+        return *this;
     }
 
     // Destroying nested containers recursively would take stack in proportion to the depth, several
@@ -487,7 +495,12 @@ namespace gb::yadro::container
     inline json_value::json_value(float value) noexcept : _value(std::in_place_type<double>, static_cast<double>(value)) {}
     inline json_value::json_value(std::string value) noexcept : _value(std::in_place_type<std::string>, std::move(value)) {}
     inline json_value::json_value(std::string_view value) : _value(std::in_place_type<std::string>, value) {}
-    inline json_value::json_value(const char* value) : _value(std::in_place_type<std::string>, value) {}
+    inline json_value::json_value(const char* value)
+    {
+        if (!value)
+            throw std::invalid_argument("json_value cannot be constructed from a null const char*");
+        _value.emplace<std::string>(value);
+    }
     inline json_value::json_value(json_array value) noexcept : _value(std::in_place_type<json_array>, std::move(value)) {}
     inline json_value::json_value(json_object value) noexcept : _value(std::in_place_type<json_object>, std::move(value)) {}
 
@@ -656,9 +669,22 @@ namespace gb::yadro::container
             return json_equals(*b.get_if<std::uint64_t>(), x);
         }
 
-        // Compares a and b without descending: scalars are compared, and equal-sized containers
-        // queue their child pairs in pending (object members matched by key, order ignored).
-        [[nodiscard]] inline bool json_node_equal(const json_value& a, const json_value& b, json_value_pairs& pending)
+        // Compares a and b and their direct leaf children; pairs involving a child container are
+        // queued in pending (object members are matched by key, order ignored). Not recursive, and
+        // flat containers never allocate.
+        [[nodiscard]] inline bool json_node_equal(const json_value& a, const json_value& b, json_value_pairs& pending);
+
+        // compares two leaves now, or queues a pair that involves a container
+        [[nodiscard]] inline bool json_child_equal(const json_value& a, const json_value& b, json_value_pairs& pending)
+        {
+            if (a.is_array() || a.is_object() || b.is_array() || b.is_object()) {
+                pending.emplace_back(&a, &b);
+                return true;
+            }
+            return json_node_equal(a, b, pending);
+        }
+
+        inline bool json_node_equal(const json_value& a, const json_value& b, json_value_pairs& pending)
         {
             if (a.is_number() || b.is_number())
                 return a.is_number() && b.is_number() && json_numbers_equal(a, b);
@@ -677,7 +703,8 @@ namespace gb::yadro::container
                 if (x.size() != y.size())
                     return false;
                 for (std::size_t i = 0; i < x.size(); ++i)
-                    pending.emplace_back(&x[i], &y[i]);
+                    if (!json_child_equal(x[i], y[i], pending))
+                        return false;
                 return true;
             }
             case json_kind::object: {
@@ -688,9 +715,8 @@ namespace gb::yadro::container
                 if (x.size() <= 16) {
                     for (auto& member : x) {
                         auto* other = y.find(member.key());
-                        if (!other)
+                        if (!other || !json_child_equal(member.value, *other, pending))
                             return false;
-                        pending.emplace_back(&member.value, other);
                     }
                     return true;
                 }
@@ -705,9 +731,8 @@ namespace gb::yadro::container
                 auto sx = sorted(x);
                 auto sy = sorted(y);
                 for (std::size_t i = 0; i < sx.size(); ++i) {
-                    if (sx[i]->key() != sy[i]->key())
+                    if (sx[i]->key() != sy[i]->key() || !json_child_equal(sx[i]->value, sy[i]->value, pending))
                         return false;
-                    pending.emplace_back(&sx[i]->value, &sy[i]->value);
                 }
                 return true;
             }
@@ -1032,8 +1057,8 @@ namespace gb::yadro::container
     // Open containers live on an explicit frame stack, so the builder itself does not recurse.
     // Opening a container can reallocate that stack and move every frame, so nothing in a frame
     // points into another frame or into an object's member storage: duplicate detection scans
-    // the keys of objects with up to 8 members and, from the 9th member on, uses an index that
-    // owns copies of the keys and maps each one to its member position (positions are stable
+    // the keys of objects with up to 8 members and, from the 9th member on, uses an ordered index
+    // that owns copies of the keys and maps each one to its member position (positions are stable
     // because the builder only appends).
     //-------------------------------------------------------------------------
     class json_value_builder
@@ -1096,13 +1121,9 @@ namespace gb::yadro::container
         }
 
     private:
-        struct transparent_string_hash
-        {
-            using is_transparent = void;
-            std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
-        };
-
-        using key_index = std::unordered_map<std::string, std::size_t, transparent_string_hash, std::equal_to<>>;
+        // An ordered index: its lookup cost is logarithmic whatever the keys are, so input crafted
+        // to collide under a hash function cannot make parsing quadratic.
+        using key_index = std::map<std::string, std::size_t, std::less<>>;
 
         static constexpr std::size_t index_threshold = 9;
         static constexpr std::size_t no_position = static_cast<std::size_t>(-1);
@@ -1150,7 +1171,6 @@ namespace gb::yadro::container
             top.pending_key.clear();
             if (!top.index && members.size() >= index_threshold) {
                 top.index = std::make_unique<key_index>();
-                top.index->reserve(members.size() * 2);
                 for (std::size_t i = 0; i < members.size(); ++i)
                     top.index->emplace(members[i]._key, i);
             }

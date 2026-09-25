@@ -2379,4 +2379,86 @@ namespace
             check_linear("wide object DOM", synthetic_wide_object(keys / 4), synthetic_wide_object(keys), dom, destroy);
         }
     }
+
+    //-------------------------------------------------------------------------
+    // review regressions
+    //-------------------------------------------------------------------------
+
+    GB_TEST(json, gbdb_json_path_text_cannot_escape_its_path_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            // text that closes the path wrapper must not insert members outside the path
+            const std::string injected = R"(1},"evil":{"x":1)";
+            json_db db;
+            auto error = catch_parse_error([&] { insert_json_at_path(db, "a/b", injected); });
+            gbassert(error.code == json_parse_errc::syntax);
+            gbassert(error.offset == 1);   // relative to the caller's text, not to the wrapped text
+            gbassert(!db.contains({ "a", "evil" }));
+
+            // parse errors report positions in the caller's text
+            auto error2 = catch_parse_error([&] { insert_json_at_path(db, "a/b/c", "{\"k\":[1,]}"); });
+            gbassert(error2.offset == 8 && error2.line == 1 && error2.column == 9);
+
+            // a scalar at a path is still accepted
+            insert_json_at_path(db, "p/q", "5");
+            gbassert(std::get<std::uint64_t>(*db.get({ "p", "q" })) == 5);
+        }
+    }
+
+    GB_TEST(json, json_read_capped_leaves_stream_state_test)
+    {
+        if constexpr (gbdb_json_axe_enabled) {
+            // a stream with exceptions enabled reads to its end without throwing, and its state is untouched
+            std::istringstream in(R"({"a":[1,2]})");
+            in.exceptions(std::ios::failbit | std::ios::badbit);
+            auto db = read_json(in);
+            gbassert(db.contains({ "a" }));
+            gbassert(in.good());
+
+            std::istringstream in2(R"([1,2])");
+            in2.exceptions(std::ios::failbit | std::ios::badbit);
+            gbassert(parse_json_value(in2) == json_value(json_array{ 1, 2 }));
+            gbassert(in2.good());
+        }
+    }
+
+    GB_TEST(json, gbdb_write_json_path_uses_shared_escaper_test)
+    {
+        json_db db;
+        db.set({ "a" }, std::string_view{ "x\x01y" });
+        gbassert(write_json_path(db, "a") == "\"x\\u0001y\"");
+
+        json_db bad;
+        bad.set({ "a" }, std::string_view{ "\xC0\xAF" });
+        must_throw<std::logic_error>([&] { (void)write_json_path(bad, "a"); });
+    }
+
+    GB_TEST(json, json_value_rejects_pointer_conversions_test)
+    {
+        static_assert(!std::is_constructible_v<json_value, int*>);
+        static_assert(!std::is_convertible_v<std::string*, json_value>);
+        static_assert(!std::is_convertible_v<const json_value*, json_value>);
+        static_assert(std::is_constructible_v<json_value, const char*>);
+        static_assert(std::is_constructible_v<json_value, char*>);
+        static_assert(std::is_constructible_v<json_value, std::nullptr_t>);
+
+        char buffer[] = "text";
+        gbassert(json_value(buffer) == json_value("text"));
+        const char* null_text = nullptr;
+        must_throw<std::invalid_argument>([&] { json_value value(null_text); });
+    }
+
+    GB_TEST(json, json_copy_and_compare_flat_and_nested_test)
+    {
+        json_value flat = json_array{ 1, "two", 3.0, nullptr, json_array{}, json_object{} };
+        auto flat_copy = flat;
+        gbassert(flat_copy == flat);
+        gbassert(!(flat_copy == json_value(json_array{ 1, "two", 3.5, nullptr, json_array{}, json_object{} })));
+
+        json_value nested = json_object{ { "a", json_array{ 1, json_object{ { "b", 2 } } } }, { "c", "d" } };
+        auto nested_copy = nested;
+        gbassert(nested_copy == nested);
+        nested_copy.at_pointer("/a/1/b").value()->operator=(json_value(3));
+        gbassert(!(nested_copy == nested));
+    }
 }
