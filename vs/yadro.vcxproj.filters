@@ -124,6 +124,12 @@
     <ClInclude Include="..\util\win_service.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\durable_file.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\sha256.h">
+      <Filter>util</Filter>
+    </ClInclude>
     <ClInclude Include="..\simulator\signal.h">
       <Filter>simulator</Filter>
     </ClInclude>
@@ -197,6 +203,12 @@
       <Filter>container</Filter>
     </ClInclude>
     <ClInclude Include="..\container\gbdb_json_path.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\json.h">
+      <Filter>container</Filter>
+    </ClInclude>
+    <ClInclude Include="..\container\json_parser.h">
       <Filter>container</Filter>
     </ClInclude>
     <ClInclude Include="..\container\gbdb_registry.h">

@@ -28,6 +28,9 @@
 
 #include "../include/yadro.h"
 #include <thread>
+#include <fstream>
+#include <format>
+#include <stdexcept>
 #include <chrono>
 
 #pragma comment(lib, "yadro")
@@ -56,6 +59,32 @@ int main(int argc, char* argv[])
         }
         ExitProcess(0);
     }
+
+    // Child mode for the pipe server identity tests: serves the pipe from a process of its own,
+    // which the test starts at low integrity, until a client requests shutdown. The one function
+    // reports this process's ID.
+    if (argc == 3 && argv[1] == std::string("--pipe-server"))
+    {
+        try
+        {
+            const std::string name{ argv[2] };
+            pipe_listener_t listener{ std::wstring{ name.begin(), name.end() } };
+            for (;;)
+            {
+                auto server = winpipe_server_t::accept(listener, nullptr);
+                try
+                {
+                    if (server && server->run([] { return static_cast<std::uint32_t>(GetCurrentProcessId()); }) == server_shutdown)
+                        return 0;
+                }
+                catch (...) {} // e.g. a client that rejected this server and closed without a request
+            }
+        }
+        catch (...)
+        {
+            return -1;
+        }
+    }
 #endif
 
     // --run-all also runs the tests disabled by default; the tester handles the other options, see tester::usage()
@@ -64,7 +93,23 @@ int main(int argc, char* argv[])
         run_all = run_all || argv[i] == std::string_view("--run-all");
 
     tester::set_verbose(true);
+#if defined(GBWINDOWS)
+    // A concurrent run (another session, a post-build run) must not truncate or overwrite this
+    // run's log. The run that opens yadro-test.log denies other writers for as long as it runs,
+    // and a run that finds the file held logs to yadro-test_<pid>.log instead.
+    std::ofstream log_file("yadro-test.log", std::ios::out, _SH_DENYWR);
+    if (!log_file)
+    {
+        const auto fallback_name = std::format("yadro-test_{}.log", get_process_id());
+        log_file.clear();
+        log_file.open(fallback_name, std::ios::out, _SH_DENYWR);
+        if (!log_file)
+            throw std::runtime_error("failed to open log file: " + fallback_name);
+    }
+    tester::set_logger(log_file, std::cout);
+#else
     tester::set_logger("yadro-test.log", std::cout);
+#endif
 #ifndef GBWINDOWS
     tester::disable_tests("util", "win_pipe1");
     tester::disable_tests("util", "win_pipe2");

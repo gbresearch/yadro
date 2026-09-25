@@ -29,6 +29,8 @@
 #pragma once
 
 #include "gbdb.h"
+#include "json_parser.h"
+#include "../util/durable_file.h"
 #include "../util/string_util.h"
 #include <algorithm>
 #include <cctype>
@@ -57,17 +59,6 @@
 namespace gb::yadro::container
 {
     inline constexpr bool gbdb_json_axe_enabled = GB_YADRO_GBDB_JSON_HAS_AXE != 0;
-
-    struct json_parse_error : std::runtime_error
-    {
-        std::size_t offset = 0;
-        std::uint32_t line = 0;
-        std::uint32_t column = 0;
-
-        json_parse_error(std::string message, std::size_t offset, std::uint32_t line, std::uint32_t column)
-            : std::runtime_error(std::move(message)), offset(offset), line(line), column(column)
-        {}
-    };
 
     enum class json_table_mode
     {
@@ -149,6 +140,11 @@ namespace gb::yadro::container
         std::string root_array_key = "data";
         bool ignore_manifest = true;
         std::string manifest_key = "$gbdb_manifest";
+        // Input limits, enforced by the shared front end (json_parser.h). A file manifest never
+        // changes them: they always come from the caller.
+        std::size_t max_depth = 256;        // simultaneously open objects
+        std::size_t max_input_bytes = 0;    // 0 = unlimited; streams and files never read more than this + 1 bytes
+        json_big_integer_policy big_integers = json_big_integer_policy::error;
     };
 
     struct json_write_options
@@ -183,15 +179,6 @@ namespace gb::yadro::container
 
     namespace detail
     {
-        [[nodiscard]] inline std::string read_stream(std::istream& in)
-        {
-            std::ostringstream buffer;
-            buffer << in.rdbuf();
-            if (!in && !in.eof())
-                throw std::runtime_error("Failed to read JSON stream");
-            return std::move(buffer).str();
-        }
-
         inline void write_stream(std::ostream& out, std::string_view text)
         {
             out.write(text.data(), static_cast<std::streamsize>(text.size()));
@@ -274,6 +261,15 @@ namespace gb::yadro::container
             return "file_manifest_wins";
         }
 
+        [[nodiscard]] constexpr std::string_view to_string(json_big_integer_policy value) noexcept
+        {
+            switch (value) {
+            case json_big_integer_policy::error: return "error";
+            case json_big_integer_policy::to_double: return "to_double";
+            }
+            return "error";
+        }
+
         [[nodiscard]] inline json_table_mode parse_json_table_mode(std::string_view value)
         {
             if (value == "reject")
@@ -352,6 +348,15 @@ namespace gb::yadro::container
             throw std::logic_error("Unknown json_defaults_conflict_policy value");
         }
 
+        [[nodiscard]] inline json_big_integer_policy parse_json_big_integer_policy(std::string_view value)
+        {
+            if (value == "error")
+                return json_big_integer_policy::error;
+            if (value == "to_double")
+                return json_big_integer_policy::to_double;
+            throw std::logic_error("Unknown json_big_integer_policy value");
+        }
+
         [[nodiscard]] inline std::string md5_bytes(std::span<const std::byte> bytes)
         {
             gb::yadro::util::md5 hash;
@@ -370,37 +375,6 @@ namespace gb::yadro::container
                 return false;
 
             return md5_bytes(std::as_bytes(std::span{ data })) == md5;
-        }
-
-        inline void replace_file_with_temp(const std::filesystem::path& temp_file, const std::filesystem::path& file)
-        {
-            std::error_code ec;
-            std::filesystem::rename(temp_file, file, ec);
-            if (!ec)
-                return;
-
-            if (!std::filesystem::exists(file))
-                throw std::runtime_error("Failed to commit temporary file");
-
-            auto backup = file;
-            backup += ".bak";
-            ec.clear();
-            std::filesystem::remove(backup, ec);
-            ec.clear();
-            std::filesystem::rename(file, backup, ec);
-            if (ec)
-                throw std::runtime_error("Failed to preserve existing file before replacement");
-
-            ec.clear();
-            std::filesystem::rename(temp_file, file, ec);
-            if (ec) {
-                std::error_code restore_ec;
-                std::filesystem::rename(backup, file, restore_ec);
-                throw std::runtime_error("Failed to commit temporary file");
-            }
-
-            ec.clear();
-            std::filesystem::remove(backup, ec);
         }
     }
 
@@ -1486,24 +1460,27 @@ namespace gb::yadro::container
                     ++_result.reused_blob_count;
                 }
                 else {
-                    auto temp_directory = blob_directory / ".tmp";
-                    std::filesystem::create_directories(temp_directory);
-                    auto temp_file = temp_directory / (file_name + ".tmp");
+                    // the copy is verified while it streams; a mismatch aborts it before it is installed
+                    gb::yadro::util::atomic_replace_file(final_file, [&](std::ostream& out) {
+                        std::ifstream in(source, std::ios::binary);
+                        if (!in)
+                            throw std::runtime_error("Failed to open external gbdb archive blob for relocation");
 
-                    try {
-                        std::filesystem::copy_file(source, temp_file, std::filesystem::copy_options::overwrite_existing);
-                        if (!detail::file_bytes_match(temp_file, blob.size_bytes, blob.md5))
-                            throw std::runtime_error("Relocated gbdb archive blob MD5 mismatch");
-                        detail::replace_file_with_temp(temp_file, final_file);
-                        ++_result.copied_blob_count;
-                    }
-                    catch (...) {
-                        if (_options.external_blobs.remove_temp_files_on_failure) {
-                            std::error_code ec;
-                            std::filesystem::remove(temp_file, ec);
+                        gb::yadro::util::md5 hash;
+                        std::uint64_t size = 0;
+                        std::vector<char> buffer(64 * 1024);
+                        while (in.read(buffer.data(), static_cast<std::streamsize>(buffer.size())) || in.gcount() > 0) {
+                            auto count = in.gcount();
+                            hash.update(reinterpret_cast<const std::uint8_t*>(buffer.data()), static_cast<std::size_t>(count));
+                            out.write(buffer.data(), count);
+                            size += static_cast<std::uint64_t>(count);
                         }
-                        throw;
-                    }
+                        if (in.bad())
+                            throw std::runtime_error("Failed to read external gbdb archive blob for relocation");
+                        if (size != blob.size_bytes || hash.finalize().to_string() != blob.md5)
+                            throw std::runtime_error("Relocated gbdb archive blob MD5 mismatch");
+                    }, blob_replace_options());
+                    ++_result.copied_blob_count;
                 }
 
                 auto uri = external_blob_uri(file_name);
@@ -1595,32 +1572,14 @@ namespace gb::yadro::container
                     return;
                 }
 
-                auto temp_directory = file.parent_path() / ".tmp";
-                std::filesystem::create_directories(temp_directory);
-                auto temp_file = temp_directory / (file.filename().generic_string() + ".tmp");
+                // md5 was computed from these same bytes, and the write is flushed before it is installed
+                gb::yadro::util::atomic_replace_file(file, bytes, blob_replace_options());
+                ++_result.copied_blob_count;
+            }
 
-                try {
-                    std::ofstream out(temp_file, std::ios::binary);
-                    if (!out)
-                        throw std::runtime_error("Failed to open external gbdb archive blob for writing");
-                    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-                    if (!out)
-                        throw std::runtime_error("Failed to write external gbdb archive blob");
-                    out.close();
-
-                    if (!detail::file_bytes_match(temp_file, static_cast<std::uint64_t>(bytes.size()), md5))
-                        throw std::runtime_error("External gbdb archive blob MD5 mismatch after writing");
-
-                    detail::replace_file_with_temp(temp_file, file);
-                    ++_result.copied_blob_count;
-                }
-                catch (...) {
-                    if (_options.external_blobs.remove_temp_files_on_failure) {
-                        std::error_code ec;
-                        std::filesystem::remove(temp_file, ec);
-                    }
-                    throw;
-                }
+            [[nodiscard]] gb::yadro::util::atomic_replace_options blob_replace_options() const
+            {
+                return { .remove_temp_on_failure = _options.external_blobs.remove_temp_files_on_failure };
             }
 
             void remember_live_uri(json_db::string_view uri)
@@ -1743,30 +1702,17 @@ namespace gb::yadro::container
                 _out << ']';
             }
 
+            // The shared escaper validates UTF-8 and, with ascii_only, escapes whole code points
+            // (surrogate pairs above U+FFFF). Invalid UTF-8 is reported as std::logic_error, like
+            // the writer's other unrepresentable values.
             void write_string(json_db::string_view value)
             {
-                _out << '"';
-                for (auto ch : value) {
-                    switch (ch) {
-                    case '"': _out << "\\\""; break;
-                    case '\\': _out << "\\\\"; break;
-                    case '\b': _out << "\\b"; break;
-                    case '\f': _out << "\\f"; break;
-                    case '\n': _out << "\\n"; break;
-                    case '\r': _out << "\\r"; break;
-                    case '\t': _out << "\\t"; break;
-                    default:
-                        if (static_cast<unsigned char>(ch) < 0x20 || (_options.ascii_only && static_cast<unsigned char>(ch) > 0x7f)) {
-                            _out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<unsigned>(static_cast<unsigned char>(ch))
-                                << std::dec << std::setfill(' ');
-                        }
-                        else {
-                            _out << ch;
-                        }
-                        break;
-                    }
-                }
-                _out << '"';
+                _escaped.clear();
+                auto result = append_json_string(_escaped, value, _options.ascii_only, json_invalid_utf8::error);
+                if (!result.ok)
+                    throw std::logic_error("JSON writer cannot represent invalid UTF-8 at byte " + std::to_string(result.invalid_offset)
+                        + " of a string");
+                _out << _escaped;
             }
 
             void write_indent(std::uint32_t level)
@@ -1778,6 +1724,7 @@ namespace gb::yadro::container
             const json_db& _db;
             const json_write_options& _options;
             std::ostringstream _out;
+            std::string _escaped;
             json_db::node_id _current_node = json_db::invalid_node;
             json_external_blob_export_result _result;
             std::set<std::filesystem::path> _live_external_blob_files;
@@ -1960,188 +1907,6 @@ namespace gb::yadro::container
             std::vector<json_db::string_view> _path;
         };
 
-#if GB_YADRO_GBDB_JSON_HAS_AXE
-        class axe_json_reader
-        {
-        public:
-            explicit axe_json_reader(std::string_view text, json_read_options options)
-                : _text(text), _builder(options)
-            {}
-
-            [[nodiscard]] json_db parse()
-            {
-                using iterator = std::string_view::const_iterator;
-                using namespace axe::shortcuts;
-
-                auto json_hex = axe::r_many(axe::r_hex(), 4);
-                auto json_escaped = "\""_axe | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u' & json_hex;
-                auto json_char = _ - '"' - '\\' | '\\' & json_escaped;
-                auto json_string = '"' & *json_char & '"';
-
-                auto nonzero_digit = axe::r_any("123456789");
-                auto int_part = axe::r_lit('0') | nonzero_digit & *_d;
-                auto fraction = axe::r_lit('.') & +_d;
-                auto exponent = axe::r_any("eE") & ~axe::r_any("+-") & +_d;
-                auto json_number = ~axe::r_lit('-') & int_part & ~fraction & ~exponent;
-
-                axe::r_rule<iterator> json_value;
-
-                auto ws = *_ws;
-                auto key = json_string >> [&](auto first, auto last) { _builder.key(decode_string(first, last)); };
-                auto string_value = json_string >> [&](auto first, auto last) { _builder.string_value(decode_string(first, last)); };
-                auto number_value = json_number >> [&](auto first, auto last) { store_number(first, last); };
-                auto true_value = "true"_axe >> [&] { _builder.bool_value(true); };
-                auto false_value = "false"_axe >> [&] { _builder.bool_value(false); };
-                auto null_value = "null"_axe >> [&] { _builder.null_value(); };
-
-                auto object_begin = axe::r_lit('{') >> [&] { _builder.begin_object(); };
-                auto object_end = axe::r_lit('}') >> [&] { _builder.end_object(); };
-                auto member = ws & key & ws & axe::r_lit(':') & ws & std::ref(json_value) & ws;
-                auto object = object_begin & ws & ~(member % axe::r_lit(',')) & object_end;
-
-                auto array_begin = axe::r_lit('[') >> [&] { _builder.begin_array(); };
-                auto array_end = axe::r_lit(']') >> [&] { _builder.end_array(); };
-                auto element = ws & std::ref(json_value) & ws;
-                auto array = array_begin & ws & ~(element % axe::r_lit(',')) & array_end;
-
-                json_value = string_value | number_value | object | array | true_value | false_value | null_value;
-
-                auto document = ws & (object | array) & ws & _z
-                    | axe::r_fail([&](auto, auto failed, auto) { fail_at("Failed to parse JSON document", failed); });
-
-                auto result = axe::parse(document, _text.begin(), _text.end());
-                if (!result)
-                    fail_at("Failed to parse JSON document", result.position);
-                return std::move(_builder).finish();
-            }
-
-        private:
-            template<class Iterator>
-            [[nodiscard]] std::string decode_string(Iterator first, Iterator last) const
-            {
-                if (first == last || *first != '"')
-                    fail_at("Invalid JSON string", first);
-
-                ++first;
-                std::string result;
-                while (first != last) {
-                    auto ch = *first++;
-                    if (ch == '"')
-                        return result;
-                    if (ch != '\\') {
-                        result.push_back(ch);
-                        continue;
-                    }
-                    if (first == last)
-                        fail_at("Incomplete JSON string escape", first);
-                    switch (*first++) {
-                    case '"': result.push_back('"'); break;
-                    case '\\': result.push_back('\\'); break;
-                    case '/': result.push_back('/'); break;
-                    case 'b': result.push_back('\b'); break;
-                    case 'f': result.push_back('\f'); break;
-                    case 'n': result.push_back('\n'); break;
-                    case 'r': result.push_back('\r'); break;
-                    case 't': result.push_back('\t'); break;
-                    case 'u': append_utf8(parse_hex4(first, last), result); break;
-                    default: fail_at("Invalid JSON string escape", first);
-                    }
-                }
-                fail_at("Unterminated JSON string", first);
-            }
-
-            template<class Iterator>
-            unsigned parse_hex4(Iterator& first, Iterator last) const
-            {
-                unsigned value = 0;
-                for (int i = 0; i < 4; ++i) {
-                    if (first == last)
-                        fail_at("Incomplete JSON unicode escape", first);
-                    auto ch = *first++;
-                    value <<= 4;
-                    if (ch >= '0' && ch <= '9')
-                        value += static_cast<unsigned>(ch - '0');
-                    else if (ch >= 'a' && ch <= 'f')
-                        value += static_cast<unsigned>(ch - 'a' + 10);
-                    else if (ch >= 'A' && ch <= 'F')
-                        value += static_cast<unsigned>(ch - 'A' + 10);
-                    else
-                        fail_at("Invalid JSON unicode escape", first);
-                }
-                return value;
-            }
-
-            static void append_utf8(unsigned value, std::string& out)
-            {
-                if (value <= 0x7f) {
-                    out.push_back(static_cast<char>(value));
-                }
-                else if (value <= 0x7ff) {
-                    out.push_back(static_cast<char>(0xc0 | (value >> 6)));
-                    out.push_back(static_cast<char>(0x80 | (value & 0x3f)));
-                }
-                else {
-                    out.push_back(static_cast<char>(0xe0 | (value >> 12)));
-                    out.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3f)));
-                    out.push_back(static_cast<char>(0x80 | (value & 0x3f)));
-                }
-            }
-
-            template<class Iterator>
-            void store_number(Iterator first, Iterator last)
-            {
-                std::string token(first, last);
-                auto floating = token.find_first_of(".eE") != std::string::npos;
-                if (floating) {
-                    double value{};
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
-                    if (ec != std::errc{} || ptr != token.data() + token.size())
-                        fail_at("JSON number is outside the double range", first);
-                    _builder.double_value(value);
-                }
-                else if (!token.empty() && token.front() == '-') {
-                    std::int64_t value{};
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
-                    if (ec != std::errc{} || ptr != token.data() + token.size())
-                        fail_at("JSON integer is outside the int64 range", first);
-                    _builder.int_value(value);
-                }
-                else {
-                    std::uint64_t value{};
-                    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
-                    if (ec != std::errc{} || ptr != token.data() + token.size())
-                        fail_at("JSON integer is outside the uint64 range", first);
-                    _builder.uint_value(value);
-                }
-            }
-
-            template<class Iterator>
-            [[noreturn]] void fail_at(std::string message, Iterator where) const
-            {
-                std::size_t offset = 0;
-                std::uint32_t line = 1;
-                std::uint32_t column = 1;
-
-                if constexpr (requires { where - _text.begin(); }) {
-                    offset = static_cast<std::size_t>(where - _text.begin());
-                    for (auto it = _text.begin(); it != where; ++it) {
-                        if (*it == '\n') {
-                            ++line;
-                            column = 1;
-                        }
-                        else {
-                            ++column;
-                        }
-                    }
-                }
-                throw json_parse_error(std::move(message), offset, line, column);
-            }
-
-            std::string_view _text;
-            json_db_builder _builder;
-        };
-#endif
-
         [[nodiscard]] inline const json_db::value_type* get_value(const json_db& db, std::initializer_list<json_db::string_view> path)
         {
             return db.get(path);
@@ -2224,6 +1989,9 @@ namespace gb::yadro::container
             read_string_option(db, { "read", "root_array_key" }, defaults.read.root_array_key);
             read_bool_option(db, { "read", "ignore_manifest" }, defaults.read.ignore_manifest);
             read_string_option(db, { "read", "manifest_key" }, defaults.read.manifest_key);
+            read_uint_option(db, { "read", "max_depth" }, defaults.read.max_depth);
+            read_uint_option(db, { "read", "max_input_bytes" }, defaults.read.max_input_bytes);
+            read_enum_option(db, { "read", "big_integers" }, defaults.read.big_integers, parse_json_big_integer_policy);
 
             read_bool_option(db, { "write", "pretty" }, defaults.write.pretty);
             read_uint_option(db, { "write", "indent" }, defaults.write.indent);
@@ -2301,6 +2069,9 @@ namespace gb::yadro::container
         for (auto const& entry : std::filesystem::recursive_directory_iterator(blob_directory)) {
             if (!entry.is_regular_file())
                 continue;
+            // older blob writers staged files in a ".tmp" subdirectory, which is still skipped; they
+            // now stage next to the blob (util/durable_file.h), so a temp file left there by a
+            // crash is unreferenced and collected like any other stale blob
             if (entry.path().parent_path().filename() == ".tmp")
                 continue;
 
@@ -2318,18 +2089,7 @@ namespace gb::yadro::container
         if (auto parent = file.parent_path(); !parent.empty())
             std::filesystem::create_directories(parent);
 
-        auto temp_file = file;
-        temp_file += ".tmp";
-
-        std::ofstream out(temp_file, std::ios::binary);
-        if (!out)
-            throw std::runtime_error("Failed to open JSON file for writing");
-        out.write(text.data(), static_cast<std::streamsize>(text.size()));
-        if (!out)
-            throw std::runtime_error("Failed to write JSON file");
-        out.close();
-
-        detail::replace_file_with_temp(temp_file, file);
+        gb::yadro::util::atomic_replace_file(file, text);
     }
 
     [[nodiscard]] inline json_external_blob_export_result export_json_file(const json_db& db, const std::filesystem::path& file, const json_write_options& options = {})
@@ -2387,19 +2147,35 @@ namespace gb::yadro::container
         detail::json_db_merger{ target, source, policy }.merge();
     }
 
+    // Reads JSON text into a json_db. Malformed or unsafe input throws json_parse_error with a code,
+    // byte offset, line and column: raw control characters in strings, invalid UTF-8, lone UTF-16
+    // surrogate escapes, nesting beyond options.max_depth, input beyond options.max_input_bytes, and
+    // integers outside int64/uint64 unless options.big_integers is to_double. Shapes the json_db
+    // value model cannot hold (for example, boolean or nested arrays) throw std::logic_error.
     [[nodiscard]] inline json_db read_json(std::string_view text, const json_read_options& options = {})
     {
 #if GB_YADRO_GBDB_JSON_HAS_AXE
-        return detail::axe_json_reader{ text, options }.parse();
+        // The shared, hardened front end (json_parser.h). The json_db builder narrows what is
+        // accepted further: the root must be an object (or, with infer_tables, an array), and
+        // value-model limits are reported as std::logic_error.
+        json_parse_options parse_options;
+        parse_options.max_depth = options.max_depth;
+        parse_options.max_input_bytes = options.max_input_bytes;
+        parse_options.big_integers = options.big_integers;
+        parse_options.allow_scalar_root = false;
+        json_db_builder builder{ options };
+        parse_json_events(text, builder, parse_options);
+        return std::move(builder).finish();
 #else
         (void)text;
+        (void)options;
         throw std::logic_error("JSON reading requires opt-in AXE support: define GB_YADRO_ENABLE_AXE_JSON and add AXE include directory");
 #endif
     }
 
     [[nodiscard]] inline json_db read_json(std::istream& in, const json_read_options& options = {})
     {
-        return read_json(detail::read_stream(in), options);
+        return read_json(detail::read_capped(in, options.max_input_bytes), options);
     }
 
     inline void write_json_defaults(std::ostream& out, const json_db_defaults& defaults)
@@ -2416,6 +2192,9 @@ namespace gb::yadro::container
         db.set({ "read", "root_array_key" }, defaults.read.root_array_key);
         db.set({ "read", "ignore_manifest" }, defaults.read.ignore_manifest);
         db.set({ "read", "manifest_key" }, defaults.read.manifest_key);
+        db.set({ "read", "max_depth" }, static_cast<std::uint64_t>(defaults.read.max_depth));
+        db.set({ "read", "max_input_bytes" }, static_cast<std::uint64_t>(defaults.read.max_input_bytes));
+        db.set({ "read", "big_integers" }, detail::to_string(defaults.read.big_integers));
 
         db.set({ "write", "pretty" }, defaults.write.pretty);
         db.set({ "write", "indent" }, static_cast<std::uint64_t>(defaults.write.indent));
@@ -2468,7 +2247,10 @@ namespace gb::yadro::container
 
     [[nodiscard]] inline json_db read_json(std::istream& in, const json_db_defaults& defaults)
     {
-        auto text = detail::read_stream(in);
+        // The caller's limits apply while buffering, before a manifest can be read, and to both
+        // passes: extract_manifest_defaults starts from the caller's defaults and never takes read
+        // options (including max_depth, max_input_bytes and big_integers) from a file manifest.
+        auto text = detail::read_capped(in, defaults.read.max_input_bytes);
 
 #if GB_YADRO_GBDB_JSON_HAS_AXE
         auto manifest_read_options = defaults.read;
@@ -2510,12 +2292,13 @@ namespace gb::yadro::container
         std::ifstream in(file, std::ios::binary);
         if (!in)
             throw std::runtime_error("Failed to open JSON file for reading");
-        std::ostringstream buffer;
-        buffer << in.rdbuf();
+        // read_capped extracts at most max_input_bytes + 1 bytes and reports the offset, line and
+        // column of the cap when the file is larger
+        auto text = detail::read_capped(in, options.max_input_bytes);
         auto effective_options = options;
         if (effective_options.external_blob_base_directory.empty())
             effective_options.external_blob_base_directory = file.parent_path();
-        return read_json(buffer.str(), effective_options);
+        return read_json(text, effective_options);
     }
 
     inline void insert_json(json_db& target, std::string_view text, json_merge_policy policy = json_merge_policy::replace_existing, const json_read_options& options = {})

@@ -56,23 +56,158 @@
 #include <algorithm>
 #include <optional>
 #include <condition_variable>
+#include <string_view>
+#include <expected>
+#include <format>
 
 #ifdef GBWINDOWS
+#include <sddl.h>
+#pragma comment(lib, "Advapi32")
 
 namespace gb::yadro::util
 {
     struct owinpipe_stream;
     struct iwinpipe_stream;
 
+    //----------------------------------------------------------------------------------------------
+    // Security of server pipe instances.
+    //
+    // By default every server pipe instance gets a protected DACL (no inherited ACEs) that grants
+    // GENERIC_ALL to the user the server process runs as and to LocalSystem, and nothing to anyone
+    // else: default_pipe_sddl() returns "D:P(A;;GA;;;<process user SID>)(A;;GA;;;SY)". Windows'
+    // own default DACL for a named pipe (lpSecurityAttributes == nullptr) also grants full control
+    // to Administrators and read access to Everyone and the anonymous account, which lets any local
+    // account connect for reading and occupy server instances.
+    //
+    // Remote clients are rejected (PIPE_REJECT_REMOTE_CLIENTS). Without it, a client on another
+    // machine that authenticates over SMB as an account admitted by the DACL can open
+    // \\<host>\pipe\<name>.
+    //
+    // The first instance a server creates is flagged FILE_FLAG_FIRST_PIPE_INSTANCE: if another
+    // process already owns the pipe name (name squatting), the server fails to start instead of
+    // adding instances to a pipe whose security descriptor that process chose. pipe_listener_t
+    // also never lets the name lapse while the server runs, so nobody can re-create the pipe
+    // with a descriptor of their own choosing between connections.
+    //
+    // Limit: this does not stop a process that the pipe's DACL grants FILE_CREATE_PIPE_INSTANCE
+    // from adding its own instance to the running pipe and receiving some of the clients. On a
+    // pipe GENERIC_ALL and GENERIC_WRITE both include that right (it is FILE_APPEND_DATA). The
+    // server's own account must keep it to create its later instances, so any process of that
+    // user can do this, including a medium-integrity process of a user whose server runs
+    // elevated. A same-user process at the same integrity level can already tamper with the
+    // server directly, so Windows offers no boundary to defend there. Admit every other account
+    // with pipe_client_ace(), which grants pipe_client_access and so leaves the right out.
+    // A client that must not talk to such an instance can verify the server process after it
+    // connects: pipe_client_options::verify_server_user, expected_server_sid and
+    // min_server_integrity (e.g. SECURITY_MANDATORY_HIGH_RID for an elevated server).
+    //
+    // Clients connect with identification-level SQOS by default (pipe_client_options), so a
+    // server, or a rogue instance as described above, can learn who connected but cannot
+    // impersonate the client.
+    //
+    // Who is refused compared with lpSecurityAttributes == nullptr, and how to admit them again:
+    //  - clients running as another account, e.g. a service account (LocalService, NetworkService,
+    //    a virtual or domain service account) talking to a server run by an interactive user, or
+    //    another user's client of a shared server: pass pipe_server_options::sddl with a client
+    //    ACE for that account or group, e.g. default_pipe_sddl() + pipe_client_ace(L"<client SID>");
+    //  - elevated administrators running as another account (the Windows default DACL admits
+    //    Administrators): add pipe_client_ace(L"BA");
+    //  - a server running as a service: its process user is the service account, so interactive
+    //    users' clients are refused unless the SDDL names them, e.g. pipe_client_ace(L"IU");
+    //  - clients on other machines: set allow_remote_clients and admit their accounts in the DACL;
+    //  - several independent server processes sharing one pipe name: set first_pipe_instance =
+    //    false (each must be admitted by the pipe's DACL with FILE_CREATE_PIPE_INSTANCE);
+    //  - servers that call ImpersonateNamedPipeClient to act as a winpipe_client_t: construct the
+    //    client with pipe_client_options{ .allow_impersonation = true }.
+    // Clients running as the server's own user, in any logon session and at medium or higher
+    // integrity, are unaffected.
+    struct pipe_server_options
+    {
+        // Security descriptor in SDDL form, e.g. L"D:P(A;;GA;;;<SID>)". Empty selects
+        // default_pipe_sddl(). The DACL must grant the server's own account FILE_CREATE_PIPE_INSTANCE
+        // (GA does) or a multi-instance server cannot create its second instance.
+        std::wstring sddl;
+        // Caller-owned attributes used instead of sddl; must outlive the server. Setting both this
+        // and sddl is an error.
+        SECURITY_ATTRIBUTES* security_attributes = nullptr;
+        // Opt-out of PIPE_REJECT_REMOTE_CLIENTS. Only set this when clients on other machines must
+        // connect; the DACL is then the only thing standing between the pipe and the network.
+        bool allow_remote_clients = false;
+        // Opt-out of FILE_FLAG_FIRST_PIPE_INSTANCE, for a deployment that deliberately runs several
+        // independent server processes on one pipe name.
+        bool first_pipe_instance = true;
+    };
+
+    // Rights a winpipe_client_t requests: read, write data, and write attributes (for
+    // SetNamedPipeHandleState). Unlike GENERIC_WRITE this leaves out FILE_CREATE_PIPE_INSTANCE,
+    // so an account granted only these rights can use the server but cannot host instances of it.
+    inline constexpr DWORD pipe_client_access = FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
+
+    // SDDL allow-ACE granting pipe_client_access to a SID string or SDDL alias (e.g. L"IU").
+    // It cannot take rights away: an account gets the union of every allow ACE it matches,
+    // directly or through a group, so if another ACE grants it GA or GW (e.g. to IU or BU), it
+    // can still create pipe instances.
+    inline std::wstring pipe_client_ace(std::wstring_view sid)
+    {
+        return std::format(L"(A;;{:#x};;;{})", pipe_client_access, sid);
+    }
+
+    struct pipe_client_options
+    {
+        // Clients connect with SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: the server can
+        // identify the client (ImpersonateNamedPipeClient yields an identification token) but
+        // cannot act as it. Set this to restore the Windows default (full impersonation) for a
+        // trusted server that accesses resources on the client's behalf.
+        bool allow_impersonation = false;
+
+        // Opt-in server identity verification. Once connected, and before sending anything, the
+        // client looks up the process that created the pipe instance (GetNamedPipeServerProcessId)
+        // and checks its token: TokenUser against the expected SID and TokenIntegrityLevel against
+        // the minimum. On a mismatch, or if the process or its token cannot be queried, the client
+        // closes the pipe and its constructor throws an error naming the pipe.
+        //
+        // Check that the server runs as the user of the client's own process
+        bool verify_server_user = false;
+        // Check that the server runs as this account instead, a SID string or SDDL alias (e.g.
+        // L"S-1-5-18" or L"SY"); setting it implies the user check. Validated before connecting.
+        std::wstring expected_server_sid;
+        // Lowest acceptable mandatory integrity RID of the server process, e.g.
+        // SECURITY_MANDATORY_HIGH_RID to refuse a medium-integrity instance of an elevated
+        // server's user. The default, SECURITY_MANDATORY_UNTRUSTED_RID, checks nothing.
+        DWORD min_server_integrity = SECURITY_MANDATORY_UNTRUSTED_RID;
+        //
+        // Limits of the check:
+        //  - It runs after the connection is made. By then the server end already holds the
+        //    client's identity at the SQOS level, so keep allow_impersonation off when relying on
+        //    it: an unverified server can identify the client but not act as it. No request data
+        //    reaches a server that fails the check.
+        //  - A failed check throws instead of retrying; a caller that expects a rogue instance
+        //    among genuine ones can retry, since each connection lands on some listening instance.
+        //  - GetNamedPipeServerProcessId reports the process that created the instance, looked up
+        //    by process ID. If that process has exited while another holds the instance (an
+        //    inherited or duplicated handle), the ID can be reused by an unrelated process, which
+        //    is then the one checked. The same holds if the creator handed its handle on. Treat the
+        //    check as defense against a rogue instance created by a weaker process, not as proof
+        //    of who holds the server end.
+        //  - Opening the server's token needs TOKEN_QUERY under the token's DACL. That works for a
+        //    server of the client's own user (elevated or not), but a standard user usually cannot
+        //    query a LocalSystem or other account's server, and the check then fails closed.
+    };
+
     // single-instance server
     struct winpipe_server_t;
     struct winpipe_client_t;
+    struct pipe_listener_t;
 
     // multi-instance server
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
+    template<class ...Fn>
+    void start_server(const std::wstring& pipename, const pipe_server_options& options, std::shared_ptr<util::logger> log, Fn&&... fn);
     template<class TreadPool, class ...Fn>
     void start_server(TreadPool& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn);
+    template<class TreadPool, class ...Fn>
+    void start_server(TreadPool& tp, const std::wstring& pipename, const pipe_server_options& options, std::shared_ptr<util::logger> log, Fn&&... fn);
     bool shutdown_server(const std::wstring& pipename, unsigned attempts, auto&&...log_args);
 
     // server function concept
@@ -95,66 +230,6 @@ namespace gb::yadro::util
     inline constexpr std::uint32_t server_shutdown = -2;
     inline constexpr auto pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
 
-    //----------------------------------------------------------------------------------------------
-    struct unique_win_handle
-    {
-        unique_win_handle() noexcept = default;
-        explicit unique_win_handle(HANDLE handle) noexcept : _handle(handle) {}
-        unique_win_handle(const unique_win_handle&) = delete;
-        auto operator=(const unique_win_handle&) -> unique_win_handle& = delete;
-
-        unique_win_handle(unique_win_handle&& other) noexcept
-            : _handle(std::exchange(other._handle, INVALID_HANDLE_VALUE))
-        {}
-
-        auto operator=(unique_win_handle&& other) noexcept -> unique_win_handle&
-        {
-            if (this != &other)
-                reset(std::exchange(other._handle, INVALID_HANDLE_VALUE));
-            return *this;
-        }
-
-        ~unique_win_handle() noexcept { reset(); }
-
-        auto operator=(HANDLE handle) noexcept -> unique_win_handle&
-        {
-            reset(handle);
-            return *this;
-        }
-
-        [[nodiscard]] auto get() const noexcept { return _handle; }
-        [[nodiscard]] auto valid() const noexcept { return _handle != INVALID_HANDLE_VALUE && _handle != nullptr; }
-        operator HANDLE() const noexcept { return _handle; }
-
-        void reset(HANDLE handle = INVALID_HANDLE_VALUE) noexcept
-        {
-            if (handle == _handle)
-                return;
-
-            auto old_handle = std::exchange(_handle, handle);
-            if (old_handle != INVALID_HANDLE_VALUE && old_handle != nullptr)
-                CloseHandle(old_handle);
-        }
-
-        [[nodiscard]] auto release() noexcept
-        {
-            return std::exchange(_handle, INVALID_HANDLE_VALUE);
-        }
-
-        friend auto operator==(const unique_win_handle& handle, HANDLE value) noexcept
-        {
-            return handle.get() == value;
-        }
-
-        friend auto operator!=(const unique_win_handle& handle, HANDLE value) noexcept
-        {
-            return !(handle == value);
-        }
-
-    private:
-        HANDLE _handle = INVALID_HANDLE_VALUE;
-    };
-
     template<class Rep, class Period>
     inline auto pipe_timeout_milliseconds(const std::chrono::duration<Rep, Period>& timeout)
     {
@@ -175,6 +250,196 @@ namespace gb::yadro::util
             throw util::exception_t("failed to create pipe event: ", GetLastError());
         return event;
     }
+
+    //----------------------------------------------------------------------------------------------
+    struct local_free_deleter
+    {
+        void operator()(void* memory) const noexcept
+        {
+            if (memory)
+                LocalFree(memory);
+        }
+    };
+
+    inline constexpr std::wstring_view local_system_sid = L"S-1-5-18";
+
+    // Variable-length token information such as TokenUser or TokenIntegrityLevel, or the error
+    inline std::expected<std::vector<std::byte>, DWORD> token_information(HANDLE token, TOKEN_INFORMATION_CLASS info_class)
+    {
+        DWORD size{};
+        if (GetTokenInformation(token, info_class, nullptr, 0, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+            return std::unexpected{ GetLastError() };
+
+        std::vector<std::byte> buffer(size);
+        if (!GetTokenInformation(token, info_class, buffer.data(), size, &size))
+            return std::unexpected{ GetLastError() };
+
+        return buffer;
+    }
+
+    inline std::wstring sid_to_string(PSID sid)
+    {
+        LPWSTR sid_string{};
+        if (!ConvertSidToStringSidW(sid, &sid_string))
+            throw util::exception_t("failed to convert SID to string: ", GetLastError());
+
+        std::unique_ptr<wchar_t, local_free_deleter> owned_sid_string{ sid_string };
+        return std::wstring{ sid_string };
+    }
+
+    // SID of the user the process token belongs to (not an impersonation token), in string form
+    inline std::wstring current_process_user_sid()
+    {
+        const auto user = token_information(GetCurrentProcessToken(), TokenUser);
+        if (!user)
+            throw util::exception_t("failed to query process token user: ", user.error());
+
+        return sid_to_string(reinterpret_cast<const TOKEN_USER*>(user->data())->User.Sid);
+    }
+
+    // Mandatory integrity RID of a token, e.g. SECURITY_MANDATORY_MEDIUM_RID, or the error
+    inline std::expected<DWORD, DWORD> token_integrity_rid(HANDLE token)
+    {
+        const auto label = token_information(token, TokenIntegrityLevel);
+        if (!label)
+            return std::unexpected{ label.error() };
+
+        const auto sid = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(label->data())->Label.Sid;
+        const auto count = *GetSidSubAuthorityCount(sid);
+        if (count == 0)
+            return std::unexpected{ static_cast<DWORD>(ERROR_INVALID_SID) };
+
+        return *GetSidSubAuthority(sid, count - 1u);
+    }
+
+    // Protected DACL: GENERIC_ALL for the process user and LocalSystem, nothing for anyone else.
+    // LocalSystem already holds privileges that bypass any DACL, so admitting it widens nothing
+    // but lets system components reach a user's server.
+    inline std::wstring default_pipe_sddl()
+    {
+        const auto user_sid = current_process_user_sid();
+        auto sddl = L"D:P(A;;GA;;;" + user_sid + L")";
+        if (user_sid != local_system_sid)
+            sddl += L"(A;;GA;;;SY)";
+        return sddl;
+    }
+
+    inline constexpr DWORD server_pipe_mode(const pipe_server_options& options) noexcept
+    {
+        return static_cast<DWORD>(pipe_mode | (options.allow_remote_clients ? 0 : PIPE_REJECT_REMOTE_CLIENTS));
+    }
+
+    //----------------------------------------------------------------------------------------------
+    // Security attributes resolved from pipe_server_options, owning the descriptor built from SDDL
+    struct pipe_security_attributes
+    {
+        explicit pipe_security_attributes(const pipe_server_options& options)
+        {
+            if (options.security_attributes)
+            {
+                if (!options.sddl.empty())
+                    throw util::exception_t("pipe_server_options: set either sddl or security_attributes, not both");
+                _external = options.security_attributes;
+                return;
+            }
+
+            const auto sddl = options.sddl.empty() ? default_pipe_sddl() : options.sddl;
+            PSECURITY_DESCRIPTOR descriptor{};
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr))
+            {
+                const auto last_error = GetLastError();
+                throw util::exception_t(std::format("invalid pipe security descriptor \"{}\", error: {}", utf8_from_utf16(sddl), last_error));
+            }
+
+            _descriptor.reset(descriptor);
+            _attributes.nLength = sizeof(_attributes);
+            _attributes.lpSecurityDescriptor = descriptor;
+            _attributes.bInheritHandle = FALSE;
+        }
+
+        [[nodiscard]] SECURITY_ATTRIBUTES* get() noexcept { return _external ? _external : &_attributes; }
+
+    private:
+        std::unique_ptr<void, local_free_deleter> _descriptor;
+        SECURITY_ATTRIBUTES _attributes{};
+        SECURITY_ATTRIBUTES* _external = nullptr;
+    };
+
+    //----------------------------------------------------------------------------------------------
+    // Server identity requirements resolved from pipe_client_options before the client connects,
+    // so a malformed expected SID is reported without touching the pipe
+    struct pipe_server_verifier
+    {
+        explicit pipe_server_verifier(const pipe_client_options& options)
+            : _min_integrity(options.min_server_integrity)
+        {
+            if (!options.verify_server_user && options.expected_server_sid.empty())
+                return;
+
+            const auto sid_string = options.expected_server_sid.empty() ? current_process_user_sid() : options.expected_server_sid;
+            PSID sid{};
+            if (!ConvertStringSidToSidW(sid_string.c_str(), &sid))
+            {
+                const auto last_error = GetLastError();
+                throw util::exception_t(std::format("invalid expected pipe server SID \"{}\", error: {}", utf8_from_utf16(sid_string), last_error));
+            }
+            _expected_sid.reset(sid);
+        }
+
+        [[nodiscard]] bool enabled() const noexcept
+        {
+            return _expected_sid || _min_integrity != SECURITY_MANDATORY_UNTRUSTED_RID;
+        }
+
+        // Why the process serving this connected client pipe fails the requirements; empty when it
+        // meets them. See pipe_client_options for what the check can and cannot establish.
+        [[nodiscard]] std::string mismatch(HANDLE pipe) const
+        {
+            if (!enabled())
+                return {};
+
+            ULONG pid{};
+            if (!GetNamedPipeServerProcessId(pipe, &pid))
+                return std::format("cannot identify the server process, error: {}", GetLastError());
+
+            unique_win_handle process{ OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+            if (!process.valid())
+                return std::format("cannot open server process {}, error: {}", pid, GetLastError());
+
+            HANDLE raw_token{};
+            if (!OpenProcessToken(process, TOKEN_QUERY, &raw_token))
+                return std::format("cannot open the token of server process {}, error: {}", pid, GetLastError());
+            unique_win_handle token{ raw_token };
+
+            if (_expected_sid)
+            {
+                const auto user = token_information(token, TokenUser);
+                if (!user)
+                    return std::format("cannot query the user of server process {}, error: {}", pid, user.error());
+
+                const auto server_sid = reinterpret_cast<const TOKEN_USER*>(user->data())->User.Sid;
+                if (!EqualSid(server_sid, _expected_sid.get()))
+                    return std::format("server process {} runs as {}, expected {}", pid,
+                        utf8_from_utf16(sid_to_string(server_sid)), utf8_from_utf16(sid_to_string(_expected_sid.get())));
+            }
+
+            if (_min_integrity != SECURITY_MANDATORY_UNTRUSTED_RID)
+            {
+                const auto integrity = token_integrity_rid(token);
+                if (!integrity)
+                    return std::format("cannot query the integrity level of server process {}, error: {}", pid, integrity.error());
+
+                if (*integrity < _min_integrity)
+                    return std::format("server process {} integrity level {:#x} is below the required {:#x}", pid, *integrity, _min_integrity);
+            }
+
+            return {};
+        }
+
+    private:
+        std::unique_ptr<void, local_free_deleter> _expected_sid;
+        DWORD _min_integrity;
+    };
 
     //----------------------------------------------------------------------------------------------
     struct owinpipe_stream
@@ -557,8 +822,25 @@ namespace gb::yadro::util
         template<class Rep, class Period>
         winpipe_client_t(const std::wstring& pipename, std::string client_name, std::chrono::duration<Rep, Period> timeout,
             unsigned connection_attempts, auto&&... log_args)
+            : winpipe_client_t(pipename, pipe_client_options{}, std::move(client_name), timeout, connection_attempts,
+                std::forward<decltype(log_args)>(log_args)...)
+        {}
+
+        // named client with explicit options, see pipe_client_options
+        winpipe_client_t(const std::wstring& pipename, const pipe_client_options& options, std::string client_name,
+            unsigned connection_attempts, auto&& ...log_args)
+            : winpipe_client_t(pipename, options, std::move(client_name), std::chrono::milliseconds(pipe_io_timeout_ms),
+                connection_attempts, std::forward<decltype(log_args)>(log_args)...)
+        {}
+
+        template<class Rep, class Period>
+        winpipe_client_t(const std::wstring& pipename, const pipe_client_options& options, std::string client_name,
+            std::chrono::duration<Rep, Period> timeout, unsigned connection_attempts, auto&&... log_args)
             : winpipe_base_t(timeout, std::forward<decltype(log_args)>(log_args)...), _client_name(std::move(client_name))
         {
+            const pipe_server_verifier verifier{ options };
+            // Windows' default without SECURITY_SQOS_PRESENT is full impersonation
+            const DWORD sqos_flags = options.allow_impersonation ? 0 : SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
             using namespace std::chrono_literals;
             auto attempt = 0u;
             for (; _pipe == INVALID_HANDLE_VALUE && attempt < connection_attempts; ++attempt)
@@ -572,12 +854,11 @@ namespace gb::yadro::util
                     // try to grab a pipe, other client can frontrun, so CreateFile can fail
                     _pipe = CreateFile(
                         pipename.c_str(),
-                        GENERIC_READ |  // read and write access 
-                        GENERIC_WRITE,
+                        pipe_client_access, // read, write data and attributes; not GENERIC_WRITE
                         0,              // no sharing 
                         nullptr,        // default security attributes
                         OPEN_EXISTING,  // opens existing pipe 
-                        FILE_FLAG_OVERLAPPED,
+                        FILE_FLAG_OVERLAPPED | sqos_flags,
                         nullptr);       // no template file 
                 }
             }
@@ -587,6 +868,16 @@ namespace gb::yadro::util
                 auto str_name = pipe_name_for_error(pipename);
                 auto error_string = util::to_string("\"", _client_name, "\": failed to open pipe: ", str_name, ": ", GetLastError());
                 log(error_string);
+                throw util::exception_t(error_string);
+            }
+
+            // opt-in, before anything is sent: see pipe_client_options for the limits of this check
+            if (auto reason = verifier.mismatch(_pipe); !reason.empty())
+            {
+                auto str_name = pipe_name_for_error(pipename);
+                auto error_string = util::to_string("\"", _client_name, "\": pipe server identity check failed: ", str_name, ": ", reason);
+                log(error_string);
+                _pipe.reset(); // close without the disconnect notification: nothing goes to this server
                 throw util::exception_t(error_string);
             }
 
@@ -686,7 +977,12 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     struct winpipe_server_t : winpipe_base_t
     {
-        winpipe_server_t(const std::wstring& pipename, auto&& ...log_args);
+        template<class... LogArgs>
+            requires (!(std::same_as<std::remove_cvref_t<LogArgs>, pipe_server_options> || ...))
+        winpipe_server_t(const std::wstring& pipename, LogArgs&& ...log_args);
+
+        // secured per options, see pipe_server_options
+        winpipe_server_t(const std::wstring& pipename, const pipe_server_options& options, auto&& ...log_args);
 
         winpipe_server_t(winpipe_server_t&& other) : winpipe_base_t(static_cast<winpipe_base_t&&>(other)) {}
         
@@ -886,7 +1182,16 @@ namespace gb::yadro::util
             }
         }
 
-        static std::optional<winpipe_server_t> accept(const std::wstring& pipename, HANDLE shutdown_event, std::shared_ptr<util::logger> log = nullptr);
+        // Accepts one client on a fresh, independent pipe instance. Loops that call this while
+        // earlier connections are open cannot use FILE_FLAG_FIRST_PIPE_INSTANCE, so it is never set
+        // here; use the pipe_listener_t overload (as start_server does) to keep the name protected.
+        static std::optional<winpipe_server_t> accept(const std::wstring& pipename, HANDLE shutdown_event,
+            std::shared_ptr<util::logger> log = nullptr, pipe_server_options options = {});
+
+        // Accepts one client on the listener and publishes the listener's next instance before
+        // returning, so the pipe name stays owned by this server between connections.
+        static std::optional<winpipe_server_t> accept(pipe_listener_t& listener, HANDLE shutdown_event,
+            std::shared_ptr<util::logger> log = nullptr);
 
     private:
         winpipe_server_t(unique_win_handle pipe, std::shared_ptr<util::logger> log)
@@ -901,84 +1206,167 @@ namespace gb::yadro::util
         return std::apply([&](auto&... fn) { return server.run(fn...); }, functions);
     }
 
+    //----------------------------------------------------------------------------------------------
+    // Creates the server instances of one pipe name and waits for clients on them.
+    //
+    // A pipe name exists only while at least one instance of it is open. The listener creates each
+    // instance after the first while it still holds another instance of this server: the
+    // replacement for an instance whose client left before accept is created before the dead one
+    // is closed, and a multi-instance server calls prepare() while it still holds the connection it
+    // just accepted. The name therefore never lapses between connections, so
+    // FILE_FLAG_FIRST_PIPE_INSTANCE on the first creation keeps another process from creating the
+    // pipe with its own security descriptor, before or during the server's lifetime. It does not
+    // keep a process that the DACL grants FILE_CREATE_PIPE_INSTANCE from adding instances to this
+    // pipe; see the note above pipe_server_options.
+    struct pipe_listener_t
+    {
+        explicit pipe_listener_t(std::wstring pipename, const pipe_server_options& options = {}, std::shared_ptr<util::logger> log = nullptr)
+            : _pipename(std::move(pipename)), _security(options), _pipe_mode(server_pipe_mode(options)),
+            _first_instance_pending(options.first_pipe_instance), _log(std::move(log))
+        {}
+
+        pipe_listener_t(const pipe_listener_t&) = delete;
+        auto operator=(const pipe_listener_t&) -> pipe_listener_t& = delete;
+
+        // Waits for a client on the listening instance, creating it if needed, and hands the
+        // connected instance to the caller. Returns nullopt when shutdown_event is signaled.
+        std::optional<unique_win_handle> accept(HANDLE shutdown_event)
+        {
+            return accept(shutdown_event, [](HANDLE) {});
+        }
+
+        // on_pipe_created runs each time an instance is about to wait for a client (test hook)
+        template<class OnPipeCreated>
+            requires std::invocable<OnPipeCreated&, HANDLE>
+        std::optional<unique_win_handle> accept(HANDLE shutdown_event, OnPipeCreated&& on_pipe_created);
+
+        // Creates the next listening instance now. A multi-instance server calls this while it
+        // still holds the instance accept() just returned, so the pipe name never lapses.
+        void prepare()
+        {
+            if (!_listening.valid())
+                _listening = create_instance();
+        }
+
+        // Closes the listening instance; clients can no longer connect.
+        void close() noexcept { _listening.reset(); }
+
+        [[nodiscard]] HANDLE listening_handle() const noexcept { return _listening.get(); }
+
+    private:
+        void log_pipe(HANDLE pipe, auto&&... args) const
+        {
+            if (_log)
+                _log->writeln(util::time_stamp(), ':', pipe, ':', std::forward<decltype(args)>(args)...);
+        }
+
+        unique_win_handle create_instance()
+        {
+            const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
+            unique_win_handle pipe{ CreateNamedPipe(
+                _pipename.c_str(),            // pipe name
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (_first_instance_pending ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+                _pipe_mode,                   // byte type, byte-read mode, blocking mode, local clients only by default
+                PIPE_UNLIMITED_INSTANCES,     // max. instances (255)
+                buf_size,                     // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
+                buf_size,                     // input buffer size
+                NMPWAIT_WAIT_FOREVER,         // client time-out in ms
+                _security.get()) };           // DACL from pipe_server_options
+
+            if (!pipe.valid())
+            {
+                const auto last_error = GetLastError();
+                auto str_name = pipe_name_for_error(_pipename);
+                // with FILE_FLAG_FIRST_PIPE_INSTANCE, ERROR_ACCESS_DENIED means the name is taken
+                const auto* reason = _first_instance_pending && last_error == ERROR_ACCESS_DENIED
+                    ? " (pipe name is already in use by another server)" : "";
+                log_pipe(pipe.get(), "failed to create pipe: ", str_name, ": ", last_error, reason);
+                throw util::exception_t(std::format("failed to create pipe: {}{}, error: {}", str_name, reason, last_error));
+            }
+
+            _first_instance_pending = false;
+            log_pipe(pipe.get(), "server created a pipe");
+            return pipe;
+        }
+
+        std::wstring _pipename;
+        pipe_security_attributes _security;
+        DWORD _pipe_mode;
+        bool _first_instance_pending;
+        std::shared_ptr<util::logger> _log;
+        unique_win_handle _listening;
+    };
+
     template<class OnPipeCreated>
         requires std::invocable<OnPipeCreated&, HANDLE>
-    inline std::optional<unique_win_handle> connect_pipe_instance_impl(
-        const std::wstring& pipename,
-        HANDLE shutdown_event,
-        std::shared_ptr<util::logger> log,
-        OnPipeCreated&& on_pipe_created)
+    std::optional<unique_win_handle> pipe_listener_t::accept(HANDLE shutdown_event, OnPipeCreated&& on_pipe_created)
     {
         const auto cancellation_requested = [shutdown_event]
             {
                 return shutdown_event != nullptr
                     && WaitForSingleObject(shutdown_event, 0) == WAIT_OBJECT_0;
             };
-        auto log_pipe = [&](HANDLE pipe, auto&&... args)
-            {
-                if (log)
-                    log->writeln(util::time_stamp(), ':', pipe, ':', std::forward<decltype(args)>(args)...);
-            };
+
+        prepare();
 
         while (true)
         {
-            const DWORD buf_size = static_cast<DWORD>(pipe_chunk_size); // Windows doesn't have to honor it
-            unique_win_handle pipe{ CreateNamedPipe(
-                pipename.c_str(),             // pipe name
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                pipe_mode,                    // byte type, byte-read mode, blocking mode
-                PIPE_UNLIMITED_INSTANCES,     // max. instances (255)
-                buf_size,                     // output buffer size (default buffer size for Windows named pipes is 64 KB, above not guaranteed)
-                buf_size,                     // input buffer size
-                NMPWAIT_WAIT_FOREVER,         // client time-out in ms
-                nullptr) };                   // default security attribute
-
-            if (!pipe.valid())
-            {
-                auto str_name = pipe_name_for_error(pipename);
-                log_pipe(pipe.get(), "failed to create pipe: ", str_name, ": ", GetLastError());
-                throw util::exception_t("failed to create pipe: " + str_name, GetLastError());
-            }
-
-            log_pipe(pipe.get(), "server created a pipe");
-            std::invoke(on_pipe_created, pipe.get());
+            std::invoke(on_pipe_created, _listening.get());
 
             auto event = create_pipe_event();
             OVERLAPPED overlapped{};
             overlapped.hEvent = event.get();
 
-            const auto connected = ConnectNamedPipe(pipe.get(), &overlapped);
+            const auto connected = ConnectNamedPipe(_listening.get(), &overlapped);
             if (connected)
             {
-                log_pipe(pipe.get(), "server connected client");
-                return std::move(pipe);
+                log_pipe(_listening.get(), "server connected client");
+                return std::exchange(_listening, unique_win_handle{});
             }
 
             auto last_error = GetLastError();
             if (last_error == ERROR_PIPE_CONNECTED)
             {
-                log_pipe(pipe.get(), "server connected client");
-                return std::move(pipe);
+                log_pipe(_listening.get(), "server connected client");
+                return std::exchange(_listening, unique_win_handle{});
             }
 
             // A client may open and close its handle between CreateNamedPipe and
             // ConnectNamedPipe. Windows reports that ordinary disconnect as
-            // ERROR_NO_DATA. Close that dead instance and publish another one. This
+            // ERROR_NO_DATA. Publish another instance, then close the dead one. This
             // retry is required for both the multi-instance accept loop and the
             // blocking single-instance server constructor.
             if (last_error == ERROR_NO_DATA)
             {
                 if (cancellation_requested())
+                {
+                    close();
                     return std::nullopt;
-                log_pipe(pipe.get(), "client disconnected before server accept");
+                }
+                // What the client wrote before closing is still buffered and readable, e.g. a whole
+                // shutdown request sent while the server was busy with an earlier connection. Such
+                // an instance is served; only one the client left empty is replaced.
+                if (DWORD available{}; PeekNamedPipe(_listening.get(), nullptr, 0, nullptr, &available, nullptr)
+                    && available != 0)
+                {
+                    log_pipe(_listening.get(), "server connected client that already closed");
+                    return std::exchange(_listening, unique_win_handle{});
+                }
+                log_pipe(_listening.get(), "client disconnected before server accept");
+                auto replacement = create_instance();
+                _listening = std::move(replacement);
                 continue;
             }
 
             if (last_error != ERROR_IO_PENDING)
             {
                 if (cancellation_requested())
+                {
+                    close();
                     return std::nullopt;
-                log_pipe(pipe.get(), "failed to connect to pipe: ", last_error);
+                }
+                log_pipe(_listening.get(), "failed to connect to pipe: ", last_error);
+                close();
                 throw util::exception_t("failed to connect to pipe: ", last_error);
             }
 
@@ -989,30 +1377,53 @@ namespace gb::yadro::util
             if (wait_result == WAIT_OBJECT_0)
             {
                 DWORD ignored{};
-                if (!GetOverlappedResult(pipe.get(), &overlapped, &ignored, FALSE))
+                if (!GetOverlappedResult(_listening.get(), &overlapped, &ignored, FALSE))
                 {
                     last_error = GetLastError();
                     if (cancellation_requested())
+                    {
+                        close();
                         return std::nullopt;
-                    log_pipe(pipe.get(), "failed to complete pipe connection: ", last_error);
+                    }
+                    log_pipe(_listening.get(), "failed to complete pipe connection: ", last_error);
+                    close();
                     throw util::exception_t("failed to complete pipe connection: ", last_error);
                 }
 
-                log_pipe(pipe.get(), "server connected client");
-                return std::move(pipe);
+                log_pipe(_listening.get(), "server connected client");
+                return std::exchange(_listening, unique_win_handle{});
             }
 
             if (event_count == 2u && wait_result == WAIT_OBJECT_0 + 1)
             {
-                CancelIoEx(pipe.get(), &overlapped);
+                CancelIoEx(_listening.get(), &overlapped);
                 WaitForSingleObject(event.get(), INFINITE);
+                close();
                 return std::nullopt;
             }
 
             last_error = GetLastError();
-            log_pipe(pipe.get(), "failed waiting for pipe connection: ", last_error);
+            log_pipe(_listening.get(), "failed waiting for pipe connection: ", last_error);
+            // the connect is still pending on the stack OVERLAPPED: drain it before closing
+            CancelIoEx(_listening.get(), &overlapped);
+            DWORD ignored{};
+            GetOverlappedResult(_listening.get(), &overlapped, &ignored, TRUE);
+            close();
             throw util::exception_t("failed waiting for pipe connection: ", last_error);
         }
+    }
+
+    // One-shot accept on a fresh listener with default security
+    template<class OnPipeCreated>
+        requires std::invocable<OnPipeCreated&, HANDLE>
+    inline std::optional<unique_win_handle> connect_pipe_instance_impl(
+        const std::wstring& pipename,
+        HANDLE shutdown_event,
+        std::shared_ptr<util::logger> log,
+        OnPipeCreated&& on_pipe_created)
+    {
+        pipe_listener_t listener{ pipename, {}, std::move(log) };
+        return listener.accept(shutdown_event, std::forward<OnPipeCreated>(on_pipe_created));
     }
 
     inline std::optional<unique_win_handle> connect_pipe_instance(
@@ -1025,22 +1436,46 @@ namespace gb::yadro::util
     }
 
     //----------------------------------------------------------------------------------------------
-    inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, auto&& ...log_args)
+    template<class... LogArgs>
+        requires (!(std::same_as<std::remove_cvref_t<LogArgs>, pipe_server_options> || ...))
+    inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, LogArgs&& ...log_args)
+        : winpipe_server_t(pipename, pipe_server_options{}, std::forward<LogArgs>(log_args)...)
+    {}
+
+    inline winpipe_server_t::winpipe_server_t(const std::wstring& pipename, const pipe_server_options& options, auto&& ...log_args)
         : winpipe_base_t(std::forward<decltype(log_args)>(log_args)...)
     {
-        auto connected_pipe = connect_pipe_instance(pipename, nullptr, _log);
+        pipe_listener_t listener{ pipename, options, _log };
+        auto connected_pipe = listener.accept(nullptr);
         if (!connected_pipe)
             throw util::exception_t("pipe connection was cancelled without a shutdown event");
 
         _pipe = std::move(*connected_pipe);
     }
 
-    inline std::optional<winpipe_server_t> winpipe_server_t::accept(const std::wstring& pipename, HANDLE shutdown_event, std::shared_ptr<util::logger> log)
+    inline std::optional<winpipe_server_t> winpipe_server_t::accept(const std::wstring& pipename, HANDLE shutdown_event,
+        std::shared_ptr<util::logger> log, pipe_server_options options)
     {
-        auto connected_pipe = connect_pipe_instance(pipename, shutdown_event, log);
+        // Each call publishes an independent instance, possibly while earlier connections are
+        // still open, so the first-instance check would reject every call after the first.
+        options.first_pipe_instance = false;
+        pipe_listener_t listener{ pipename, options, log };
+        auto connected_pipe = listener.accept(shutdown_event);
         if (!connected_pipe)
             return std::nullopt;
 
+        return winpipe_server_t{ std::move(*connected_pipe), std::move(log) };
+    }
+
+    inline std::optional<winpipe_server_t> winpipe_server_t::accept(pipe_listener_t& listener, HANDLE shutdown_event,
+        std::shared_ptr<util::logger> log)
+    {
+        auto connected_pipe = listener.accept(shutdown_event);
+        if (!connected_pipe)
+            return std::nullopt;
+
+        // publish the next instance while this connection still holds the pipe name
+        listener.prepare();
         return winpipe_server_t{ std::move(*connected_pipe), std::move(log) };
     }
 
@@ -1087,21 +1522,34 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     // Function objects are shared across connection handlers and can be invoked concurrently.
     // Synchronize mutable captures inside handlers, or pass stateless callables.
+    // Overloads without pipe_server_options use the secure defaults described there.
     template<class ...Fn>
     void start_server(const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
+    {
+        start_server(pipename, pipe_server_options{}, std::move(log), std::forward<Fn>(fn)...);
+    }
+
+    template<class ...Fn>
+    void start_server(const std::wstring& pipename, const pipe_server_options& options, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
         auto max_threads = std::thread::hardware_concurrency();
         if (max_threads < 2)
             max_threads = 2;
 
         gb::yadro::async::threadpool tp(max_threads);
-        start_server(tp, pipename, std::move(log), std::forward<Fn>(fn)...);
+        start_server(tp, pipename, options, std::move(log), std::forward<Fn>(fn)...);
     }
 
     //----------------------------------------------------------------------------------------------
     // pipe puts new connections in threadpool
     template<class TreadPool, class ...Fn>
     void start_server(TreadPool& tp, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
+    {
+        start_server(tp, pipename, pipe_server_options{}, std::move(log), std::forward<Fn>(fn)...);
+    }
+
+    template<class TreadPool, class ...Fn>
+    void start_server(TreadPool& tp, const std::wstring& pipename, const pipe_server_options& options, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
         auto mutex_name = pipe_server_mutex_name(pipename);
         global_mutex mtx{ mutex_name };
@@ -1112,6 +1560,7 @@ namespace gb::yadro::util
         {
             auto state = std::make_shared<winpipe_server_state>();
             auto functions = std::make_shared<std::tuple<std::decay_t<Fn>...>>(std::forward<Fn>(fn)...);
+            pipe_listener_t listener{ pipename, options, log };
 
             while (!state->shutdown)
             {
@@ -1125,7 +1574,9 @@ namespace gb::yadro::util
                         break;
                 }
 
-                auto server = winpipe_server_t::accept(pipename, state->shutdown_event.get(), log);
+                // accept also publishes the next listening instance; while every handler slot is
+                // busy a client may connect to it and waits until a slot frees up
+                auto server = winpipe_server_t::accept(listener, state->shutdown_event.get(), log);
                 if (!server)
                     break;
 
@@ -1166,6 +1617,8 @@ namespace gb::yadro::util
                 }
             }
 
+            // stop taking clients: nobody would serve one that connected to the listening instance
+            listener.close();
             std::unique_lock lock{ state->active_connections_mutex };
             state->active_connections_changed.wait(lock, [&] { return state->active_connections == 0; });
         }
@@ -1178,11 +1631,16 @@ namespace gb::yadro::util
     //----------------------------------------------------------------------------------------------
     // pipe puts new connections in threadpool
     template<class ...Fn>
+    void start_server(std::size_t max_threads, const std::wstring& pipename, const pipe_server_options& options, std::shared_ptr<util::logger> log, Fn&&... fn)
+    {
+        gb::yadro::async::threadpool tp(max_threads);
+        start_server(tp, pipename, options, std::move(log), std::forward<Fn>(fn)...);
+    }
+
+    template<class ...Fn>
     void start_server(std::size_t max_threads, const std::wstring& pipename, std::shared_ptr<util::logger> log, Fn&&... fn)
     {
-        using namespace std::chrono_literals;
-        gb::yadro::async::threadpool tp(max_threads);
-        start_server(tp, pipename, log, std::forward<decltype(fn)>(fn)...);
+        start_server(max_threads, pipename, pipe_server_options{}, std::move(log), std::forward<Fn>(fn)...);
     }
 
     //----------------------------------------------------------------------------------------------

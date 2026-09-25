@@ -50,9 +50,17 @@ namespace gb::yadro::container
             return result;
         }
 
-        [[nodiscard]] inline std::string json_string(std::string_view text)
+        // Quoted JSON string for keys and values in output, through the escaper that write_json uses:
+        // control characters are escaped, ascii_only escapes every code point above U+007F, and
+        // invalid UTF-8 throws std::logic_error.
+        [[nodiscard]] inline std::string json_string(std::string_view text, bool ascii_only)
         {
-            return "\"" + escape_json_key(text) + "\"";
+            std::string result;
+            auto escaped = append_json_string(result, text, ascii_only, json_invalid_utf8::error);
+            if (!escaped.ok)
+                throw std::logic_error("JSON writer cannot represent invalid UTF-8 at byte " + std::to_string(escaped.invalid_offset)
+                    + " of a string");
+            return result;
         }
 
         template<class T>
@@ -75,7 +83,7 @@ namespace gb::yadro::container
             return result;
         }
 
-        [[nodiscard]] inline std::string value_json(const json_db& db, const json_db::value_type& value)
+        [[nodiscard]] inline std::string value_json(const json_db& db, const json_db::value_type& value, bool ascii_only)
         {
             if (std::holds_alternative<std::monostate>(value))
                 return "null";
@@ -91,7 +99,7 @@ namespace gb::yadro::container
                 return out.str();
             }
             if (auto ref = std::get_if<json_db::string_ref>(&value))
-                return json_string(db.string(*ref));
+                return json_string(db.string(*ref), ascii_only);
             if (auto ref = std::get_if<json_db::int_array_ref>(&value))
                 return numeric_array_json(db.array(*ref));
             if (auto ref = std::get_if<json_db::uint_array_ref>(&value))
@@ -104,7 +112,7 @@ namespace gb::yadro::container
                 for (std::size_t i = 0; i < values.size(); ++i) {
                     if (i != 0)
                         result.push_back(',');
-                    result += json_string(db.string(values[i]));
+                    result += json_string(db.string(values[i]), ascii_only);
                 }
                 result.push_back(']');
                 return result;
@@ -142,7 +150,7 @@ namespace gb::yadro::container
                 }
                 if (options.pretty)
                     write_indent(out, level + 1, options.indent);
-                out << json_string(db.key(child)) << ':';
+                out << json_string(db.key(child), options.ascii_only) << ':';
                 if (options.pretty)
                     out << ' ';
                 write_node_json(out, db, child, options, level + 1);
@@ -167,7 +175,7 @@ namespace gb::yadro::container
                 return;
             }
 
-            out << value_json(db, value);
+            out << value_json(db, value, options.ascii_only);
         }
 
         [[nodiscard]] inline std::string wrap_json_at_path(std::string_view normalized_path, std::string_view json_text)
@@ -245,7 +253,7 @@ namespace gb::yadro::container
             throw std::runtime_error("gbdb JSON path not found: " + normalized_path);
 
         if (auto& value = db.value(node); !detail::has_children(db, node) && !std::holds_alternative<std::monostate>(value))
-            return detail::value_json(db, value);
+            return detail::value_json(db, value, options.ascii_only);
 
         std::ostringstream out;
         out << '{';
@@ -253,7 +261,7 @@ namespace gb::yadro::container
             out << '\n';
             detail::write_indent(out, 1, options.indent);
         }
-        out << detail::json_string(parts.back()) << ':';
+        out << detail::json_string(parts.back(), options.ascii_only) << ':';
         if (options.pretty)
             out << ' ';
         detail::write_node_json(out, db, node, options, 1);
@@ -274,8 +282,23 @@ namespace gb::yadro::container
     inline void insert_json_at_path(json_db& target, std::string_view path, std::string_view text,
         json_merge_policy policy = json_merge_policy::replace_existing, const json_read_options& options = {})
     {
-        auto wrapped = detail::wrap_json_at_path(normalize_json_path(path), text);
-        insert_json(target, read_json(wrapped, options), policy);
+        // The text is first validated on its own as exactly one JSON value, with the caller's
+        // limits. A complete value cannot close the path wrapper objects, so the text cannot insert
+        // anything outside the path, and parse errors report positions in the caller's text. The
+        // wrapper objects then do not count against the caller's size or depth limits.
+        json_parse_options validation;
+        validation.max_depth = options.max_depth;
+        validation.max_input_bytes = options.max_input_bytes;
+        validation.big_integers = options.big_integers;
+        detail::json_null_handler validator;
+        parse_json_events(text, validator, validation);
+
+        auto normalized_path = normalize_json_path(path);
+        auto wrapped = detail::wrap_json_at_path(normalized_path, text);
+        auto wrapped_options = options;
+        wrapped_options.max_input_bytes = 0;
+        wrapped_options.max_depth = options.max_depth + split_json_path(normalized_path).size();
+        insert_json(target, read_json(wrapped, wrapped_options), policy);
     }
 
     inline void insert_json_file_at_path(json_db& target, std::string_view path, const std::filesystem::path& file,
@@ -284,7 +307,7 @@ namespace gb::yadro::container
         std::ifstream in(file, std::ios::binary);
         if (!in)
             throw std::runtime_error("failed to open JSON import file: " + file.string());
-        insert_json_at_path(target, path, detail::read_stream(in), policy, options);
+        insert_json_at_path(target, path, detail::read_capped(in, options.max_input_bytes), policy, options);
     }
 
     [[nodiscard]] inline std::optional<std::string> get_json_string(const json_db& db, json_db::path_view path)

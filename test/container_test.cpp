@@ -126,6 +126,13 @@ namespace
         std::filesystem::create_directories(path);
     }
 
+    // A temp path private to this process, so concurrently running test executables do not
+    // share (and delete) each other's files
+    inline std::filesystem::path unique_test_temp_path(std::string_view name)
+    {
+        return std::filesystem::temp_directory_path() / (std::string{ name } + "_" + std::to_string(get_process_id()));
+    }
+
     inline std::string md5_test_bytes(std::span<const std::byte> bytes)
     {
         gb::yadro::util::md5 hash;
@@ -1706,7 +1713,7 @@ namespace
 
     GB_TEST(container, gbdb_deferred_serialized_object_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_deferred_object_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_deferred_object_test");
         reset_test_directory(export_dir);
 
         json_db db;
@@ -1782,7 +1789,7 @@ namespace
 
     GB_TEST(container, gbdb_logging_writes_jsonl_file_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_logging_file_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_logging_file_test");
         reset_test_directory(export_dir);
         auto log_file = export_dir / "database.jsonl";
 
@@ -1808,7 +1815,7 @@ namespace
 
     GB_TEST(container, gbdb_logging_always_emits_serious_errors_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_logging_error_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_logging_error_test");
         reset_test_directory(export_dir);
 
         json_db db;
@@ -1885,7 +1892,7 @@ namespace
 
     GB_TEST(container, gbdb_scan_full_checks_external_blob_files_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_scan_missing_blob_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_scan_missing_blob_test");
         reset_test_directory(export_dir);
 
         json_db db;
@@ -1910,7 +1917,7 @@ namespace
 
     GB_TEST(container, gbdb_scan_deep_checks_external_blob_md5_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_scan_md5_blob_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_scan_md5_blob_test");
         reset_test_directory(export_dir);
 
         auto bytes = bytes_from_text("payload");
@@ -2424,7 +2431,7 @@ namespace
 
     GB_TEST(container, gbdb_file_roundtrip_test)
     {
-        auto file = std::filesystem::temp_directory_path() / "yadro_gbdb_file_roundtrip.db";
+        auto file = unique_test_temp_path("yadro_gbdb_file_roundtrip").replace_extension(".db");
         std::filesystem::remove(file);
         std::filesystem::remove(file.string() + ".tmp");
 
@@ -2683,7 +2690,7 @@ namespace
 
     GB_TEST(container, gbdb_json_external_object_blob_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_external_blob_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_external_blob_test");
         reset_test_directory(export_dir);
 
         json_db db;
@@ -2756,8 +2763,8 @@ namespace
 
     GB_TEST(container, gbdb_json_relocates_deferred_blob_on_export_test)
     {
-        auto source_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_relocate_blob_source_test";
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_relocate_blob_export_test";
+        auto source_dir = unique_test_temp_path("yadro_gbdb_relocate_blob_source_test");
+        auto export_dir = unique_test_temp_path("yadro_gbdb_relocate_blob_export_test");
         reset_test_directory(source_dir);
         reset_test_directory(export_dir);
 
@@ -2798,8 +2805,8 @@ namespace
 
     GB_TEST(container, gbdb_json_external_blob_gc_after_success_test)
     {
-        auto source_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_gc_blob_source_test";
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_gc_blob_export_test";
+        auto source_dir = unique_test_temp_path("yadro_gbdb_gc_blob_source_test");
+        auto export_dir = unique_test_temp_path("yadro_gbdb_gc_blob_export_test");
         reset_test_directory(source_dir);
         reset_test_directory(export_dir);
         std::filesystem::create_directories(export_dir / "blobs");
@@ -2842,7 +2849,7 @@ namespace
 
     GB_TEST(container, gbdb_json_external_blob_gc_skips_failed_export_test)
     {
-        auto export_dir = std::filesystem::temp_directory_path() / "yadro_gbdb_gc_failed_export_test";
+        auto export_dir = unique_test_temp_path("yadro_gbdb_gc_failed_export_test");
         reset_test_directory(export_dir);
         std::filesystem::create_directories(export_dir / "blobs");
 
@@ -2871,6 +2878,37 @@ namespace
         gbassert(read_test_file(export_dir / "database.json") == R"({"old":true})");
         gbassert(std::filesystem::exists(export_dir / "blobs" / "stale.bin"));
 
+        std::filesystem::remove_all(export_dir);
+    }
+
+    GB_TEST(container, gbdb_json_external_blob_relocation_md5_mismatch_installs_nothing_test)
+    {
+        auto source_dir = unique_test_temp_path("yadro_gbdb_relocation_mismatch_source");
+        auto export_dir = unique_test_temp_path("yadro_gbdb_relocation_mismatch_export");
+        reset_test_directory(source_dir);
+        reset_test_directory(export_dir);
+
+        // the source has the declared size but not the declared MD5
+        write_test_file(source_dir / "payload.bin", bytes_from_text("0123456789"));
+
+        json_db db;
+        db.set_external_blob_base_directory(source_dir);
+        db.set_deferred_serialized_object({ "assets", "payload" }, "payload.bin", 10, "00000000000000000000000000000000", "asset", 1);
+
+        json_write_options options;
+        options.pretty = false;
+        options.external_blobs.relocation = json_external_blob_relocation::copy_to_export_directory;
+
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto result = export_json_file(db, export_dir / "database.json", options);
+        });
+
+        gbassert(!std::filesystem::exists(export_dir / "database.json"));
+        auto blob_dir = export_dir / "blobs";
+        if (std::filesystem::exists(blob_dir))
+            gbassert(std::filesystem::is_empty(blob_dir)); // neither the blob nor its temp file
+
+        std::filesystem::remove_all(source_dir);
         std::filesystem::remove_all(export_dir);
     }
 

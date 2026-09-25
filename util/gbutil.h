@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "durable_file.h"
 #include "file_mutex.h"
 #include "gberror.h"
 #include "gblog.h"
@@ -40,6 +41,7 @@
 #include "hash_util.h"
 #include "misc.h"
 #include "named_resource_lock.h"
+#include "sha256.h"
 #include "string_util.h"
 #include "time_util.h"
 #include "traits.h"
