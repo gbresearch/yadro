@@ -51,11 +51,12 @@ namespace gb::yadro::container
         }
 
         // Quoted JSON string for keys and values in output, through the escaper that write_json uses:
-        // control characters are escaped, and invalid UTF-8 throws std::logic_error.
-        [[nodiscard]] inline std::string json_string(std::string_view text)
+        // control characters are escaped, ascii_only escapes every code point above U+007F, and
+        // invalid UTF-8 throws std::logic_error.
+        [[nodiscard]] inline std::string json_string(std::string_view text, bool ascii_only)
         {
             std::string result;
-            auto escaped = append_json_string(result, text, false, json_invalid_utf8::error);
+            auto escaped = append_json_string(result, text, ascii_only, json_invalid_utf8::error);
             if (!escaped.ok)
                 throw std::logic_error("JSON writer cannot represent invalid UTF-8 at byte " + std::to_string(escaped.invalid_offset)
                     + " of a string");
@@ -82,7 +83,7 @@ namespace gb::yadro::container
             return result;
         }
 
-        [[nodiscard]] inline std::string value_json(const json_db& db, const json_db::value_type& value)
+        [[nodiscard]] inline std::string value_json(const json_db& db, const json_db::value_type& value, bool ascii_only)
         {
             if (std::holds_alternative<std::monostate>(value))
                 return "null";
@@ -98,7 +99,7 @@ namespace gb::yadro::container
                 return out.str();
             }
             if (auto ref = std::get_if<json_db::string_ref>(&value))
-                return json_string(db.string(*ref));
+                return json_string(db.string(*ref), ascii_only);
             if (auto ref = std::get_if<json_db::int_array_ref>(&value))
                 return numeric_array_json(db.array(*ref));
             if (auto ref = std::get_if<json_db::uint_array_ref>(&value))
@@ -111,7 +112,7 @@ namespace gb::yadro::container
                 for (std::size_t i = 0; i < values.size(); ++i) {
                     if (i != 0)
                         result.push_back(',');
-                    result += json_string(db.string(values[i]));
+                    result += json_string(db.string(values[i]), ascii_only);
                 }
                 result.push_back(']');
                 return result;
@@ -149,7 +150,7 @@ namespace gb::yadro::container
                 }
                 if (options.pretty)
                     write_indent(out, level + 1, options.indent);
-                out << json_string(db.key(child)) << ':';
+                out << json_string(db.key(child), options.ascii_only) << ':';
                 if (options.pretty)
                     out << ' ';
                 write_node_json(out, db, child, options, level + 1);
@@ -174,7 +175,7 @@ namespace gb::yadro::container
                 return;
             }
 
-            out << value_json(db, value);
+            out << value_json(db, value, options.ascii_only);
         }
 
         [[nodiscard]] inline std::string wrap_json_at_path(std::string_view normalized_path, std::string_view json_text)
@@ -252,7 +253,7 @@ namespace gb::yadro::container
             throw std::runtime_error("gbdb JSON path not found: " + normalized_path);
 
         if (auto& value = db.value(node); !detail::has_children(db, node) && !std::holds_alternative<std::monostate>(value))
-            return detail::value_json(db, value);
+            return detail::value_json(db, value, options.ascii_only);
 
         std::ostringstream out;
         out << '{';
@@ -260,7 +261,7 @@ namespace gb::yadro::container
             out << '\n';
             detail::write_indent(out, 1, options.indent);
         }
-        out << detail::json_string(parts.back()) << ':';
+        out << detail::json_string(parts.back(), options.ascii_only) << ':';
         if (options.pretty)
             out << ' ';
         detail::write_node_json(out, db, node, options, 1);

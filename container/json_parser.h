@@ -309,7 +309,9 @@ namespace gb::yadro::container
                 if (cap != 0) {
                     if (buffer.size() > cap)
                         break;
-                    want = std::min(chunk, cap + 1 - buffer.size());
+                    // cap + 1 would wrap for the largest caps; room + 1 cannot, because room < chunk there
+                    const auto room = cap - buffer.size();
+                    want = room < chunk ? room + 1 : chunk;
                 }
                 auto old_size = buffer.size();
                 buffer.resize(old_size + want);

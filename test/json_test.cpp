@@ -2461,4 +2461,71 @@ namespace
         nested_copy.at_pointer("/a/1/b").value()->operator=(json_value(3));
         gbassert(!(nested_copy == nested));
     }
+
+    GB_TEST(json, json_read_capped_maximum_cap_test)
+    {
+        // cap + 1 must not wrap: the largest caps behave as "no practical limit" and terminate
+        for (std::size_t cap : { std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max() - 1 }) {
+            {
+                std::istringstream empty;
+                gbassert(jd::read_capped(empty, cap).empty());
+            }
+            {
+                std::istringstream in("[1,2]");
+                gbassert(jd::read_capped(in, cap) == "[1,2]");
+            }
+            {
+                const std::string large(200'000, 'x');   // several read chunks
+                extraction_streambuf buffer(large);
+                std::istream in(&buffer);
+                gbassert(jd::read_capped(in, cap) == large);
+                gbassert(buffer.extracted() == large.size());
+            }
+        }
+        if constexpr (json_parser_axe_enabled) {
+            json_parse_options options;
+            options.max_input_bytes = std::numeric_limits<std::size_t>::max();
+            std::istringstream in(R"({"a":[1]})");
+            gbassert(parse_json_value(in, options) == parse_json_value(R"({"a":[1]})"));
+        }
+        if constexpr (gbdb_json_axe_enabled) {
+            json_read_options options;
+            options.max_input_bytes = std::numeric_limits<std::size_t>::max();
+            std::istringstream in(R"({"a":1})");
+            gbassert(read_json(in, options).contains({ "a" }));
+        }
+    }
+
+    GB_TEST(json, gbdb_write_json_path_honours_ascii_only_test)
+    {
+        json_db db;
+        db.set({ "caf\xC3\xA9", "v" }, std::string_view{ "\xE2\x82\xAC" });
+        db.set({ "obj", "\xC3\xA9" }, std::string_view{ "\xF0\x9F\x98\x80" });
+        db.set({ "scalar" }, std::string_view{ "\xC3\xA9" });
+        db.set_string_array({ "list" }, { "a\xC3\xA9", "\xE2\x82\xAC" });
+
+        json_write_options ascii;
+        ascii.pretty = false;
+        ascii.ascii_only = true;
+        auto all_ascii = [](const std::string& text) {
+            return std::all_of(text.begin(), text.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; });
+        };
+
+        auto path_key = write_json_path(db, "caf\xC3\xA9", ascii);
+        gbassert(path_key == "{\"caf\\u00e9\":{\"v\":\"\\u20ac\"}}");
+        auto member_key = write_json_path(db, "obj", ascii);
+        gbassert(member_key == "{\"obj\":{\"\\u00e9\":\"\\ud83d\\ude00\"}}");
+        auto scalar = write_json_path(db, "scalar", ascii);
+        gbassert(scalar == "\"\\u00e9\"");
+        auto list = write_json_path(db, "list", ascii);
+        gbassert(list == "[\"a\\u00e9\",\"\\u20ac\"]");
+        for (auto* text : { &path_key, &member_key, &scalar, &list })
+            gbassert(all_ascii(*text));
+
+        // without ascii_only the text stays raw UTF-8
+        json_write_options raw;
+        raw.pretty = false;
+        gbassert(write_json_path(db, "scalar", raw) == "\"\xC3\xA9\"");
+        gbassert(write_json_path(db, "obj", raw) == "{\"obj\":{\"\xC3\xA9\":\"\xF0\x9F\x98\x80\"}}");
+    }
 }
