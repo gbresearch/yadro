@@ -46,11 +46,15 @@ namespace gb::yadro::util
         // Compute number of bytes mod 64
         size_t index = (bitCount[0] >> 3) & 0x3F;
 
-        // Update number of bits
-        if ((bitCount[0] += (length << 3)) < (length << 3)) {
+        // Update number of bits. The count is kept modulo 2^64 as two 32-bit words, so the 64-bit increment is split
+        // into its low and high words; truncating each to 32 bits is the modulo arithmetic RFC 1321 specifies. Adding
+        // the untruncated size_t (length << 3) instead would, on x64, report a false carry for 512 MiB or more.
+        const uint64_t bits = static_cast<uint64_t>(length) << 3;
+        const auto low_bits = static_cast<uint32_t>(bits);
+        if ((bitCount[0] += low_bits) < low_bits) {
             bitCount[1]++;
         }
-        bitCount[1] += (length >> 29);
+        bitCount[1] += static_cast<uint32_t>(bits >> 32);
 
         size_t partLen = 64 - index;
 
