@@ -39,6 +39,14 @@
 #include <cstdlib>
 #include <memory>
 #include <ranges>
+#include <future>
+#include <filesystem>
+#include <algorithm>
+#include <iterator>
+#include <tuple>
+#include <utility>
+#include <functional>
+#include <optional>
 #include "gbwin.h"
 #include "misc.h"
 #include "gberror.h"
@@ -140,7 +148,7 @@ namespace gb::yadro::util
         {
             std::string cmd;
             const auto& get_cmd() const { return cmd; }
-            std::size_t size() const { return -1; }
+            std::size_t size() const { return static_cast<std::size_t>(-1); }
             auto is_plot_cmd() const { return cmd.starts_with("plot") || cmd.starts_with("splot") || cmd.starts_with("replot"); }
         };
 
@@ -511,14 +519,26 @@ namespace gb::yadro::util
     {
         FILE* exe_pipe{};
 
+        // getenv is deprecated in the MSVC CRT; _dupenv_s returns a copy that the caller frees
+        auto get_path = []() -> std::optional<std::string>
+        {
+            char* value{};
+            std::size_t size{};
+            if (_dupenv_s(&value, &size, "PATH") != 0 || value == nullptr)
+                return std::nullopt;
+            std::string result(value);
+            std::free(value);
+            return result;
+        };
+
         if (std::filesystem::exists(gnuplot_exe_path))
         {
             exe_pipe = _popen(('"' + gnuplot_exe_path + "\" " + options).c_str(), "w");
             gbassert<gnuplot_error>(exe_pipe, "Failed to open: " + gnuplot_exe_path);
         }
-        else if (auto path = std::getenv("PATH"); path)
+        else if (auto path = get_path(); path)
         {
-            for (auto s : tokenize(std::string(path), ';'))
+            for (auto s : tokenize(*path, ';'))
                 if (auto exe = s + "\\gnuplot.exe"; std::filesystem::exists(exe))
                 {
                     exe_pipe = _popen(('"' + exe + "\" " + options).c_str(), "w");
@@ -526,7 +546,7 @@ namespace gb::yadro::util
                     break;
                 }
 
-            gbassert<gnuplot_error>(exe_pipe, "Path doesn't contain gnuplot.exe. path = " + std::string(path));
+            gbassert<gnuplot_error>(exe_pipe, "Path doesn't contain gnuplot.exe. path = " + *path);
         }
         else
         {

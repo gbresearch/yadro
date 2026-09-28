@@ -229,7 +229,7 @@ namespace gb::yadro::archive
         using char_type = char;
 
         // accumulate the size of all data written to the stream
-        void write(const char_type* c, std::streamsize size) { _size += size; }
+        void write(const char_type*, std::streamsize size) { _size += size; }
 
         auto get_size() const { return _size; }
     private:
@@ -734,7 +734,7 @@ namespace gb::yadro::archive
                 {
                     std::variant_alternative_t<I, Variant> value;
                     fn(value);
-                    v.emplace<I>(std::move(value));
+                    v.template emplace<I>(std::move(value));
                 }
                 else if (index > I)
                 {

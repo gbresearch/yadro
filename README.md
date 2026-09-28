@@ -46,6 +46,10 @@ A handful of `.cpp` files are compiled into a small static library.
   (named pipes, Windows services, the registry backend, fiber-based simulation, DLL
   helpers) are guarded by the `GBWINDOWS` macro, which `util/gbwin.h` defines
   automatically on Windows builds.
+- Each header under `util/`, `container/`, `archive/` and `async/` compiles as the only
+  include of a translation unit, and the headers and library sources compile cleanly at
+  `/W4 /WX /permissive-` with either the legacy or the conforming (`/Zc:preprocessor`)
+  preprocessor. `tools/check_headers.ps1` checks this (see [Testing](#testing)).
 
 ## Repository layout
 
@@ -424,6 +428,18 @@ suites. Build and run the `yadro_test` project. A few slow or environment-depend
 (for example `bounded_priority_queue_test` and the live Windows registry integration test)
 are skipped unless you pass `--run-all`. The process exits with 0 when all enabled tests
 pass and -1 otherwise.
+
+`tools/check_headers.ps1` checks what the test project cannot, since it includes everything
+through `include/yadro.h`: that each header under `util/`, `container/`, `archive/` and
+`async/` compiles on its own, that a `GB_TEST` with and without its policy argument compiles,
+and that the library sources compile, all at `/std:c++latest /permissive- /W4 /WX` for x64
+and x86, once with the legacy preprocessor and once with `/Zc:preprocessor`, `GBWINDOWS` and
+`GB_YADRO_ENABLE_AXE_JSON`. It expects AXE at `../axe` (or `-AxeInclude <dir>`), prints each
+failure with its diagnostics, and exits with 1 if anything failed:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\check_headers.ps1
+```
 
 ## License
 

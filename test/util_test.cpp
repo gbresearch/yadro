@@ -558,6 +558,15 @@ unset multiplot)*";
         gbassert(wildcard_match(std::string("*mutex*"), std::string("global_mutex_test")));
     }
 
+    // GB_TEST's policy argument is optional; omitted, it must expand to a valid constructor call under both the
+    // legacy and the conforming preprocessor (tools\check_headers.ps1 compiles this form with /Zc:preprocessor)
+    GB_TEST(util, gbtest_policy_argument_is_optional)
+    {
+        static_assert(test_launch_policy() == std::launch::deferred);
+        static_assert(test_launch_policy(std::launch::async) == std::launch::async);
+        gbassert(_policy == std::launch::deferred);
+    }
+
     // tests registered with their own tester, independent of the global one, to exercise selection and reporting
     struct test_harness_probe
     {

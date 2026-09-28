@@ -52,7 +52,7 @@ namespace gb::yadro::container
 #else
     using index_t = std::size_t;
 #endif
-    inline constexpr index_t invalid_index = -1;
+    inline constexpr index_t invalid_index = static_cast<index_t>(-1);
 
     namespace detail
     {
@@ -114,7 +114,7 @@ namespace gb::yadro::container
     struct data_wrapper<void, false>
     {
         void serialize(auto&&) {}
-        auto operator== (const data_wrapper& other) const { return true; }
+        auto operator== (const data_wrapper&) const { return true; }
     };
 
     //-------------------------------------------------------------------------

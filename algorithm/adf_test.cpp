@@ -160,7 +160,6 @@ namespace gb::yadro::algorithm
 
     // Regression builder
     vector<vector<double>> build_adf_regressors(const vector<double>& series, const vector<double>& dy, int lag, TrendType trend) {
-        const size_t n = series.size();
         size_t dy_len = dy.size();
         size_t trend_cols = (trend == TrendType::CONSTANT_TREND ? 2 :
             trend == TrendType::CONSTANT ? 1 : 0);

@@ -651,6 +651,10 @@ namespace gb::yadro::async {
     // Thread pool
     // ─────────────────────────────────────────────────────────────────────────────
 
+#if defined(_MSC_VER)
+#   pragma warning(push)
+#   pragma warning(disable: 4324) // structure was padded due to alignment specifier: the padding is the point
+#endif
     class threadpool final {
     public:
 #ifdef __cpp_lib_hardware_interference_size
@@ -1417,6 +1421,9 @@ namespace gb::yadro::async {
         std::condition_variable drain_cv_;
         std::shared_ptr<LifetimeToken> token_{ std::make_shared<LifetimeToken>(this) };   // constructed with raw this
     };
+#if defined(_MSC_VER)
+#   pragma warning(pop)
+#endif
 
 #ifdef GB_YADRO_THREADPOOL_TESTING
     namespace detail {

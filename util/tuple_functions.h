@@ -34,6 +34,10 @@
 #include <functional>
 #include <utility>
 #include <variant>
+#include <array>
+#include <algorithm>
+#include <cstddef>
+#include "gberror.h"
 
 namespace gb::yadro::util
 {
