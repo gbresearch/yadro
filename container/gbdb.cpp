@@ -215,7 +215,7 @@ namespace gb::yadro::container
         os << "\n";
     }
 
-    static void pretty_print(const json_db::scan_report& rep, std::ostream& os)
+    [[maybe_unused]] static void pretty_print(const json_db::scan_report& rep, std::ostream& os)
     {
         using namespace term;
 

@@ -32,6 +32,8 @@
 #include <strsafe.h>
 
 // Microsoft example: https://learn.microsoft.com/en-us/windows/win32/services/svc-cpp
+// The interface takes char strings, so this uses the ANSI (A) functions explicitly; it compiles the same with or
+// without UNICODE defined.
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -62,9 +64,9 @@ namespace gb::yadro::util//::winservice
     }
 
     //-----------------------------------------------------------------------------
-    static void WINAPI service_main_entry(DWORD argc, LPTSTR* argv)
+    static void WINAPI service_main_entry(DWORD argc, LPSTR* argv)
     {
-        service_status_handle = RegisterServiceCtrlHandler(service_name.c_str(), service_ctrl_handler);
+        service_status_handle = RegisterServiceCtrlHandlerA(service_name.c_str(), service_ctrl_handler);
 
         if (!service_status_handle) {
             throw exception_t(to_string("RegisterServiceCtrlHandler failed with error: ", GetLastError()));
@@ -82,7 +84,7 @@ namespace gb::yadro::util//::winservice
         // Wait indefinitely
         while (service_status.dwCurrentState == SERVICE_RUNNING) {
             Sleep(1000);
-            main_fn(argc, const_cast<const char**>(argv));
+            main_fn(static_cast<int>(argc), const_cast<const char**>(argv));
         }
 
         // Service cleanup code here...
@@ -111,12 +113,12 @@ namespace gb::yadro::util//::winservice
 
         if (is_service())
         {
-            SERVICE_TABLE_ENTRY service_table[] = {
-                {service_name.data(), (LPSERVICE_MAIN_FUNCTION)service_main_entry},
+            SERVICE_TABLE_ENTRYA service_table[] = {
+                {service_name.data(), (LPSERVICE_MAIN_FUNCTIONA)service_main_entry},
                 {NULL, NULL}
             };
 
-            if (!StartServiceCtrlDispatcher(service_table)) {
+            if (!StartServiceCtrlDispatcherA(service_table)) {
                 throw util::exception_t(util::to_string("StartServiceCtrlDispatcher failed with error: ", GetLastError()));
             }
         }
@@ -130,13 +132,13 @@ namespace gb::yadro::util//::winservice
     }
 
     //-----------------------------------------------------------------------------
-    void win_service_install(const char* service_name)
+    void win_service_install(const char* name)
     {
         SC_HANDLE schSCManager;
         SC_HANDLE schService;
-        TCHAR szUnquotedPath[MAX_PATH];
+        char szUnquotedPath[MAX_PATH];
 
-        if (!GetModuleFileName(NULL, szUnquotedPath, MAX_PATH))
+        if (!GetModuleFileNameA(NULL, szUnquotedPath, MAX_PATH))
         {
             printf("Cannot install service (%d)\n", GetLastError());
             return;
@@ -146,12 +148,12 @@ namespace gb::yadro::util//::winservice
         // it is correctly interpreted. For example,
         // "d:\my share\myservice.exe" should be specified as
         // ""d:\my share\myservice.exe"".
-        TCHAR szPath[MAX_PATH];
-        StringCbPrintf(szPath, MAX_PATH, TEXT("\"%s\""), szUnquotedPath);
+        char szPath[MAX_PATH];
+        StringCbPrintfA(szPath, MAX_PATH, "\"%s\"", szUnquotedPath);
 
         // Get a handle to the SCM database. 
 
-        schSCManager = OpenSCManager(
+        schSCManager = OpenSCManagerA(
             NULL,                    // local computer
             NULL,                    // ServicesActive database 
             SC_MANAGER_ALL_ACCESS);  // full access rights 
@@ -161,10 +163,10 @@ namespace gb::yadro::util//::winservice
 
         // Create the service
 
-        schService = CreateService(
+        schService = CreateServiceA(
             schSCManager,              // SCM database 
-            service_name,                   // name of service 
-            service_name,                   // service name to display 
+            name,                      // name of service 
+            name,                      // service name to display 
             SERVICE_ALL_ACCESS,        // desired access 
             SERVICE_WIN32_OWN_PROCESS, // service type 
             SERVICE_DEMAND_START,      // start type 
