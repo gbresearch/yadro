@@ -68,6 +68,11 @@ namespace gb::yadro::util
         test_base(const char* test_name, const char* suite, tester& owner, std::launch policy = std::launch::deferred);
     };
 
+    // GB_TEST passes its optional launch policy through this function, so that an omitted policy expands to an
+    // empty argument list here rather than to a trailing comma in test_base's constructor call; this works with
+    // both the legacy and the conforming (/Zc:preprocessor) MSVC preprocessor, which __VA_OPT__ does not
+    constexpr std::launch test_launch_policy(std::launch policy = std::launch::deferred) noexcept { return policy; }
+
     namespace detail
     {
         // matches text against a pattern in which '*' matches any sequence and '?' any one character
@@ -558,7 +563,7 @@ inline gb::yadro::util::test_base::test_base(const char* test_name, const char* 
 //---------------------------------------------------------------------------------------------------------------------
 #define GB_TEST(s, x, ...) \
         struct x : gb::yadro::util::test_base { \
-        x()  : gb::yadro::util::test_base(#x, #s, __VA_ARGS__) {} \
+        x()  : gb::yadro::util::test_base(#x, #s, gb::yadro::util::test_launch_policy(__VA_ARGS__)) {} \
         void run() const;\
         } x;\
         void x::run() const
