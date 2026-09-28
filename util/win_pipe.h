@@ -29,6 +29,7 @@
 #pragma once
 #include "gbwin.h"
 #include "tuple_functions.h"
+#include "traits.h"
 #include "gblog.h"
 #include "misc.h"
 #include "time_util.h"
@@ -226,8 +227,8 @@ namespace gb::yadro::util
     inline constexpr auto max_pipe_instances = 255u;
     inline constexpr auto max_pending_pipe_connections = max_pipe_instances - 1u;
     inline constexpr DWORD pipe_io_timeout_ms = 30'000;
-    inline constexpr std::uint32_t server_disconnect = -1;
-    inline constexpr std::uint32_t server_shutdown = -2;
+    inline constexpr std::uint32_t server_disconnect = static_cast<std::uint32_t>(-1);
+    inline constexpr std::uint32_t server_shutdown = static_cast<std::uint32_t>(-2);
     inline constexpr auto pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT;
 
     template<class Rep, class Period>

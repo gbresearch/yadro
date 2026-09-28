@@ -2588,13 +2588,13 @@ namespace gb::yadro::container
         static void save_array_pool(Ar& archive, const Pool& pool)
         {
             using array_id = typename Pool::array_id;
-            using value_type = typename Pool::value_type;
+            using pool_value_type = typename Pool::value_type;
 
             auto count = pool.array_count();
             archive(gb::yadro::archive::serialize_as<std::uint64_t>(count));
             for (array_id id = 0; id < count; ++id) {
                 auto data = pool.span(id);
-                std::vector<value_type> values(data.begin(), data.end());
+                std::vector<pool_value_type> values(data.begin(), data.end());
                 archive(values);
             }
         }
@@ -2603,13 +2603,13 @@ namespace gb::yadro::container
         static void load_array_pool(Ar& archive, Pool& pool)
         {
             using array_id = typename Pool::array_id;
-            using value_type = typename Pool::value_type;
+            using pool_value_type = typename Pool::value_type;
 
             pool = Pool{};
             std::uint64_t count{};
             archive(gb::yadro::archive::serialize_as<std::uint64_t>(count));
             for (std::uint64_t i = 0; i < count; ++i) {
-                std::vector<value_type> values;
+                std::vector<pool_value_type> values;
                 archive(values);
                 auto id = pool.insert(values);
                 if (id != static_cast<array_id>(i))

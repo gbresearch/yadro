@@ -171,6 +171,10 @@ namespace gb::yadro::async
      *                        static_assert).  For complex task objects store a pointer.
      * @tparam InitialLog2Cap log₂ of the initial ring-buffer capacity (default 8 → 256 slots).
      */
+#if defined(_MSC_VER)
+#   pragma warning(push)
+#   pragma warning(disable: 4324) // structure was padded due to alignment specifier: the padding is the point
+#endif
     template <typename T, std::size_t InitialLog2Cap = 8>
     class WorkStealingDeque {
         // ── Type requirements ──────────────────────────────────────────────────
@@ -446,5 +450,8 @@ namespace gb::yadro::async
         // deque is alive.  See the "Memory reclamation" section in the file header.
         std::vector<CircularArray<T>*> gc_list_;
     };
+#if defined(_MSC_VER)
+#   pragma warning(pop)
+#endif
 
 } // end namespace

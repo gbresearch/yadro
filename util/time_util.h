@@ -28,6 +28,7 @@
 
 #pragma once
 #include <chrono>
+#include <ctime>
 #include <sstream>
 #include <thread>
 
@@ -87,7 +88,13 @@ namespace gb::yadro::util
     inline std::tm unpack_time(std::chrono::time_point<std::chrono::system_clock> tp = std::chrono::system_clock::now())
     {
         std::time_t tp_c = std::chrono::system_clock::to_time_t(tp);
-        return *std::localtime(&tp_c);
+        std::tm tm{};
+#if defined(_MSC_VER)
+        localtime_s(&tm, &tp_c);
+#else
+        localtime_r(&tp_c, &tm);
+#endif
+        return tm;
     }
 
     //-------------------------------------------------------------------------

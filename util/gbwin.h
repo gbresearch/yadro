@@ -31,7 +31,9 @@
 // windows utilities
 
 #if defined(_Windows) || defined(__WIN32__) || defined(_WIN32) || defined(_WIN64) || defined(_MSC_VER)
+#ifndef GBWINDOWS // a consumer may define it on the command line
 #define GBWINDOWS
+#endif
 
 #include <functional>
 #include <utility>
