@@ -350,6 +350,35 @@ namespace
         gbassert(ss.str() == "0: enter fiber #1\n1: e1 triggered\n1: fiber #1 resumed after wait\n");
         ss = std::stringstream{};
 
+        // test waiting for a time period of any integral type: an int argument used to pick the variadic wait,
+        // which called itself forever
+        {
+            event e2, e3;
+            std::vector<sim_time_t> times;
+            bool negative_rejected = false;
+            sch.once([&] {
+                times.push_back(get_sim_time());
+                wait(5);
+                times.push_back(get_sim_time());
+                for (int i = 0; i < 3; ++i)
+                    wait(1 + i % 3);
+                times.push_back(get_sim_time());
+                wait(short{ 2 }, 3u, 4ll);
+                times.push_back(get_sim_time());
+                wait(e2, 3, e3); // e3 is waited for only after the 3 time units that follow e2
+                times.push_back(get_sim_time());
+                try { wait(-1); }
+                catch (const std::exception&) { negative_rejected = true; }
+                times.push_back(get_sim_time());
+                });
+            sch.schedule(e2, 22);
+            sch.schedule(e3, 24);
+            sch.schedule(e3, 26);
+            sch.run();
+            gbassert(times == std::vector<sim_time_t>{ 0, 5, 11, 20, 26, 26 });
+            gbassert(negative_rejected);
+        }
+
         // test waitable signal
         signal<int> s1(0, sch), s2(1, sch);
         printer(s1, "s1"); printer(pos_edge(s1), "s1.pos_edge"); printer(neg_edge(s1), "s1.neg_edge");
