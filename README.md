@@ -37,11 +37,14 @@ A handful of `.cpp` files are compiled into a small static library.
 
 - A compiler with recent C++ support. The project is developed with Microsoft Visual C++
   using `/std:c++latest` (`stdcpplatest`) and `/Zc:__cplusplus`, with warnings treated as
-  errors. The code relies on recent language and library features (deducing `this`,
-  `std::expected`, `std::stacktrace`, `std::from_range`). Older toolchains such as GCC 13
-  or Clang 18 with libstdc++ 13 cannot compile it.
-- The Visual Studio projects compile with `/arch:AVX2`. Some code paths (for example the
-  FFT and the xxHash128 implementation) have AVX2-optimized variants.
+  errors. On Linux it builds with GCC 14 or later, or Clang 20 or later with libstdc++ 14
+  or later, using `-std=c++23` (see [Building](#building)). The code relies on recent
+  language and library features (deducing `this`, `std::expected`, `std::stacktrace`).
+  Older toolchains such as GCC 13, or any compiler with libstdc++ 13, cannot compile it,
+  and libc++ lacks `<stacktrace>`.
+- The Visual Studio projects compile with `/arch:AVX2`, and the Makefile with
+  `-mavx2 -mfma`. Some code paths (for example the FFT and the xxHash128 implementation)
+  have AVX2-optimized variants.
 - Windows is the primary platform. Most facilities are portable. The Windows-only parts
   (named pipes, Windows services, the registry backend, fiber-based simulation, DLL
   helpers) are guarded by the `GBWINDOWS` macro, which `util/gbwin.h` defines
@@ -49,7 +52,9 @@ A handful of `.cpp` files are compiled into a small static library.
 - Each header under `util/`, `container/`, `archive/` and `async/` compiles as the only
   include of a translation unit, and the headers and library sources compile cleanly at
   `/W4 /WX /permissive-` with either the legacy or the conforming (`/Zc:preprocessor`)
-  preprocessor. `tools/check_headers.ps1` checks this (see [Testing](#testing)).
+  preprocessor. `tools/check_headers.ps1` checks this (see [Testing](#testing)). With GCC
+  and Clang they compile cleanly at `-Wall -Wextra -Werror`, which `make check-headers`
+  checks.
 
 ## Repository layout
 
@@ -71,6 +76,7 @@ yadro/
 │   └── simulator.h        module header
 ├── test/                  unit tests, one file per module, plus the test driver
 ├── vs/                    Visual Studio solution and projects (library + tests)
+├── Makefile               GNU make build for GCC and Clang (library + tests)
 └── docs/                  design specs and implementation plans
 ```
 
@@ -96,8 +102,8 @@ All library code lives in the `gb::yadro` namespace, split per module
 ### Building
 
 Most of yadro is header-only. The following sources must be compiled and linked (the
-`vs/yadro.vcxproj` project builds them into the `yadro` static library, written to
-`lib/<Platform>/<Configuration>/`):
+`vs/yadro.vcxproj` project and the Makefile build them into the `yadro` static library,
+written to `lib/<Platform>/<Configuration>/`):
 
 | Source                                                  | Provides                                 |
 |---------------------------------------------------------|------------------------------------------|
@@ -109,6 +115,30 @@ Most of yadro is header-only. The following sources must be compiled and linked 
 
 To build with Visual Studio, open `vs/yadro.sln` and build the `yadro` (library) and
 `yadro_test` (test executable) projects for x64 or Win32, Debug or Release.
+
+On Linux, the `Makefile` builds the same library and test executable with GCC or Clang
+(GNU make; `make help` lists every option):
+
+```
+make -j8                          # GCC, release: lib/linux-g++/Release/libyadro.a and exe/linux-g++/Release/yadro_test
+make -j8 TOOLCHAIN=clang          # the same with clang++
+make -j8 CXX=g++-14 CONFIG=debug  # a specific compiler, debug build
+make -j8 WERROR=1                 # warnings are errors, as in the Visual Studio projects
+make test                         # build and run the tests
+```
+
+Outputs go to `lib/`, `exe/` and `obj/` as with Visual Studio, under a platform named after
+the OS and compiler (for example `linux-clang++-20`), so builds with different compilers and
+configurations live side by side. Code that uses yadro compiles with `-std=c++23 -pthread`
+and links with `-lyadro -lstdc++exp` (libstdc++exp provides `std::stacktrace`). As in the Visual
+Studio projects, JSON parsing uses AXE from `../axe/include`; if it isn't there, the
+Makefile builds without it (`AXE_INCLUDE=<dir>` points elsewhere).
+
+The Windows-only facilities are compiled out on Linux: named pipes, services and the
+registry import (`gbdb_registry.h`) are left out, `named_resource_lock::acquire` throws,
+and the fiber-based simulator's functions have no definitions, so code that calls them
+does not link (the coroutine-based simulator works everywhere). Their tests are skipped
+there.
 
 ---
 
@@ -346,7 +376,7 @@ Namespace `gb::yadro::algorithm`, aggregate header `algorithm/gbalgorithm.h`.
 
 | Header                   | Facilities |
 |--------------------------|------------|
-| `genetic_optimization.h` | A generational **genetic algorithm optimizer** (`conv::genetic_optimization_t`, `make_optimizer`) over mixed search spaces of integer, floating-point, categorical and container genes (`min_max_value_range`, `discrete_value_range`, `container_range`). It offers tournament selection, SBX crossover, elitism, memoized fitness evaluation, single-threaded or thread-pool evaluation, four stopping criteria (stagnation, diversity/cataclysm, target fitness, elite convergence), time and evaluation budgets, adaptive phases, a deterministic mode with reproducible results, and history and statistics reporting. The header comment documents the algorithm and its tuning in detail. |
+| `genetic_optimization.h` | A generational **genetic algorithm optimizer** (`conv::genetic_optimization_t`, `make_optimizer`) over mixed search spaces of integer, floating-point, categorical and container genes (`min_max_value_range`, `discrete_value_range`, `container_range`). It offers tournament selection, SBX crossover, elitism, memoized fitness evaluation, single-threaded or thread-pool evaluation, four stopping criteria (stagnation, diversity/cataclysm, target fitness, elite convergence), time and evaluation budgets, adaptive phases, a deterministic mode with reproducible results (for a given compiler and standard library, whose random distributions differ), and history and statistics reporting. The header comment documents the algorithm and its tuning in detail. |
 | `regression_analysis.h`  | `residuals`, and `least_squares_optimizer` / `least_abs_optimizer`, which fit parameterized models using the genetic optimizer. |
 | `statistics.h`           | `mean_stddev`, the Kolmogorov-Smirnov two-sample test, the Shapiro-Francia normality test, and the `sigmoid1090`, `gauss_filter` and `sigmoid_filter` shaping functions. |
 | `student.h`              | `student_t`: confidence intervals for the mean and standard deviation using Student's t-distribution. |
@@ -424,7 +454,7 @@ GB_TEST(algorithm, my_parallel_test, std::launch::async)  // may run on the thre
 `test/yadro_test.cpp` is the driver. It turns on verbose logging to the console and
 `yadro-test.log` (on Windows, a run started while another holds that file logs to
 `yadro-test_<pid>.log` instead), disables the platform-specific tests that don't apply, and runs all
-suites. Build and run the `yadro_test` project. A few slow or environment-dependent tests
+suites. Build and run the `yadro_test` project, or `make test` on Linux. A few slow or environment-dependent tests
 (for example `bounded_priority_queue_test` and the live Windows registry integration test)
 are skipped unless you pass `--run-all`. The process exits with 0 when all enabled tests
 pass and -1 otherwise.
@@ -440,6 +470,9 @@ failure with its diagnostics, and exits with 1 if anything failed:
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\check_headers.ps1
 ```
+
+On Linux, `make check-headers` checks the same translation units with GCC or Clang at
+`-std=c++23 -Wall -Wextra -Werror` (with `GB_YADRO_ENABLE_AXE_JSON` when AXE is found).
 
 ## License
 

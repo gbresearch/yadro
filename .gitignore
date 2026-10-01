@@ -355,3 +355,7 @@ MigrationBackup/
 vs/vs-project-audit-2026-05-16.md
 CLAUDE.md
 .claude/settings.json
+
+# build outputs of the Visual Studio projects and the Makefile (obj/ is ignored above)
+/lib/
+/exe/
