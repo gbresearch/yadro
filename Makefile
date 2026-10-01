@@ -184,13 +184,16 @@ $(TEST_OBJ_DIR)/%.o: %.cpp
 	$(CXX) $(YADRO_FLAGS) $(WARN_FLAGS) $(TEST_WARN_FLAGS) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 test: $(TEST_EXE)
+ifneq ($(AXE),1)
+	@echo "note: built without AXE ($(AXE_INCLUDE)/axe.h not found), so the JSON parsing tests are reported as DISABLED"
+endif
 	cd $(EXE_DIR) && ./yadro_test $(TEST_ARGS)
 
 #-----------------------------------------------------------------------------
 # check-headers: the counterpart of tools/check_headers.ps1. Compiles, as a syntax and semantic check
 # at -Wall -Wextra -Werror, one translation unit per header under util/, container/, archive/ and
-# async/ that holds only #include <dir/header.h>, a GB_TEST with and without its policy argument, and
-# each library source.
+# async/ that holds only #include <dir/header.h>, GB_TEST and GB_TEST_IF with and without a policy
+# argument, and each library source.
 
 CHECK_HEADERS := $(sort $(wildcard util/*.h container/*.h archive/*.h async/*.h))
 CHECK_UNITS   := $(CHECK_HEADERS:%.h=$(CHECK_DIR)/%.h.ok) $(CHECK_DIR)/gb_test_usage.ok \
@@ -209,7 +212,9 @@ $(CHECK_DIR)/%.h.ok: %.h
 
 $(CHECK_DIR)/gb_test_usage.ok: util/gbtest.h
 	@mkdir -p $(@D)
-	@printf '#include <util/gbtest.h>\nGB_TEST(header_check, without_policy) {}\nGB_TEST(header_check, with_policy, std::launch::async) {}\n' \
+	@printf '%s\n' '#include <util/gbtest.h>' \
+	    'GB_TEST(header_check, without_policy) {}' 'GB_TEST(header_check, with_policy, std::launch::async) {}' \
+	    'GB_TEST_IF(true, header_check, if_without_policy) {}' 'GB_TEST_IF(false, header_check, if_with_policy, std::launch::async) {}' \
 	    > $(CHECK_DIR)/gb_test_usage.cpp
 	$(CXX) $(CHECK_FLAGS) $(CHECK_DIR)/gb_test_usage.cpp
 	@touch $@

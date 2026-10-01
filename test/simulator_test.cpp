@@ -36,6 +36,13 @@ namespace
     using namespace gb::yadro::util;
     using namespace gb::sim;
 
+    // fibers are implemented on Windows only, see simulator/fiber.cpp; elsewhere fiber_test is reported as disabled
+#if defined(GBWINDOWS)
+    constexpr bool fibers_implemented = true;
+#else
+    constexpr bool fibers_implemented = false;
+#endif
+
     void print_signal(auto&& s, const std::string& name, auto& scheduler, std::ostream& os)
     {
         if constexpr (requires{ s.read(); })
@@ -320,9 +327,9 @@ namespace
     }
 
     //---------------------------------------------------------------------------------------------
-    GB_TEST(simulator, fiber_test, std::launch::async)
+    GB_TEST_IF(fibers_implemented, simulator, fiber_test, std::launch::async)
     {
-#if defined(GBWINDOWS) // fibers are implemented on Windows only, see simulator/fiber.cpp
+#if defined(GBWINDOWS) // without fibers the body would not link
         using namespace gb::sim::fibers;
         using namespace std::chrono_literals;
 

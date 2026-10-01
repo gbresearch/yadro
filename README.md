@@ -132,13 +132,14 @@ the OS and compiler (for example `linux-clang++-20`), so builds with different c
 configurations live side by side. Code that uses yadro compiles with `-std=c++23 -pthread`
 and links with `-lyadro -lstdc++exp` (libstdc++exp provides `std::stacktrace`). As in the Visual
 Studio projects, JSON parsing uses AXE from `../axe/include`; if it isn't there, the
-Makefile builds without it (`AXE_INCLUDE=<dir>` points elsewhere).
+Makefile builds without it (`AXE_INCLUDE=<dir>` points elsewhere), and the JSON parsing
+tests are reported as DISABLED.
 
 The Windows-only facilities are compiled out on Linux: named pipes, services and the
 registry import (`gbdb_registry.h`) are left out, `named_resource_lock::acquire` throws,
 and the fiber-based simulator's functions have no definitions, so code that calls them
-does not link (the coroutine-based simulator works everywhere). Their tests are skipped
-there.
+does not link (the coroutine-based simulator works everywhere). Their tests are reported
+as DISABLED there.
 
 ---
 
@@ -151,7 +152,7 @@ Namespace `gb::yadro::util`, aggregate header `util/gbutil.h`.
 | Header                 | Facilities |
 |------------------------|------------|
 | `gberror.h`            | `gbassert(cond[, msg])`: assertion that throws `failed_assertion` with the source location, and allocates nothing when it passes. Also `throw_error<E>()`, `must_throw(fn)`, `error_t<N, Base>` numbered errors, `exception_t<Data>` exceptions with an optional payload, source location and stack trace, `stack_trace()`, and the variadic `to_string` / `to_wstring`. |
-| `gbtest.h`             | A lightweight unit-test framework: `GB_TEST(suite, name[, launch_policy])` registers a test, and `tester` runs, filters (`disable_suites`, `disable_tests`) and logs tests, optionally in parallel on the thread pool. |
+| `gbtest.h`             | A lightweight unit-test framework: `GB_TEST(suite, name[, launch_policy])` registers a test, `GB_TEST_IF(condition, suite, name[, launch_policy])` one that runs only when a constant condition holds (otherwise it is reported as DISABLED), and `tester` runs, filters (`disable_suites`, `disable_tests`) and logs tests, optionally in parallel on the thread pool. |
 | `gblog.h`              | Thread-safe `logger` that writes to any number of streams or files, organized into categories, plus `tab` for column alignment. |
 | `gbtimer.h`, `gbmacro.h` | `accumulating_timer` and scope timers for profiling, the `GB_TIMER(name, unit)` macro, and macro concatenation/stringification helpers. |
 | `time_util.h`          | Time stamps, Delphi `TDateTime` conversion (`datetime_to_chrono`), `week_of_year`, `to_time_point`, process id. |
@@ -446,6 +447,10 @@ GB_TEST(container, my_test)                        // deferred (sequential) by d
     gbassert(1 + 1 == 2);
 }
 GB_TEST(algorithm, my_parallel_test, std::launch::async)  // may run on the thread pool
+{
+    ...
+}
+GB_TEST_IF(json_parser_axe_enabled, json, my_parsing_test) // DISABLED, not run, without AXE
 {
     ...
 }

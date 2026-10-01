@@ -229,7 +229,7 @@ namespace
         gbassert(replaced("\xE2\x82" "A", true) == "\"\\ufffdA\"");
     }
 
-    GB_TEST(json, json_utf8_decoder_matches_axe_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_utf8_decoder_matches_axe_test)
     {
         if constexpr (json_parser_axe_enabled) {
 #if defined(GB_YADRO_ENABLE_AXE_JSON)
@@ -475,310 +475,290 @@ namespace
         throw std::logic_error("nth_open: not enough brackets");
     }
 
-    GB_TEST(json, json_events_basic_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_basic_test)
     {
-        if constexpr (json_parser_axe_enabled) {
-            gbassert(events_of(R"({"a":[1,-2,3.5,"x",true,false,null],"b":{}})")
-                == "{|Ka|[|U1|I-2|D3.5|Sx|B1|B0|N|]|Kb|{|}|}|");
-            gbassert(events_of(R"("s")") == "Ss|");
-            gbassert(events_of("12") == "U12|");
-            gbassert(events_of(" \t\r\n[ \t\r\n1 \t\r\n, \t\r\n{ \"k\" \n: \r\n[] } \t\r\n] \t\r\n") == "[|U1|{|Kk|[|]|}|]|");
-            gbassert(events_of("[]") == "[|]|");
-            gbassert(events_of("{}") == "{|}|");
-            gbassert(events_of(R"({"":0})") == "{|K|U0|}|");
-        }
+        gbassert(events_of(R"({"a":[1,-2,3.5,"x",true,false,null],"b":{}})")
+            == "{|Ka|[|U1|I-2|D3.5|Sx|B1|B0|N|]|Kb|{|}|}|");
+        gbassert(events_of(R"("s")") == "Ss|");
+        gbassert(events_of("12") == "U12|");
+        gbassert(events_of(" \t\r\n[ \t\r\n1 \t\r\n, \t\r\n{ \"k\" \n: \r\n[] } \t\r\n] \t\r\n") == "[|U1|{|Kk|[|]|}|]|");
+        gbassert(events_of("[]") == "[|]|");
+        gbassert(events_of("{}") == "{|}|");
+        gbassert(events_of(R"({"":0})") == "{|K|U0|}|");
     }
 
-    GB_TEST(json, json_events_syntax_errors_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_syntax_errors_test)
     {
-        if constexpr (json_parser_axe_enabled) {
-            struct error_case { std::string_view input; json_parse_errc code; std::size_t offset; };
-            const error_case cases[] = {
-                { "", json_parse_errc::unexpected_end, 0 },
-                { "   ", json_parse_errc::unexpected_end, 3 },
-                { "[1,]", json_parse_errc::syntax, 3 },
-                { "{\"a\":1,}", json_parse_errc::syntax, 7 },
-                { "[1 2]", json_parse_errc::syntax, 3 },
-                { "{\"a\" 1}", json_parse_errc::syntax, 5 },
-                { "{1:2}", json_parse_errc::syntax, 1 },
-                { "01", json_parse_errc::syntax, 1 },
-                { "-", json_parse_errc::syntax, 1 },
-                { "1.", json_parse_errc::syntax, 1 },
-                { "tru", json_parse_errc::unexpected_end, 0 },
-                { "trux", json_parse_errc::syntax, 0 },
-                { "[1]x", json_parse_errc::syntax, 3 },
-                { "\xEF\xBB\xBF{}", json_parse_errc::syntax, 0 },
-                { "[\v]", json_parse_errc::syntax, 1 },
-                { "'a'", json_parse_errc::syntax, 0 },
-                { "[NaN]", json_parse_errc::syntax, 1 },
-                { "[+1]", json_parse_errc::syntax, 1 },
-                { "[.5]", json_parse_errc::syntax, 1 },
-                { "[0x1]", json_parse_errc::syntax, 2 },
-                { "/*c*/{}", json_parse_errc::syntax, 0 },
-                { "[", json_parse_errc::unexpected_end, 1 },
-                { "{\"a\":", json_parse_errc::unexpected_end, 5 },
-            };
-            for (auto& c : cases)
-                expect_error(c.input, c.code, c.offset);
+        struct error_case { std::string_view input; json_parse_errc code; std::size_t offset; };
+        const error_case cases[] = {
+            { "", json_parse_errc::unexpected_end, 0 },
+            { "   ", json_parse_errc::unexpected_end, 3 },
+            { "[1,]", json_parse_errc::syntax, 3 },
+            { "{\"a\":1,}", json_parse_errc::syntax, 7 },
+            { "[1 2]", json_parse_errc::syntax, 3 },
+            { "{\"a\" 1}", json_parse_errc::syntax, 5 },
+            { "{1:2}", json_parse_errc::syntax, 1 },
+            { "01", json_parse_errc::syntax, 1 },
+            { "-", json_parse_errc::syntax, 1 },
+            { "1.", json_parse_errc::syntax, 1 },
+            { "tru", json_parse_errc::unexpected_end, 0 },
+            { "trux", json_parse_errc::syntax, 0 },
+            { "[1]x", json_parse_errc::syntax, 3 },
+            { "\xEF\xBB\xBF{}", json_parse_errc::syntax, 0 },
+            { "[\v]", json_parse_errc::syntax, 1 },
+            { "'a'", json_parse_errc::syntax, 0 },
+            { "[NaN]", json_parse_errc::syntax, 1 },
+            { "[+1]", json_parse_errc::syntax, 1 },
+            { "[.5]", json_parse_errc::syntax, 1 },
+            { "[0x1]", json_parse_errc::syntax, 2 },
+            { "/*c*/{}", json_parse_errc::syntax, 0 },
+            { "[", json_parse_errc::unexpected_end, 1 },
+            { "{\"a\":", json_parse_errc::unexpected_end, 5 },
+        };
+        for (auto& c : cases)
+            expect_error(c.input, c.code, c.offset);
 
-            json_parse_options no_scalar_root;
-            no_scalar_root.allow_scalar_root = false;
-            expect_error("1", json_parse_errc::syntax, 0, no_scalar_root);
-            expect_error("\"s\"", json_parse_errc::syntax, 0, no_scalar_root);
-            gbassert(events_of("[1]", no_scalar_root) == "[|U1|]|");
-        }
+        json_parse_options no_scalar_root;
+        no_scalar_root.allow_scalar_root = false;
+        expect_error("1", json_parse_errc::syntax, 0, no_scalar_root);
+        expect_error("\"s\"", json_parse_errc::syntax, 0, no_scalar_root);
+        gbassert(events_of("[1]", no_scalar_root) == "[|U1|]|");
     }
 
-    GB_TEST(json, json_events_string_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_string_test)
     {
-        if constexpr (json_parser_axe_enabled) {
-            gbassert(events_of(R"(["\"\\\/\b\f\n\r\t"])") == "[|S\"\\/\b\f\n\r\t|]|");
-            {
-                event_recorder recorder;
-                parse_json_events(R"(["\u0000"])", recorder);
-                gbassert(recorder.strings.size() == 1 && recorder.strings[0].size() == 1 && recorder.strings[0][0] == '\0');
-            }
-            {
-                // an escape-free string is delivered as a view into the input
-                const std::string text = R"(["plain text"])";
-                event_recorder recorder;
-                parse_json_events(text, recorder);
-                gbassert(recorder.string_data.size() == 1);
-                gbassert(recorder.string_data[0] >= text.data() && recorder.string_data[0] < text.data() + text.size());
-            }
-
-            struct error_case { std::string_view input; json_parse_errc code; std::size_t offset; };
-            const error_case cases[] = {
-                { "[\"a\x01\"]", json_parse_errc::control_character, 3 },
-                { "[\"\x1f\"]", json_parse_errc::control_character, 2 },
-                { std::string_view{ "[\"\0\"]", 5 }, json_parse_errc::control_character, 2 },
-                { "[\"\n\"]", json_parse_errc::control_character, 2 },
-                { "[\"\\x\"]", json_parse_errc::invalid_escape, 2 },
-                { "[\"\\u12G4\"]", json_parse_errc::invalid_escape, 2 },
-                { "[\"\\u12\"]", json_parse_errc::invalid_escape, 2 },
-                { "[\"\\", json_parse_errc::unexpected_end, 3 },
-                { "[\"\\u12", json_parse_errc::unexpected_end, 6 },
-                { "[\"abc", json_parse_errc::unexpected_end, 5 },
-                { "[\"\xC0\xAF\"]", json_parse_errc::invalid_utf8, 2 },
-                { "[\"a\xED\xA0\x80\"]", json_parse_errc::invalid_utf8, 3 },
-                { "[\"\xF4\x90\x80\x80\"]", json_parse_errc::invalid_utf8, 2 },
-                { "[\"\xE2\x82\"]", json_parse_errc::invalid_utf8, 2 },
-                { "[\"\x80\"]", json_parse_errc::invalid_utf8, 2 },
-                { "[\"\xFF\"]", json_parse_errc::invalid_utf8, 2 },
-                { "{\"k\x01\":1}", json_parse_errc::control_character, 3 },
-            };
-            for (auto& c : cases)
-                expect_error(c.input, c.code, c.offset);
-
-            for (std::string_view valid : { "\xC2\x80", "\xDF\xBF", "\xE0\xA0\x80", "\xEF\xBF\xBF", "\xF0\x90\x80\x80", "\xF4\x8F\xBF\xBF", "\x7F" }) {
-                event_recorder recorder;
-                parse_json_events("[\"" + std::string{ valid } + "\"]", recorder);
-                gbassert(recorder.strings.size() == 1 && recorder.strings[0] == valid);
-            }
-        }
-    }
-
-    GB_TEST(json, json_events_surrogate_test)
-    {
-        if constexpr (json_parser_axe_enabled) {
-            auto single_string = [](std::string_view text) {
-                event_recorder recorder;
-                parse_json_events(text, recorder);
-                gbassert(recorder.strings.size() == 1);
-                return recorder.strings[0];
-            };
-            gbassert(single_string(R"(["\ud83d\ude00"])") == "\xF0\x9F\x98\x80");
-            gbassert(single_string(R"(["\uD83D\uDE00"])") == "\xF0\x9F\x98\x80");
-            gbassert(single_string(R"(["\uDBFF\uDFFF"])") == "\xF4\x8F\xBF\xBF");
-            gbassert(single_string(R"(["\ud800\udc00x"])") == "\xF0\x90\x80\x80x");
-            gbassert(single_string(R"(["\u00e9\u20ac"])") == "\xC3\xA9\xE2\x82\xAC");
-
-            expect_error(R"(["\ud800"])", json_parse_errc::lone_surrogate, 2);
-            expect_error(R"(["\ud800x"])", json_parse_errc::lone_surrogate, 2);
-            expect_error(R"(["\ud800\ud800"])", json_parse_errc::lone_surrogate, 2);
-            expect_error(R"(["\ud800\u0041"])", json_parse_errc::lone_surrogate, 2);
-            expect_error(R"(["\udc00"])", json_parse_errc::lone_surrogate, 2);
-            expect_error(R"(["a\ude00"])", json_parse_errc::lone_surrogate, 3);
-            expect_error(R"(["\ud800\n"])", json_parse_errc::lone_surrogate, 2);
-        }
-    }
-
-    GB_TEST(json, json_events_integer_test)
-    {
-        if constexpr (json_parser_axe_enabled) {
-            gbassert(events_of("-9223372036854775808") == "I-9223372036854775808|");
-            gbassert(events_of("9223372036854775807") == "U9223372036854775807|");
-            gbassert(events_of("18446744073709551615") == "U18446744073709551615|");
-            gbassert(events_of("-0") == "I0|");
-            gbassert(events_of("-0.0") == "D-0|");
-            gbassert(events_of("0") == "U0|");
-
-            expect_error("-9223372036854775809", json_parse_errc::number_out_of_range, 0);
-            expect_error("18446744073709551616", json_parse_errc::number_out_of_range, 0);
-            expect_error("[18446744073709551616]", json_parse_errc::number_out_of_range, 1);
-
-            json_parse_options to_double;
-            to_double.big_integers = json_big_integer_policy::to_double;
-            gbassert(events_of("-9223372036854775809", to_double) == "D-9223372036854775808|");   // -2^63, the nearest double
-            gbassert(events_of("18446744073709551616", to_double) == "D18446744073709551616|");   // 2^64, exact
-            gbassert(events_of("18446744073709551615", to_double) == "U18446744073709551615|");
-
-            const std::string huge = "1" + std::string(400, '0');
-            expect_error(huge, json_parse_errc::number_out_of_range, 0, to_double);
-            expect_error(huge, json_parse_errc::number_out_of_range, 0);
-        }
-    }
-
-    GB_TEST(json, json_events_double_boundary_test)
-    {
-        if constexpr (json_parser_axe_enabled) {
-            auto bits_of = [](std::string_view token) {
-                event_recorder recorder;
-                parse_json_events("[" + std::string{ token } + "]", recorder);
-                gbassert(recorder.doubles.size() == 1);
-                return std::bit_cast<std::uint64_t>(recorder.doubles[0]);
-            };
-            constexpr std::uint64_t positive_zero = 0;
-            constexpr std::uint64_t negative_zero = 0x8000'0000'0000'0000ull;
-
-            gbassert(bits_of("4.9406564584124654e-324") == 1);
-            gbassert(bits_of("2.4703282292062328e-324") == 1);
-            gbassert(bits_of("2.4703282292062327e-324") == positive_zero);
-            gbassert(bits_of("-2.4703282292062327e-324") == negative_zero);
-            gbassert(bits_of("1e-400") == positive_zero);
-            gbassert(bits_of("-1e-400") == negative_zero);
-            gbassert(bits_of("123e-10000000") == positive_zero);
-            gbassert(bits_of("1e-99999999999999999999") == positive_zero);
-            {
-                double expected{};
-                const std::string_view token = "1e-320";
-                (void)std::from_chars(token.data(), token.data() + token.size(), expected);
-                gbassert(expected != 0.0);
-                gbassert(bits_of(token) == std::bit_cast<std::uint64_t>(expected));
-            }
-            gbassert(bits_of("1.7976931348623158e308") == std::bit_cast<std::uint64_t>(std::numeric_limits<double>::max()));
-            for (std::string_view overflow : { "1.7976931348623159e308", "1e309", "-1e309", "1e99999999999999999999" })
-                expect_error("[" + std::string{ overflow } + "]", json_parse_errc::number_out_of_range, 1);
-            gbassert(bits_of("0e-400") == positive_zero);
-            gbassert(bits_of("0.0000e99999") == positive_zero);
-
-            // a positive decimal exponent despite a negative explicit exponent: overflow
-            expect_error("[1" + std::string(400, '0') + "e-1]", json_parse_errc::number_out_of_range, 1);
-            // a long fraction with a large exponent: exactly 0.1, no spurious range error
-            gbassert(bits_of("0." + std::string(400, '0') + "1e400") == std::bit_cast<std::uint64_t>(0.1));
-            // a huge negative exponent written with many digits after a long fraction: underflow
-            gbassert(bits_of("0." + std::string(400, '0') + "1e-" + std::string(400, '9')) == positive_zero);
-        }
-    }
-
-    GB_TEST(json, json_events_depth_test)
-    {
-        if constexpr (json_parser_axe_enabled) {
-            const std::string_view leaves[] = { "", "1", "\"s\"", "true", "null" };
-            for (std::size_t limit : { 1, 2, 3, 256 }) {
-                json_parse_options options;
-                options.max_depth = limit;
-                for (auto shape : { nest_shape::arrays, nest_shape::objects, nest_shape::alternating })
-                    for (bool siblings : { false, true })
-                        for (auto leaf : leaves) {
-                            auto ok = nest(limit, leaf, shape, siblings);
-                            null_handler handler;
-                            parse_json_events(ok, handler, options);
-                            auto too_deep = nest(limit + 1, leaf, shape, siblings);
-                            expect_error(too_deep, json_parse_errc::depth_exceeded, nth_open(too_deep, limit + 1), options);
-                        }
-            }
-
-            json_parse_options zero;
-            zero.max_depth = 0;
-            gbassert(events_of("1", zero) == "U1|");
-            expect_error("[]", json_parse_errc::depth_exceeded, 0, zero);
-
-            json_parse_options two;
-            two.max_depth = 2;
-            gbassert(events_of("[[1]]", two) == "[|[|U1|]|]|");
-
-            expect_error(std::string(1'000'000, '['), json_parse_errc::depth_exceeded, 256);
-            std::string objects;
-            for (int i = 0; i < 1'000'000; ++i)
-                objects += "{\"a\":";
-            expect_error(objects, json_parse_errc::depth_exceeded, 256 * 5);
-            expect_error(std::string(1'000'000, '[') + "x", json_parse_errc::depth_exceeded, 256);
-        }
-    }
-
-    GB_TEST(json, json_events_input_cap_test)
-    {
-        if constexpr (json_parser_axe_enabled) {
-            const std::string text = R"({"a":[1,2,3],"b":"text"})";
-            json_parse_options options;
-            options.max_input_bytes = text.size();
-            gbassert(!events_of(text, options).empty());
-
-            options.max_input_bytes = text.size() - 1;
+        gbassert(events_of(R"(["\"\\\/\b\f\n\r\t"])") == "[|S\"\\/\b\f\n\r\t|]|");
+        {
             event_recorder recorder;
-            auto error = catch_parse_error([&] { parse_json_events(text, recorder, options); });
-            gbassert(error.code == json_parse_errc::input_too_large);
-            gbassert(error.offset == text.size() - 1);
-            gbassert(recorder.events.empty());
+            parse_json_events(R"(["\u0000"])", recorder);
+            gbassert(recorder.strings.size() == 1 && recorder.strings[0].size() == 1 && recorder.strings[0][0] == '\0');
+        }
+        {
+            // an escape-free string is delivered as a view into the input
+            const std::string text = R"(["plain text"])";
+            event_recorder recorder;
+            parse_json_events(text, recorder);
+            gbassert(recorder.string_data.size() == 1);
+            gbassert(recorder.string_data[0] >= text.data() && recorder.string_data[0] < text.data() + text.size());
+        }
+
+        struct error_case { std::string_view input; json_parse_errc code; std::size_t offset; };
+        const error_case cases[] = {
+            { "[\"a\x01\"]", json_parse_errc::control_character, 3 },
+            { "[\"\x1f\"]", json_parse_errc::control_character, 2 },
+            { std::string_view{ "[\"\0\"]", 5 }, json_parse_errc::control_character, 2 },
+            { "[\"\n\"]", json_parse_errc::control_character, 2 },
+            { "[\"\\x\"]", json_parse_errc::invalid_escape, 2 },
+            { "[\"\\u12G4\"]", json_parse_errc::invalid_escape, 2 },
+            { "[\"\\u12\"]", json_parse_errc::invalid_escape, 2 },
+            { "[\"\\", json_parse_errc::unexpected_end, 3 },
+            { "[\"\\u12", json_parse_errc::unexpected_end, 6 },
+            { "[\"abc", json_parse_errc::unexpected_end, 5 },
+            { "[\"\xC0\xAF\"]", json_parse_errc::invalid_utf8, 2 },
+            { "[\"a\xED\xA0\x80\"]", json_parse_errc::invalid_utf8, 3 },
+            { "[\"\xF4\x90\x80\x80\"]", json_parse_errc::invalid_utf8, 2 },
+            { "[\"\xE2\x82\"]", json_parse_errc::invalid_utf8, 2 },
+            { "[\"\x80\"]", json_parse_errc::invalid_utf8, 2 },
+            { "[\"\xFF\"]", json_parse_errc::invalid_utf8, 2 },
+            { "{\"k\x01\":1}", json_parse_errc::control_character, 3 },
+        };
+        for (auto& c : cases)
+            expect_error(c.input, c.code, c.offset);
+
+        for (std::string_view valid : { "\xC2\x80", "\xDF\xBF", "\xE0\xA0\x80", "\xEF\xBF\xBF", "\xF0\x90\x80\x80", "\xF4\x8F\xBF\xBF", "\x7F" }) {
+            event_recorder recorder;
+            parse_json_events("[\"" + std::string{ valid } + "\"]", recorder);
+            gbassert(recorder.strings.size() == 1 && recorder.strings[0] == valid);
         }
     }
 
-    GB_TEST(json, json_events_handler_error_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_surrogate_test)
     {
-        if constexpr (json_parser_axe_enabled) {
-            struct duplicate_rejecter : null_handler
+        auto single_string = [](std::string_view text) {
+            event_recorder recorder;
+            parse_json_events(text, recorder);
+            gbassert(recorder.strings.size() == 1);
+            return recorder.strings[0];
+        };
+        gbassert(single_string(R"(["\ud83d\ude00"])") == "\xF0\x9F\x98\x80");
+        gbassert(single_string(R"(["\uD83D\uDE00"])") == "\xF0\x9F\x98\x80");
+        gbassert(single_string(R"(["\uDBFF\uDFFF"])") == "\xF4\x8F\xBF\xBF");
+        gbassert(single_string(R"(["\ud800\udc00x"])") == "\xF0\x90\x80\x80x");
+        gbassert(single_string(R"(["\u00e9\u20ac"])") == "\xC3\xA9\xE2\x82\xAC");
+
+        expect_error(R"(["\ud800"])", json_parse_errc::lone_surrogate, 2);
+        expect_error(R"(["\ud800x"])", json_parse_errc::lone_surrogate, 2);
+        expect_error(R"(["\ud800\ud800"])", json_parse_errc::lone_surrogate, 2);
+        expect_error(R"(["\ud800\u0041"])", json_parse_errc::lone_surrogate, 2);
+        expect_error(R"(["\udc00"])", json_parse_errc::lone_surrogate, 2);
+        expect_error(R"(["a\ude00"])", json_parse_errc::lone_surrogate, 3);
+        expect_error(R"(["\ud800\n"])", json_parse_errc::lone_surrogate, 2);
+    }
+
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_integer_test)
+    {
+        gbassert(events_of("-9223372036854775808") == "I-9223372036854775808|");
+        gbassert(events_of("9223372036854775807") == "U9223372036854775807|");
+        gbassert(events_of("18446744073709551615") == "U18446744073709551615|");
+        gbassert(events_of("-0") == "I0|");
+        gbassert(events_of("-0.0") == "D-0|");
+        gbassert(events_of("0") == "U0|");
+
+        expect_error("-9223372036854775809", json_parse_errc::number_out_of_range, 0);
+        expect_error("18446744073709551616", json_parse_errc::number_out_of_range, 0);
+        expect_error("[18446744073709551616]", json_parse_errc::number_out_of_range, 1);
+
+        json_parse_options to_double;
+        to_double.big_integers = json_big_integer_policy::to_double;
+        gbassert(events_of("-9223372036854775809", to_double) == "D-9223372036854775808|");   // -2^63, the nearest double
+        gbassert(events_of("18446744073709551616", to_double) == "D18446744073709551616|");   // 2^64, exact
+        gbassert(events_of("18446744073709551615", to_double) == "U18446744073709551615|");
+
+        const std::string huge = "1" + std::string(400, '0');
+        expect_error(huge, json_parse_errc::number_out_of_range, 0, to_double);
+        expect_error(huge, json_parse_errc::number_out_of_range, 0);
+    }
+
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_double_boundary_test)
+    {
+        auto bits_of = [](std::string_view token) {
+            event_recorder recorder;
+            parse_json_events("[" + std::string{ token } + "]", recorder);
+            gbassert(recorder.doubles.size() == 1);
+            return std::bit_cast<std::uint64_t>(recorder.doubles[0]);
+        };
+        constexpr std::uint64_t positive_zero = 0;
+        constexpr std::uint64_t negative_zero = 0x8000'0000'0000'0000ull;
+
+        gbassert(bits_of("4.9406564584124654e-324") == 1);
+        gbassert(bits_of("2.4703282292062328e-324") == 1);
+        gbassert(bits_of("2.4703282292062327e-324") == positive_zero);
+        gbassert(bits_of("-2.4703282292062327e-324") == negative_zero);
+        gbassert(bits_of("1e-400") == positive_zero);
+        gbassert(bits_of("-1e-400") == negative_zero);
+        gbassert(bits_of("123e-10000000") == positive_zero);
+        gbassert(bits_of("1e-99999999999999999999") == positive_zero);
+        {
+            double expected{};
+            const std::string_view token = "1e-320";
+            (void)std::from_chars(token.data(), token.data() + token.size(), expected);
+            gbassert(expected != 0.0);
+            gbassert(bits_of(token) == std::bit_cast<std::uint64_t>(expected));
+        }
+        gbassert(bits_of("1.7976931348623158e308") == std::bit_cast<std::uint64_t>(std::numeric_limits<double>::max()));
+        for (std::string_view overflow : { "1.7976931348623159e308", "1e309", "-1e309", "1e99999999999999999999" })
+            expect_error("[" + std::string{ overflow } + "]", json_parse_errc::number_out_of_range, 1);
+        gbassert(bits_of("0e-400") == positive_zero);
+        gbassert(bits_of("0.0000e99999") == positive_zero);
+
+        // a positive decimal exponent despite a negative explicit exponent: overflow
+        expect_error("[1" + std::string(400, '0') + "e-1]", json_parse_errc::number_out_of_range, 1);
+        // a long fraction with a large exponent: exactly 0.1, no spurious range error
+        gbassert(bits_of("0." + std::string(400, '0') + "1e400") == std::bit_cast<std::uint64_t>(0.1));
+        // a huge negative exponent written with many digits after a long fraction: underflow
+        gbassert(bits_of("0." + std::string(400, '0') + "1e-" + std::string(400, '9')) == positive_zero);
+    }
+
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_depth_test)
+    {
+        const std::string_view leaves[] = { "", "1", "\"s\"", "true", "null" };
+        for (std::size_t limit : { 1, 2, 3, 256 }) {
+            json_parse_options options;
+            options.max_depth = limit;
+            for (auto shape : { nest_shape::arrays, nest_shape::objects, nest_shape::alternating })
+                for (bool siblings : { false, true })
+                    for (auto leaf : leaves) {
+                        auto ok = nest(limit, leaf, shape, siblings);
+                        null_handler handler;
+                        parse_json_events(ok, handler, options);
+                        auto too_deep = nest(limit + 1, leaf, shape, siblings);
+                        expect_error(too_deep, json_parse_errc::depth_exceeded, nth_open(too_deep, limit + 1), options);
+                    }
+        }
+
+        json_parse_options zero;
+        zero.max_depth = 0;
+        gbassert(events_of("1", zero) == "U1|");
+        expect_error("[]", json_parse_errc::depth_exceeded, 0, zero);
+
+        json_parse_options two;
+        two.max_depth = 2;
+        gbassert(events_of("[[1]]", two) == "[|[|U1|]|]|");
+
+        expect_error(std::string(1'000'000, '['), json_parse_errc::depth_exceeded, 256);
+        std::string objects;
+        for (int i = 0; i < 1'000'000; ++i)
+            objects += "{\"a\":";
+        expect_error(objects, json_parse_errc::depth_exceeded, 256 * 5);
+        expect_error(std::string(1'000'000, '[') + "x", json_parse_errc::depth_exceeded, 256);
+    }
+
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_input_cap_test)
+    {
+        const std::string text = R"({"a":[1,2,3],"b":"text"})";
+        json_parse_options options;
+        options.max_input_bytes = text.size();
+        gbassert(!events_of(text, options).empty());
+
+        options.max_input_bytes = text.size() - 1;
+        event_recorder recorder;
+        auto error = catch_parse_error([&] { parse_json_events(text, recorder, options); });
+        gbassert(error.code == json_parse_errc::input_too_large);
+        gbassert(error.offset == text.size() - 1);
+        gbassert(recorder.events.empty());
+    }
+
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_handler_error_test)
+    {
+        struct duplicate_rejecter : null_handler
+        {
+            std::set<std::string, std::less<>> keys;
+            void key(std::string_view value)
             {
-                std::set<std::string, std::less<>> keys;
-                void key(std::string_view value)
-                {
-                    if (!keys.insert(std::string{ value }).second)
-                        throw json_handler_error(json_parse_errc::duplicate_key, "duplicate key");
-                }
-            };
-            {
-                duplicate_rejecter handler;
-                auto error = catch_parse_error([&] { parse_json_events(R"({"a":1,"a":2})", handler); });
-                gbassert(error.code == json_parse_errc::duplicate_key);
-                gbassert(error.offset == 7 && error.line == 1 && error.column == 8);
+                if (!keys.insert(std::string{ value }).second)
+                    throw json_handler_error(json_parse_errc::duplicate_key, "duplicate key");
             }
+        };
+        {
+            duplicate_rejecter handler;
+            auto error = catch_parse_error([&] { parse_json_events(R"({"a":1,"a":2})", handler); });
+            gbassert(error.code == json_parse_errc::duplicate_key);
+            gbassert(error.offset == 7 && error.line == 1 && error.column == 8);
+        }
+        {
+            struct logic_thrower : null_handler
             {
-                struct logic_thrower : null_handler
-                {
-                    void begin_array() { throw std::logic_error("model limit"); }
-                } handler;
-                bool caught = false;
-                try {
-                    parse_json_events(R"({"a":[1]})", handler);
-                }
-                catch (const json_parse_error&) {
-                    caught = false;
-                }
-                catch (const std::logic_error&) {
-                    caught = true;
-                }
-                gbassert(caught);
+                void begin_array() { throw std::logic_error("model limit"); }
+            } handler;
+            bool caught = false;
+            try {
+                parse_json_events(R"({"a":[1]})", handler);
             }
+            catch (const json_parse_error&) {
+                caught = false;
+            }
+            catch (const std::logic_error&) {
+                caught = true;
+            }
+            gbassert(caught);
+        }
+        {
+            struct array_rejecter : null_handler
             {
-                struct array_rejecter : null_handler
-                {
-                    void begin_array() { throw json_handler_error(json_parse_errc::handler_rejected, "no arrays"); }
-                } handler;
-                auto error = catch_parse_error([&] { parse_json_events(R"({"a": [1]})", handler); });
-                gbassert(error.code == json_parse_errc::handler_rejected);
-                gbassert(error.offset == 6);
-            }
+                void begin_array() { throw json_handler_error(json_parse_errc::handler_rejected, "no arrays"); }
+            } handler;
+            auto error = catch_parse_error([&] { parse_json_events(R"({"a": [1]})", handler); });
+            gbassert(error.code == json_parse_errc::handler_rejected);
+            gbassert(error.offset == 6);
         }
     }
 
-    GB_TEST(json, json_events_line_column_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_line_column_test)
     {
-        if constexpr (json_parser_axe_enabled) {
-            auto error = catch_parse_error([] { null_handler handler; parse_json_events("{\n\"a\":1,\n\"\xC3\xA9\" 2}", handler); });
-            gbassert(error.code == json_parse_errc::syntax);
-            gbassert(error.offset == 14);
-            gbassert(error.line == 3 && error.column == 6);
-        }
+        auto error = catch_parse_error([] { null_handler handler; parse_json_events("{\n\"a\":1,\n\"\xC3\xA9\" 2}", handler); });
+        gbassert(error.code == json_parse_errc::syntax);
+        gbassert(error.offset == 14);
+        gbassert(error.line == 3 && error.column == 6);
     }
 
     //-------------------------------------------------------------------------
@@ -825,7 +805,7 @@ namespace
         }
     };
 
-    GB_TEST(json, gbdb_read_rejects_hardened_inputs_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_rejects_hardened_inputs_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             expect_db_error("{\"a\":\"x\x01\"}", json_parse_errc::control_character, 7);
@@ -879,7 +859,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_read_surrogate_pair_stored_as_utf8_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_surrogate_pair_stored_as_utf8_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             auto db = read_json("{\"s\":\"\\ud83d\\ude00\",\"t\":\"\\u00e9\"}");
@@ -888,7 +868,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_read_underflow_and_overflow_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_underflow_and_overflow_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             auto db = read_json(R"({"p":1e-400,"n":-1e-400,"d":2.5})");
@@ -900,7 +880,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_read_unchanged_contracts_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_unchanged_contracts_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             expect_db_error("1", json_parse_errc::syntax, 0);
@@ -927,7 +907,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_stream_caps_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_stream_caps_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             const std::string document = "{\n  \"market\": {\n    \"symbol\": \"AAPL\",\n    \"price\": 193.25\n  },\n  \"note\": \"x\"\n}\n";
@@ -1006,7 +986,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_manifest_cannot_loosen_limits_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_manifest_cannot_loosen_limits_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             const std::string manifest =
@@ -1048,7 +1028,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_defaults_persist_new_read_options_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_defaults_persist_new_read_options_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             json_db_defaults defaults;
@@ -1096,7 +1076,7 @@ namespace
         must_throw<std::logic_error>([&] { (void)write_json(nan); });
     }
 
-    GB_TEST(json, gbdb_json_path_insert_limits_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_json_path_insert_limits_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             const std::string text = R"({"k":1})";
@@ -1521,7 +1501,7 @@ namespace
         return options;
     }
 
-    GB_TEST(json, json_parse_value_basic_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_basic_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto value = parse_json_value(R"({"i":5,"n":-7,"u":18446744073709551615,"z":-0,"d":1.0,"s":"t","b":false,"x":null,"a":[1,[2]],"o":{}})");
@@ -1548,7 +1528,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_parse_value_duplicate_keys_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_duplicate_keys_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto error = catch_parse_error([] { (void)parse_json_value(R"({"a":1,"b":2,"a":3})"); });
@@ -1580,7 +1560,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_parse_value_duplicate_after_nesting_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_duplicate_after_nesting_test)
     {
         if constexpr (json_parser_axe_enabled) {
             // an object with an index (12 members), then a 64-level nested member that reallocates the
@@ -1607,7 +1587,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_try_parse_value_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_try_parse_value_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto ok = try_parse_json_value(R"({"a":[1,2]})");
@@ -1624,7 +1604,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_parse_value_stream_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_stream_test)
     {
         if constexpr (json_parser_axe_enabled) {
             const std::string text = "{\"a\":\n[1,2,3],\n\"b\":\"text\"}";
@@ -1652,7 +1632,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_realistic_shapes_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_realistic_shapes_test)
     {
         if constexpr (json_parser_axe_enabled) {
             const std::string_view message = R"({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"},)"
@@ -1929,7 +1909,7 @@ namespace
         return cases;
     }
 
-    GB_TEST(json, json_conformance_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_conformance_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto cases = conformance_cases();
@@ -2110,7 +2090,7 @@ namespace
         std::mt19937_64 _rng;
     };
 
-    GB_TEST(json, json_round_trip_property_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_round_trip_property_test)
     {
         if constexpr (json_parser_axe_enabled) {
             json_format compact;
@@ -2134,7 +2114,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_format_fixed_point_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_format_fixed_point_test)
     {
         if constexpr (json_parser_axe_enabled) {
             json_format formats[2];
@@ -2221,7 +2201,7 @@ namespace
         return measurement.peak;
     }
 
-    GB_TEST(json, json_stack_peak_gate_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_stack_peak_gate_test)
     {
         if constexpr (json_parser_axe_enabled) {
             constexpr std::size_t gate = 640 * 1024;
@@ -2294,7 +2274,7 @@ namespace
         void begin_object() { record(); }
     };
 
-    GB_TEST(json, json_stack_per_level_slope_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_stack_per_level_slope_test)
     {
         if constexpr (json_parser_axe_enabled) {
             for (auto shape : { nest_shape::arrays, nest_shape::objects }) {
@@ -2383,7 +2363,7 @@ namespace
         gbassert(ratio < 8.0);
     }
 
-    GB_TEST(json, json_performance_smoke_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_performance_smoke_test)
     {
         if constexpr (json_parser_axe_enabled) {
 #if defined(NDEBUG)
@@ -2413,7 +2393,7 @@ namespace
     // review regressions
     //-------------------------------------------------------------------------
 
-    GB_TEST(json, gbdb_json_path_text_cannot_escape_its_path_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_json_path_text_cannot_escape_its_path_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             // text that closes the path wrapper must not insert members outside the path
@@ -2434,7 +2414,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_read_capped_leaves_stream_state_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, json_read_capped_leaves_stream_state_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             // a stream with exceptions enabled reads to its end without throwing, and its state is untouched
