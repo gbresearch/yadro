@@ -304,10 +304,12 @@ namespace
         wait_for([&] {
             return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == 3;
             });
-        const auto returns = gb::yadro::async::detail::threadpool_test_access::park_returns(pool);
+        // A worker can return from an earlier publication after all three have
+        // been counted as parked. The generation tracks new work publication.
+        const auto generation = gb::yadro::async::detail::threadpool_test_access::work_generation(pool);
         std::this_thread::sleep_for(100ms);
         gbassert(gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == 3);
-        gbassert(gb::yadro::async::detail::threadpool_test_access::park_returns(pool) == returns);
+        gbassert(gb::yadro::async::detail::threadpool_test_access::work_generation(pool) == generation);
 
         release.store(true);
         release.notify_one();

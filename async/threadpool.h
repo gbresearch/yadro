@@ -1435,6 +1435,11 @@ namespace gb::yadro::async {
 #ifdef GB_YADRO_THREADPOOL_TESTING
     namespace detail {
         struct threadpool_test_access {
+            [[nodiscard]] static std::uint64_t work_generation(
+                const threadpool& pool) noexcept {
+                return pool.work_generation_.load();
+            }
+
             [[nodiscard]] static std::size_t parked_workers(
                 const threadpool& pool) noexcept {
                 return pool.parked_workers_.load();
