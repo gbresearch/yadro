@@ -92,6 +92,13 @@ namespace
     {
         auto resource = std::filesystem::temp_directory_path()
             / ("yadro_named_resource_lock_test_" + std::to_string(get_process_id()) + ".db");
+#if !defined(GBWINDOWS)
+        // named_resource_lock is implemented on Windows only; elsewhere acquiring a lock throws
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto lock = named_resource_lock::acquire("yadro_test_resource", resource);
+        });
+        gbassert(!is_named_resource_locked("yadro_test_resource", resource));
+#else
         auto lock = named_resource_lock::acquire("yadro_test_resource", resource);
         gbassert(lock);
         gbassert(is_named_resource_locked("yadro_test_resource", resource));
@@ -102,6 +109,7 @@ namespace
 
         lock = {};
         gbassert(!is_named_resource_locked("yadro_test_resource", resource));
+#endif
     }
 
     GB_TEST(util, tuples)
@@ -1114,7 +1122,11 @@ unset multiplot)*";
 
         // std::format, else operator<<, else an enumeration's value, else a placeholder
         expect("[E0] assertion failed: true == false", std::source_location::current(), [] { gbassert_eq(true, false); });
+#if defined(__cpp_lib_format_ranges) // libstdc++ formats ranges from GCC 15
         expect("[E0] assertion failed: [1, 2] == [1, 3]", std::source_location::current(), [] { gbassert_eq(std::vector{ 1, 2 }, std::vector{ 1, 3 }); });
+#else
+        expect("[E0] assertion failed: <unprintable> == <unprintable>", std::source_location::current(), [] { gbassert_eq(std::vector{ 1, 2 }, std::vector{ 1, 3 }); });
+#endif
         expect("[E0] assertion failed: streamed(1) == streamed(2)", std::source_location::current(), [] { gbassert_eq(streamed{ 1 }, streamed{ 2 }); });
         expect("[E0] assertion failed: 1 == 2", std::source_location::current(), [] { gbassert_eq(color::red, color::green); });
         expect("[E0] assertion failed: <unprintable> == <unprintable>", std::source_location::current(), [] { gbassert_eq(opaque{ 1 }, opaque{ 2 }); });

@@ -322,6 +322,7 @@ namespace
     //---------------------------------------------------------------------------------------------
     GB_TEST(simulator, fiber_test, std::launch::async)
     {
+#if defined(GBWINDOWS) // fibers are implemented on Windows only, see simulator/fiber.cpp
         using namespace gb::sim::fibers;
         using namespace std::chrono_literals;
 
@@ -577,5 +578,6 @@ namespace
 19: or2_out=1
 20: in2=1
 )*");
+#endif
     }
 }

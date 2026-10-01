@@ -227,6 +227,8 @@ namespace
                 enum_type::three,
                 std::string("Hello World"),
                 123, 3.14, 2.7f) == 313);
+        // the digest leaves out the unordered_map: its bytes hold its bucket count and follow its iteration order,
+        // both of which the standard library chooses (8 buckets and 1, 2, 3 with MSVC's, 13 and 3, 2, 1 with libstdc++)
         gbassert(
             serialization_md5(std::array<int, 5>{ 5, 4, 3, 2, 1 },
                 q, stk,
@@ -234,12 +236,11 @@ namespace
                 std::vector{ 20, 21, 22, 23, 24, 25 },
                 std::optional<int>{111},
                 std::optional<int>{},
-                std::unordered_map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
                 std::map<int, std::string>{ {1, "one"}, { 2, "two" }, { 3, "three" } },
                 std::tuple{ 30, 50.55, std::string("tuple three") },
                 enum_type::three,
                 std::string("Hello World"),
-                123, 3.14, 2.7f) == "2e44ca1b103d900c0d7d9c08b58e9194");
+                123, 3.14, 2.7f) == "a5d36bf48bc62818e574f3d68a69d628");
 
         // test atomic and chrono::duration serialization
         {

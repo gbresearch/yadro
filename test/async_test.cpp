@@ -38,7 +38,9 @@
 #include "../util/gbtest.h"
 #include "../async/async.h"
 
+#if defined(_MSC_VER)
 #pragma warning(disable: 4996) // testing deprecated functions
+#endif
 
 namespace
 {
@@ -121,9 +123,15 @@ namespace
         std::vector< std::future<void>> void_futures;
         std::vector< std::future<int>> int_futures;
 
-        threadpool tp;
+        // then() waits for a std::shared_future dependency by occupying a worker until it is ready, and each
+        // iteration registers four such waits (f3 and fvoid on one each, f on two). With no more workers than
+        // waits, the waits can take every worker while the tasks they wait for are still queued, which
+        // deadlocks a default-sized pool on a machine with 4 hardware threads; one more worker than waits
+        // always leaves a worker to run them
+        constexpr auto iterations = 10;
+        threadpool tp(4 * iterations + 1);
 
-        for (auto i = 0; i < 10; ++i)
+        for (auto i = 0; i < iterations; ++i)
         {
             auto f1 = tp.submit([]
                 {
