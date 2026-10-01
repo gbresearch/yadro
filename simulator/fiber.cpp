@@ -49,14 +49,14 @@ namespace gb::sim::fibers
     fiber::fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size)
         : _scheduler(scheduler), _call_back(call_back), _finished(false)
     {
-        _win_fiber = ::CreateFiber(stack_size, &fiber_loop, this);
-        util::gbassert(_win_fiber);
+        _native_fiber = ::CreateFiber(stack_size, &fiber_loop, this);
+        util::gbassert(_native_fiber);
     }
     //---------------------------------------------------------------------------------------------
     __declspec(noinline) fiber::~fiber()
     {
-        if(_win_fiber)
-            ::DeleteFiber(_win_fiber);
+        if(_native_fiber)
+            ::DeleteFiber(_native_fiber);
     }
 
     //---------------------------------------------------------------------------------------------
@@ -79,7 +79,7 @@ namespace gb::sim::fibers
     //---------------------------------------------------------------------------------------------
     __declspec(noinline) void fiber::resume()
     {   // call from main fiber
-        ::SwitchToFiber(_win_fiber);
+        ::SwitchToFiber(_native_fiber);
     }
 
     //---------------------------------------------------------------------------------------------
@@ -104,6 +104,219 @@ namespace gb::sim::fibers
         auto f = static_cast<fiber*>(GetFiberData());
         util::gbassert(f, "must be called from a fiber");
         return f;
+    }
+}
+
+#else // POSIX: ucontext
+
+#include <cstddef>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <utility>
+#include <sys/mman.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+#if defined(__SANITIZE_ADDRESS__)
+#define GB_SIM_FIBER_ASAN
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define GB_SIM_FIBER_ASAN
+#endif
+#endif
+
+#ifdef GB_SIM_FIBER_ASAN
+#include <sanitizer/common_interface_defs.h>
+#define GB_SIM_FIBER_NO_ASAN __attribute__((no_sanitize("address")))
+#else
+#define GB_SIM_FIBER_NO_ASAN
+#endif
+
+namespace gb::sim::fibers
+{
+    using namespace gb::yadro;
+
+    namespace
+    {
+        struct stack_bounds
+        {
+            const void* bottom{};
+            std::size_t size{};
+        };
+
+        // what fiber::_native_fiber points to: the fiber's context, and its stack, mapped with a guard page
+        // below it so that an overflow faults instead of overwriting other memory
+        struct native_fiber
+        {
+            native_fiber() = default;
+            native_fiber(const native_fiber&) = delete;
+            auto& operator= (const native_fiber&) = delete;
+            ~native_fiber()
+            {
+                if (mapping != MAP_FAILED)
+                    ::munmap(mapping, mapping_size);
+            }
+
+            fiber* owner{};
+            ucontext_t context{};
+            void* mapping{ MAP_FAILED };    // the guard page and the stack
+            std::size_t mapping_size{};
+            stack_bounds stack;             // the stack without the guard page
+        };
+
+        // the running fiber, nullptr while the scheduler's main context runs, where on Windows GetFiberData()
+        // returns the 0 that the scheduler's ConvertThreadToFiber(0) gave it
+        thread_local native_fiber* running = nullptr;
+
+        auto main_context(void* main_fiber) -> ucontext_t& { return *static_cast<ucontext_t*>(main_fiber); }
+
+#ifdef GB_SIM_FIBER_ASAN
+        // the main context's stack, which AddressSanitizer reports when a switch from it completes
+        thread_local stack_bounds main_stack;
+        thread_local bool leaving_main = false;
+
+        void finish_switch(void* fake_stack)
+        {
+            stack_bounds from;
+            __sanitizer_finish_switch_fiber(fake_stack, &from.bottom, &from.size);
+            if (leaving_main)
+                main_stack = from;
+        }
+#endif
+
+        //-----------------------------------------------------------------------------------------
+        // SwitchToFiber: saves the running context, a fiber's or the main one, and runs the context of `to`,
+        // or `main` if `to` is nullptr; returns when a later switch resumes the saved context. AddressSanitizer
+        // is told that the stack changes, or it would take the frames on the new stack for overflows of the
+        // old one, and it keeps the saved context's fake stack (see leave_finished_fiber) until it resumes
+        void switch_to(native_fiber* to, ucontext_t& main)
+        {
+            auto from = std::exchange(running, to);
+#ifdef GB_SIM_FIBER_ASAN
+            void* fake_stack = nullptr;
+            auto to_stack = to ? to->stack : main_stack;
+            leaving_main = !from;
+            __sanitizer_start_switch_fiber(&fake_stack, to_stack.bottom, to_stack.size);
+#endif
+            auto result = ::swapcontext(from ? &from->context : &main, to ? &to->context : &main);
+#ifdef GB_SIM_FIBER_ASAN
+            finish_switch(fake_stack);
+#endif
+            if (result != 0)
+                running = from;
+            util::gbassert(result == 0, "swapcontext failed");
+        }
+
+        //-----------------------------------------------------------------------------------------
+        // the running fiber, which has finished, switches to `main` for good. AddressSanitizer frees its fake
+        // stack, which holds the frames of instrumented functions while it detects use after return, so this
+        // function is not instrumented: its own frame stays on the real stack, usable after the fake one is gone
+        [[noreturn]] GB_SIM_FIBER_NO_ASAN void leave_finished_fiber(ucontext_t& main)
+        {
+            auto from = running;
+            running = nullptr;
+#ifdef GB_SIM_FIBER_ASAN
+            leaving_main = false;
+            __sanitizer_start_switch_fiber(nullptr, main_stack.bottom, main_stack.size);
+#endif
+            ::swapcontext(&from->context, &main);
+            // a finished fiber was resumed: on Windows its thread exits then, as the fiber's function returns;
+            // here that would exit the process (the context has no uc_link to continue with)
+            std::terminate();
+        }
+
+        //-----------------------------------------------------------------------------------------
+        // a fiber's context starts here when its first resume() switches to it; execute() does not return
+        void fiber_entry()
+        {
+#ifdef GB_SIM_FIBER_ASAN
+            finish_switch(nullptr);
+#endif
+            running->owner->execute();
+        }
+    }
+
+    //---------------------------------------------------------------------------------------------
+    fiber::fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size)
+        : _scheduler(scheduler), _call_back(call_back), _finished(false)
+    {
+        // as for CreateFiber, 0 is the default size; the stack is rounded up to whole pages, counted so
+        // that rounding a size near SIZE_MAX cannot wrap around, and must fit with its guard page
+        auto page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+        auto requested = stack_size ? stack_size : default_stack_size;
+        auto pages = requested / page + (requested % page != 0);
+        util::gbassert(pages < std::numeric_limits<std::size_t>::max() / page, "fiber stack size is too large");
+        auto size = pages * page;
+
+        auto native = std::make_unique<native_fiber>();
+        native->owner = this;
+        native->mapping = ::mmap(nullptr, page + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+        util::gbassert(native->mapping != MAP_FAILED, "fiber stack cannot be allocated");
+        native->mapping_size = page + size;
+        util::gbassert(::mprotect(native->mapping, page, PROT_NONE) == 0, "fiber stack guard page cannot be protected");
+        auto stack = static_cast<std::byte*>(native->mapping) + page;
+        native->stack = { stack, size };
+
+        util::gbassert(::getcontext(&native->context) == 0, "getcontext failed");
+        native->context.uc_stack.ss_sp = stack;
+        native->context.uc_stack.ss_size = size;
+        native->context.uc_link = nullptr;
+        ::makecontext(&native->context, &fiber_entry, 0);
+        _native_fiber = native.release();
+    }
+
+    //---------------------------------------------------------------------------------------------
+    fiber::~fiber()
+    {
+        delete static_cast<native_fiber*>(_native_fiber);
+    }
+
+    //---------------------------------------------------------------------------------------------
+    void fiber::execute()
+    {
+        while (!_finished)
+        {
+            wait();
+            _call_back();
+        }
+        // suspend() for good: a finished fiber is destroyed without being resumed
+        leave_finished_fiber(main_context(_scheduler._main_fiber));
+    }
+
+    //---------------------------------------------------------------------------------------------
+    void fiber::suspend()
+    {   // call from this fiber
+        switch_to(nullptr, main_context(_scheduler._main_fiber));
+    }
+
+    //---------------------------------------------------------------------------------------------
+    void fiber::resume()
+    {   // call from main fiber
+        switch_to(static_cast<native_fiber*>(_native_fiber), main_context(_scheduler._main_fiber));
+    }
+
+    //---------------------------------------------------------------------------------------------
+    void fiber::finish() { _finished = true; }
+
+    //---------------------------------------------------------------------------------------------
+    void fiber::wait(sim_time_t t)
+    {
+        _scheduler.schedule([this] { resume(); }, t);
+        suspend();
+    }
+
+    //---------------------------------------------------------------------------------------------
+    auto fiber::get_sim_time() const -> sim_time_t
+    {
+        return _scheduler.current_time();
+    }
+
+    //---------------------------------------------------------------------------------------------
+    fiber* this_fiber()
+    {
+        util::gbassert(running, "must be called from a fiber");
+        return running->owner;
     }
 }
 

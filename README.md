@@ -46,9 +46,8 @@ A handful of `.cpp` files are compiled into a small static library.
   `-mavx2 -mfma`. Some code paths (for example the FFT and the xxHash128 implementation)
   have AVX2-optimized variants.
 - Windows is the primary platform. Most facilities are portable. The Windows-only parts
-  (named pipes, Windows services, the registry backend, fiber-based simulation, DLL
-  helpers) are guarded by the `GBWINDOWS` macro, which `util/gbwin.h` defines
-  automatically on Windows builds.
+  (named pipes, Windows services, the registry backend, DLL helpers) are guarded by the
+  `GBWINDOWS` macro, which `util/gbwin.h` defines automatically on Windows builds.
 - Each header under `util/`, `container/`, `archive/` and `async/` compiles as the only
   include of a translation unit, and the headers and library sources compile cleanly at
   `/W4 /WX /permissive-` with either the legacy or the conforming (`/Zc:preprocessor`)
@@ -136,10 +135,9 @@ Makefile builds without it (`AXE_INCLUDE=<dir>` points elsewhere), and the JSON 
 tests are reported as DISABLED.
 
 The Windows-only facilities are compiled out on Linux: named pipes, services and the
-registry import (`gbdb_registry.h`) are left out, `named_resource_lock::acquire` throws,
-and the fiber-based simulator's functions have no definitions, so code that calls them
-does not link (the coroutine-based simulator works everywhere). Their tests are reported
-as DISABLED there.
+registry import (`gbdb_registry.h`) are left out, and `named_resource_lock::acquire`
+throws. Their tests are reported as DISABLED there. Both simulator flavors work on Linux,
+the fiber-based one on `ucontext` (see [simulator](#simulator-discrete-event-simulation)).
 
 ---
 
@@ -409,7 +407,13 @@ available in two flavors:
 
 - `gb::sim::coroutines`: processes are C++20 coroutines (`sim_task`) that `co_await`
   events and signals.
-- `gb::sim::fibers`: processes are fibers that call wait functions (Windows fibers).
+- `gb::sim::fibers`: processes are fibers that call wait functions: Win32 fibers on
+  Windows, and `ucontext` contexts on Linux, each on its own stack with a guard page
+  below it. A fiber's `stack_size` defaults to `default_stack_size`: 8 KiB on Windows,
+  where it is only the initial commit and the stack grows up to the executable's reserve
+  (1 MiB by default), and 64 KiB on Linux, where the stack has exactly that size and
+  overflowing it faults on the guard page. Builds with AddressSanitizer are supported: the
+  stack switches are annotated for it.
 
 Building blocks:
 

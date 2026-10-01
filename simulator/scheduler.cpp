@@ -38,4 +38,17 @@ gb::sim::fibers::scheduler_t::~scheduler_t()
 { 
     ::ConvertFiberToThread(); 
 }
+#else
+#include <ucontext.h>
+
+// in place of the thread's fiber that ConvertThreadToFiber makes, the main context: resume() saves the
+// scheduler's context there, and suspend() switches back to it (see fiber.cpp)
+gb::sim::fibers::scheduler_t::scheduler_t() : _main_fiber{ new ucontext_t{} }
+{
+}
+
+gb::sim::fibers::scheduler_t::~scheduler_t()
+{
+    delete static_cast<ucontext_t*>(_main_fiber);
+}
 #endif

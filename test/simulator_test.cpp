@@ -29,19 +29,13 @@
 #include "../simulator/simulator.h"
 #include <sstream>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 namespace
 {
     using namespace gb::yadro::util;
     using namespace gb::sim;
-
-    // fibers are implemented on Windows only, see simulator/fiber.cpp; elsewhere fiber_test is reported as disabled
-#if defined(GBWINDOWS)
-    constexpr bool fibers_implemented = true;
-#else
-    constexpr bool fibers_implemented = false;
-#endif
 
     void print_signal(auto&& s, const std::string& name, auto& scheduler, std::ostream& os)
     {
@@ -327,9 +321,8 @@ namespace
     }
 
     //---------------------------------------------------------------------------------------------
-    GB_TEST_IF(fibers_implemented, simulator, fiber_test, std::launch::async)
+    GB_TEST(simulator, fiber_test, std::launch::async)
     {
-#if defined(GBWINDOWS) // without fibers the body would not link
         using namespace gb::sim::fibers;
         using namespace std::chrono_literals;
 
@@ -585,6 +578,22 @@ namespace
 19: or2_out=1
 20: in2=1
 )*");
-#endif
+    }
+
+    //---------------------------------------------------------------------------------------------
+    GB_TEST(simulator, fiber_stack_size_test)
+    {
+        using namespace gb::sim::fibers;
+
+        scheduler_t sch;
+        // a stack that cannot be allocated fails, also when rounding its size up to whole pages would wrap around
+        for (auto size : { std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max() / 2 })
+            must_throw([&] { fiber f(sch, [] {}, size); });
+
+        // and the scheduler still runs fibers
+        auto resumed_at = sim_time_t{};
+        sch.once([&] { wait(sim_time_t{ 1 }); resumed_at = get_sim_time(); });
+        sch.run();
+        gbassert(resumed_at == 1);
     }
 }

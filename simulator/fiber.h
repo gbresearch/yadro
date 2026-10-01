@@ -34,11 +34,19 @@ namespace gb::sim::fibers
     struct scheduler_t;
     using sim_time_t = std::uint64_t;
 
+    // Windows commits this much of a fiber's stack up front and grows it on demand up to the executable's
+    // stack reserve (1 MiB by default); elsewhere the stack is exactly this size, so it is larger there
+#if defined(_WIN32)
+    inline constexpr size_t default_stack_size = 8192;
+#else
+    inline constexpr size_t default_stack_size = 65536;
+#endif
+
     struct fiber {
         // fibers are neither copiable nor movable
         fiber(const fiber&) = delete;
         auto& operator= (const fiber&) = delete;
-        fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size = 8192);
+        fiber(scheduler_t& scheduler, std::function<void()> call_back, size_t stack_size = default_stack_size);
         ~fiber();
         void suspend();
         void resume();
@@ -50,7 +58,7 @@ namespace gb::sim::fibers
         scheduler_t& _scheduler;
         std::function<void()> _call_back;
         bool _finished{ false };
-        void* _win_fiber;
+        void* _native_fiber; // Windows: the fiber's address; elsewhere: its context and stack (see fiber.cpp)
     };
 
     //---------------------------------------------------------------------------------------------
