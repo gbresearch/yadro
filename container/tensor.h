@@ -73,7 +73,7 @@ namespace gb::yadro::container
                 return i + D * static_indexer_t<Ds...>{}(ds...);
         }
 
-        auto operator== (const static_indexer_t& other) const { return true; }
+        auto operator== (const static_indexer_t&) const { return true; }
         static consteval auto size() { return (D*...*Ds); }
         static consteval auto cardinality() { return sizeof ...(Ds) + 1; }
         
@@ -89,7 +89,7 @@ namespace gb::yadro::container
                 return D;
         }
 
-        auto serialize(auto&& archive)
+        auto serialize(auto&&)
         {
         }
     };

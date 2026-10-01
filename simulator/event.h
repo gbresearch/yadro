@@ -195,7 +195,7 @@ namespace gb::sim::coroutines
         void bind_once(auto&& ...) {}
         void bind_cancellable(auto&&...) {}
         void cancel_wait(auto&&...) {}
-        void await_suspend(auto h) {}
+        void await_suspend(auto) {}
         void await_resume() {}
         auto await_ready() { return true; }
     };

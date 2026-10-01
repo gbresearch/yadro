@@ -35,13 +35,6 @@ namespace gb::sim::coroutines
     struct sim_task;
 
     //---------------------------------------------------------------------------------------------
-    inline sim_task forever(auto&& coro, auto&&... args)
-    {
-        for (;;)
-            co_await coro(decltype(args)(args)...);
-    }
-
-    //---------------------------------------------------------------------------------------------
     struct promise
     {
         struct {
@@ -76,7 +69,7 @@ namespace gb::sim::coroutines
     //---------------------------------------------------------------------------------------------
     struct sim_task
     {
-        using promise_type = promise;
+        using promise_type = coroutines::promise; // qualified: the member below hides the name promise
         promise_type& promise;
 
         ~sim_task() { 
@@ -93,5 +86,13 @@ namespace gb::sim::coroutines
     };
 
     inline sim_task promise::get_return_object() { return { *this }; }
+
+    //---------------------------------------------------------------------------------------------
+    // defined after sim_task, since a coroutine's return type must be complete at its definition
+    inline sim_task forever(auto&& coro, auto&&... args)
+    {
+        for (;;)
+            co_await coro(decltype(args)(args)...);
+    }
 
 }

@@ -1131,8 +1131,8 @@ namespace gb::yadro::container
         struct frame
         {
             json_value container;
-            std::string pending_key;
-            std::unique_ptr<key_index> index;
+            std::string pending_key{};
+            std::unique_ptr<key_index> index{};
             std::size_t overwrite = no_position;    // keep_last: member position to replace
             bool discard_next = false;              // keep_first: drop the next value
         };

@@ -110,8 +110,7 @@ namespace gb::yadro::util
         using namespace std::chrono;
         constexpr int common_year[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
         constexpr int leap_year[] = { 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 };
-        auto normalize = [](year_month_day ymd) {ymd += months{ 0 }; return year_month_day{ sys_days{ymd} }; };
-        auto is_leap = y % 4 == 0 && y % 100 != 0 || y % 400 == 0;
+        auto is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
         auto doy = (is_leap ? leap_year[m - 1] : common_year[m - 1]) + d;
         auto ymd = year(y) / m / d;
         auto dow = weekday(ymd).iso_encoding();

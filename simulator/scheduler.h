@@ -93,8 +93,13 @@ namespace gb::sim
 
     private:
         using pq_rec = std::tuple<std::tuple<sim_time_t, std::uint64_t>, std::function<void()>>;
-        using pqueue = std::priority_queue < pq_rec, std::vector<pq_rec>,
-            decltype([](auto&& p1, auto&& p2) { return std::get<0>(p1) > std::get<0>(p2); }) > ;
+        // a named comparator: a lambda's closure type here would have internal linkage, giving the class a
+        // different member type in each translation unit
+        struct pq_later
+        {
+            bool operator()(const pq_rec& p1, const pq_rec& p2) const { return std::get<0>(p1) > std::get<0>(p2); }
+        };
+        using pqueue = std::priority_queue<pq_rec, std::vector<pq_rec>, pq_later>;
 
         pqueue _pq;
         sim_time_t _current_time{};

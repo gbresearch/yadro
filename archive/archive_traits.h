@@ -52,8 +52,8 @@ namespace gb::yadro::archive {
 
     // achive stream must be either readable or writable, but not both (e.g. iostreams are not supported)
     template<class S>
-    concept archive_stream = readable_stream<S> && !writable_stream<S> ||
-        writable_stream<S> && !readable_stream<S>;
+    concept archive_stream = (readable_stream<S> && !writable_stream<S>) ||
+        (writable_stream<S> && !readable_stream<S>);
 
     // ── Archives ──────────────────────────────────────────────────────────────
     // readable and writable archives can't be const

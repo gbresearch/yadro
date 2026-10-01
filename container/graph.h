@@ -305,13 +305,13 @@ namespace gb::yadro::container
         }
 
         template<class Pred>
-        auto find_depth_first(index_t from_node, Pred pred) const
+        auto find_depth_first(index_t /*from_node*/, Pred /*pred*/) const
         {
 
         }
 
         template<class Pred>
-        auto find_breadth_first(index_t from_node, Pred pred) const
+        auto find_breadth_first(index_t /*from_node*/, Pred /*pred*/) const
         {
 
         }

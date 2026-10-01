@@ -73,11 +73,11 @@ namespace gb::yadro::algorithm
         std::pair<double, double> mean_pair_;
         std::pair<double, double> stddev_pair_;
 
-        static auto calc_mean_margin(double stddev, double confidence, int size) {
+        static double calc_mean_margin(double stddev, double confidence, int size) {
             return t_critical(confidence, size - 1) * stddev / std::sqrt(size); // margin of error for the mean
         }
 
-        static auto calc_stddev_margin(double stddev, double confidence, int size) {
+        static double calc_stddev_margin(double stddev, double confidence, int size) {
             auto df = size - 1;
             auto alpha = 1.0 - confidence; // e.g., 0.05 for 95%
 

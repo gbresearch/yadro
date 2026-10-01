@@ -46,6 +46,13 @@
 #error "msvc++ bug workaround see https://developercommunity.visualstudio.com/t/structured-binding-and-concept-fail-to-c/11033206"
 #endif
 
+// the entries below align to std::hardware_destructive_interference_size, which GCC warns about in a header
+// because its value can vary with -mtune; following the target's cache line is the point
+#if defined(__GNUC__) && !defined(__clang__)
+#   pragma GCC diagnostic push
+#   pragma GCC diagnostic ignored "-Winterference-size"
+#endif
+
 namespace gb::yadro::container
 {
     // Hash concept
@@ -1000,3 +1007,7 @@ namespace gb::yadro::container
             }
     };
 }
+
+#if defined(__GNUC__) && !defined(__clang__)
+#   pragma GCC diagnostic pop
+#endif

@@ -86,7 +86,7 @@ namespace gb::yadro::util
             return *this;
         }
 
-        [[nodiscard]] static named_resource_lock acquire(std::string_view scope, const std::filesystem::path& resource)
+        [[nodiscard]] static named_resource_lock acquire([[maybe_unused]] std::string_view scope, const std::filesystem::path& resource)
         {
             if (resource.empty())
                 return {};
@@ -132,7 +132,7 @@ namespace gb::yadro::util
         void* _handle = nullptr;
     };
 
-    [[nodiscard]] inline bool is_named_resource_locked(std::string_view scope, const std::filesystem::path& resource)
+    [[nodiscard]] inline bool is_named_resource_locked([[maybe_unused]] std::string_view scope, const std::filesystem::path& resource)
     {
         if (resource.empty())
             return false;

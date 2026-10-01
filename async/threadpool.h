@@ -658,8 +658,15 @@ namespace gb::yadro::async {
     class threadpool final {
     public:
 #ifdef __cpp_lib_hardware_interference_size
+#if defined(__GNUC__) && !defined(__clang__)
+#   pragma GCC diagnostic push
+#   pragma GCC diagnostic ignored "-Winterference-size" // its value can vary with -mtune; following the target is the point
+#endif
         static constexpr std::size_t kCacheLineSize =
             std::hardware_destructive_interference_size;
+#if defined(__GNUC__) && !defined(__clang__)
+#   pragma GCC diagnostic pop
+#endif
 #else
         static constexpr std::size_t kCacheLineSize = 64;
 #endif
@@ -675,8 +682,8 @@ namespace gb::yadro::async {
             std::size_t  num_threads = std::thread::hardware_concurrency(),
             IdleCallback on_idle = {})
             : stop_{ false }
-            , state_{ PoolState::Running }
             , tasks_in_system_{ 0 }
+            , state_{ PoolState::Running }
         {
             idle_.on_idle = std::move(on_idle);
 

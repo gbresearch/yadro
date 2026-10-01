@@ -29,6 +29,8 @@
 #pragma once
 
 #include <vector>
+#include <deque>
+#include <mutex>
 #include <queue>
 #include <stack>
 #include <functional>
@@ -241,7 +243,7 @@ namespace gb::yadro::async
         }
 
         std::atomic<size_t> global_epoch_;
-        std::vector<std::atomic<size_t>> thread_epochs_;
+        std::deque<std::atomic<size_t>> thread_epochs_; // deque: growing it moves no element, and atomics are not movable
         std::vector<retired_node> retired_;
         std::mutex mutex_;
     };

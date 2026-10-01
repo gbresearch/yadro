@@ -218,8 +218,9 @@ namespace gb::yadro::archive
         }
     };
 
-    // deduction guide for archive class template
-    template<archive_stream Stream, archive_format_t Fmt>
+    // deduction guide for archive class template, used through its aliases, e.g. bin_archive{ stream },
+    // which supply Fmt; Fmt has a default because every guide parameter must be deducible or defaulted
+    template<archive_stream Stream, archive_format_t Fmt = archive_format_t::custom>
     archive(Stream&&)->archive<Stream, Fmt>;
     
     //---------------------------------------------------------------------
@@ -363,9 +364,6 @@ namespace gb::yadro::archive
             a(static_cast<As>(t));
         }
     };
-
-    template<std::default_initializable As, class T>
-    serialize_as_t(T&& t)->serialize_as_t<As, T>;
 
     template<std::default_initializable As, class T>
     [[nodiscard]] auto serialize_as(T&& t) {
