@@ -33,7 +33,9 @@
 #include <stdexcept>
 #include <chrono>
 
+#if defined(_MSC_VER)
 #pragma comment(lib, "yadro")
+#endif
 
 int main(int argc, char* argv[])
 {

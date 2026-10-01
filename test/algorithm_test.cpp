@@ -1484,9 +1484,17 @@ namespace
 
         // Wall-clock runs seed their RNG from std::random_device and depend on machine
         // speed, so the target check below failed intermittently. Seeded, budget-driven
-        // runs are reproducible; seed 20 reaches the target on x64 and Win32 after 15 of
-        // the 1'000 generations the second run allows.
+        // runs are reproducible for one compiler and standard library, but differ between
+        // them: the random distributions are the standard library's own algorithms, and
+        // fused multiply-adds (GCC contracts by default when optimizing) change rounding.
+        // Seed 20 reaches the target with MSVC on x64 and Win32 after 15 of the 1'000
+        // generations the second run allows; seed 22 reaches it with GCC and Clang on
+        // libstdc++ after 30 to 33, with and without -ffp-contract=off.
+#if defined(_MSC_VER)
         constexpr std::uint64_t seed = 20;
+#else
+        constexpr std::uint64_t seed = 22;
+#endif
 
         // first optimization run to populate history and test multithreading;
         // its 10-generation budget stops it short of the target

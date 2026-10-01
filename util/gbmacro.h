@@ -43,5 +43,5 @@
     {\
         auto str = std::format("[TIMER] {}:{}, time: {} {}, count: {}\n", #name, __LINE__, duration.count(), \
             gb::yadro::util::get_duration_suffix<std::chrono::time_unit>(), count);\
-        printf(str.c_str());\
+        printf("%s", str.c_str());\
     }).make_scope_timer()}

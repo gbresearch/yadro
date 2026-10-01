@@ -62,7 +62,6 @@ namespace gb::yadro::container
     //---------------------------------------------------------------------------------------------
     inline auto& swap_rows(matrix_c auto& m, std::size_t row1, std::size_t row2)
     {
-        using traits = matrix_traits<decltype(m)>;
         for (std::size_t col = 0; col < m.columns(); ++col)
             std::swap(m(row1, col), m(row2, col));
         return m;
@@ -78,7 +77,6 @@ namespace gb::yadro::container
     //---------------------------------------------------------------------------------------------
     inline auto& swap_cols(matrix_c auto& m, std::size_t col1, std::size_t col2)
     {
-        using traits = matrix_traits<decltype(m)>;
         for (std::size_t row = 0; row < m.rows(); ++row)
             std::swap(m(row, col1), m(row, col2));
         return m;

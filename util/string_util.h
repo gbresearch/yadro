@@ -28,7 +28,12 @@
 
 #pragma once
 #include "gbwin.h"
+#include <array>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <string_view>
 #include <span>
 #include <ranges>
 #include <vector>
@@ -57,7 +62,7 @@ namespace gb::yadro::util
     // --- Implementation ---
 
     template <utf8_string T>
-    utf16_return_type_t<T> utf16_from_utf8(const T& utf8)
+    utf16_return_type_t<T> utf16_from_utf8([[maybe_unused]] const T& utf8)
     {
 #ifdef GBWINDOWS
         if (utf8.empty()) return {};
@@ -128,7 +133,7 @@ namespace gb::yadro::util
     // --- Implementation ---
 
     template <utf16_string T>
-    utf8_return_type_t<T> utf8_from_utf16(const T& utf16)
+    utf8_return_type_t<T> utf8_from_utf16([[maybe_unused]] const T& utf16)
     {
 #ifdef GBWINDOWS
         if (utf16.empty()) return {};
@@ -186,7 +191,7 @@ namespace gb::yadro::util
     template<class CharT>
     inline auto wrap_cmd(int argc, const CharT* argv[])
     {
-        return std::vector<std::basic_string<CharT>>(std::from_range, std::span(argv, argc));
+        return std::vector<std::basic_string<CharT>>(argv, argv + argc);
     }
     //-------------------------------------------------------------------------
     // converting wide string to string by casting wchar to char

@@ -67,6 +67,13 @@ namespace
 {
     using namespace gb::yadro::util;
 
+    // tests of Windows-only facilities run on Windows, and elsewhere are reported as disabled
+#if defined(GBWINDOWS)
+    constexpr bool on_windows = true;
+#else
+    constexpr bool on_windows = false;
+#endif
+
 #if defined(GBWINDOWS)
     static_assert(noexcept(std::declval<winpipe_client_t&>().disconnect()));
     static_assert(noexcept(std::declval<winpipe_client_t&>().shutdown()));
@@ -92,6 +99,13 @@ namespace
     {
         auto resource = std::filesystem::temp_directory_path()
             / ("yadro_named_resource_lock_test_" + std::to_string(get_process_id()) + ".db");
+#if !defined(GBWINDOWS)
+        // named_resource_lock is implemented on Windows only; elsewhere acquiring a lock throws
+        must_throw<std::runtime_error>([&] {
+            [[maybe_unused]] auto lock = named_resource_lock::acquire("yadro_test_resource", resource);
+        });
+        gbassert(!is_named_resource_locked("yadro_test_resource", resource));
+#else
         auto lock = named_resource_lock::acquire("yadro_test_resource", resource);
         gbassert(lock);
         gbassert(is_named_resource_locked("yadro_test_resource", resource));
@@ -102,6 +116,7 @@ namespace
 
         lock = {};
         gbassert(!is_named_resource_locked("yadro_test_resource", resource));
+#endif
     }
 
     GB_TEST(util, tuples)
@@ -393,7 +408,7 @@ namespace
         gbassert(h_vec == h_raw);
     }
 
-    GB_TEST(util, gnuplot)
+    GB_TEST_IF(on_windows, util, gnuplot)
     {
 #if defined(GBWINDOWS)
         auto golden = R"*(set multiplot layout 3,2 columnsfirst
@@ -1114,7 +1129,11 @@ unset multiplot)*";
 
         // std::format, else operator<<, else an enumeration's value, else a placeholder
         expect("[E0] assertion failed: true == false", std::source_location::current(), [] { gbassert_eq(true, false); });
+#if defined(__cpp_lib_format_ranges) // libstdc++ formats ranges from GCC 15
         expect("[E0] assertion failed: [1, 2] == [1, 3]", std::source_location::current(), [] { gbassert_eq(std::vector{ 1, 2 }, std::vector{ 1, 3 }); });
+#else
+        expect("[E0] assertion failed: <unprintable> == <unprintable>", std::source_location::current(), [] { gbassert_eq(std::vector{ 1, 2 }, std::vector{ 1, 3 }); });
+#endif
         expect("[E0] assertion failed: streamed(1) == streamed(2)", std::source_location::current(), [] { gbassert_eq(streamed{ 1 }, streamed{ 2 }); });
         expect("[E0] assertion failed: 1 == 2", std::source_location::current(), [] { gbassert_eq(color::red, color::green); });
         expect("[E0] assertion failed: <unprintable> == <unprintable>", std::source_location::current(), [] { gbassert_eq(opaque{ 1 }, opaque{ 2 }); });
@@ -1152,7 +1171,7 @@ unset multiplot)*";
         gbassert(allocations == 0, std::to_string(allocations) + " heap allocations");
     }
 
-    GB_TEST(util, gbwin_test)
+    GB_TEST_IF(on_windows, util, gbwin_test)
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono;
@@ -1233,7 +1252,7 @@ unset multiplot)*";
     }
 #endif
 
-    GB_TEST(util, global_mutex_abandoned_lock_acquires_and_releases)
+    GB_TEST_IF(on_windows, util, global_mutex_abandoned_lock_acquires_and_releases)
     {
 #if defined(GBWINDOWS)
         const auto name = "yadro_abandoned_lock_" + get_uuid_string();
@@ -1248,7 +1267,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, global_mutex_abandoned_try_lock_acquires_and_releases)
+    GB_TEST_IF(on_windows, util, global_mutex_abandoned_try_lock_acquires_and_releases)
     {
 #if defined(GBWINDOWS)
         const auto name = "yadro_abandoned_try_lock_" + get_uuid_string();
@@ -1260,7 +1279,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, global_mutex_abandoned_try_lock_for_acquires_and_releases)
+    GB_TEST_IF(on_windows, util, global_mutex_abandoned_try_lock_for_acquires_and_releases)
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
@@ -1284,7 +1303,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, global_mutex_test)
+    GB_TEST_IF(on_windows, util, global_mutex_test)
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
@@ -1647,7 +1666,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_uses_byte_mode)
+    GB_TEST_IF(on_windows, util, win_pipe_uses_byte_mode)
     {
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
@@ -1669,7 +1688,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_named_missing_function_reports_name)
+    GB_TEST_IF(on_windows, util, win_pipe_named_missing_function_reports_name)
     {
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
@@ -1692,7 +1711,7 @@ unset multiplot)*";
     // Persistent-connection regression: one client issues many sequential named requests
     // (exercising the per-connection event/buffer reuse and the coalesced multi-frame request
     // write), including payloads larger than pipe_chunk_size so framing is proven intact.
-    GB_TEST(util, win_pipe_many_sequential_requests_on_one_connection)
+    GB_TEST_IF(on_windows, util, win_pipe_many_sequential_requests_on_one_connection)
     {
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
@@ -1727,7 +1746,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_mutex_uses_full_pipe_name)
+    GB_TEST_IF(on_windows, util, win_pipe_mutex_uses_full_pipe_name)
     {
 #if defined(GBWINDOWS)
         auto server1 = std::async(std::launch::async, []
@@ -1757,7 +1776,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_rejects_oversized_frame)
+    GB_TEST_IF(on_windows, util, win_pipe_rejects_oversized_frame)
     {
 #if defined(GBWINDOWS)
         validate_pipe_frame_size(max_pipe_frame_size);
@@ -1765,7 +1784,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_error_uses_utf8_pipe_name)
+    GB_TEST_IF(on_windows, util, win_pipe_client_error_uses_utf8_pipe_name)
     {
 #if defined(GBWINDOWS)
         const std::wstring pipename = unique_test_pipe_name(L"unicode_\u0436");
@@ -1782,7 +1801,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_server_error_uses_utf8_pipe_name)
+    GB_TEST_IF(on_windows, util, win_pipe_server_error_uses_utf8_pipe_name)
     {
 #if defined(GBWINDOWS)
         const std::wstring pipename = L"\\\\.\\not_pipe\\yadro\\unicode_\u0436";
@@ -1799,7 +1818,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_stream_errors_describe_api_failure)
+    GB_TEST_IF(on_windows, util, win_pipe_stream_errors_describe_api_failure)
     {
 #if defined(GBWINDOWS)
         char value{};
@@ -1826,7 +1845,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_unique_handle_self_reset_keeps_handle_open)
+    GB_TEST_IF(on_windows, util, win_pipe_unique_handle_self_reset_keeps_handle_open)
     {
 #if defined(GBWINDOWS)
         unique_win_handle event{ CreateEvent(nullptr, TRUE, FALSE, nullptr) };
@@ -1845,7 +1864,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_move_preserves_send_receive_logging)
+    GB_TEST_IF(on_windows, util, win_pipe_move_preserves_send_receive_logging)
     {
 #if defined(GBWINDOWS)
         std::ostringstream log_output;
@@ -1870,7 +1889,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_accept_can_be_cancelled_without_client)
+    GB_TEST_IF(on_windows, util, win_pipe_accept_can_be_cancelled_without_client)
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
@@ -2018,7 +2037,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_read_times_out_with_idle_peer)
+    GB_TEST_IF(on_windows, util, win_pipe_read_times_out_with_idle_peer)
     {
 #if defined(GBWINDOWS)
         using namespace std::chrono_literals;
@@ -2063,14 +2082,14 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_pending_limit_leaves_accept_instance)
+    GB_TEST_IF(on_windows, util, win_pipe_pending_limit_leaves_accept_instance)
     {
 #if defined(GBWINDOWS)
         gbassert(max_pending_pipe_connections <= 254);
 #endif
     }
 
-    GB_TEST(util, win_pipe_named_exception_response_keeps_connection_usable)
+    GB_TEST_IF(on_windows, util, win_pipe_named_exception_response_keeps_connection_usable)
     {
 #if defined(GBWINDOWS)
         auto server = std::async(std::launch::async, []
@@ -2213,7 +2232,7 @@ unset multiplot)*";
     };
 #endif
 
-    GB_TEST(util, win_pipe_default_dacl_admits_only_process_user_and_system)
+    GB_TEST_IF(on_windows, util, win_pipe_default_dacl_admits_only_process_user_and_system)
     {
 #if defined(GBWINDOWS)
         const auto user_sid = current_process_user_sid();
@@ -2234,7 +2253,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_server_instances_carry_default_security)
+    GB_TEST_IF(on_windows, util, win_pipe_server_instances_carry_default_security)
     {
 #if defined(GBWINDOWS)
         // the DACL and reject-remote flag reach the instance a real client talks to, for both the
@@ -2276,7 +2295,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_rejects_remote_clients_unless_allowed)
+    GB_TEST_IF(on_windows, util, win_pipe_rejects_remote_clients_unless_allowed)
     {
 #if defined(GBWINDOWS)
         // GetNamedPipeInfo reports PIPE_REJECT_REMOTE_CLIENTS in its flags (observed on Windows 10
@@ -2299,7 +2318,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_applies_caller_sddl)
+    GB_TEST_IF(on_windows, util, win_pipe_applies_caller_sddl)
     {
 #if defined(GBWINDOWS)
         const auto user_sid = current_process_user_sid();
@@ -2325,7 +2344,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_applies_caller_security_attributes)
+    GB_TEST_IF(on_windows, util, win_pipe_applies_caller_security_attributes)
     {
 #if defined(GBWINDOWS)
         const auto user_sid = current_process_user_sid();
@@ -2348,7 +2367,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_first_instance_refuses_squatted_name)
+    GB_TEST_IF(on_windows, util, win_pipe_first_instance_refuses_squatted_name)
     {
 #if defined(GBWINDOWS)
         const auto pipename = unique_test_pipe_name(L"squatted");
@@ -2376,7 +2395,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_listener_keeps_name_between_connections)
+    GB_TEST_IF(on_windows, util, win_pipe_listener_keeps_name_between_connections)
     {
 #if defined(GBWINDOWS)
         const auto pipename = unique_test_pipe_name(L"keep_name");
@@ -2420,7 +2439,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_serves_client_that_closed_before_accept)
+    GB_TEST_IF(on_windows, util, win_pipe_serves_client_that_closed_before_accept)
     {
 #if defined(GBWINDOWS)
         // A client can connect, send its whole request and close before the server accepts it, e.g.
@@ -2449,7 +2468,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_cancelled_accept_skips_client_that_closed_before_accept)
+    GB_TEST_IF(on_windows, util, win_pipe_cancelled_accept_skips_client_that_closed_before_accept)
     {
 #if defined(GBWINDOWS)
         // once the server is shutting down it takes no more clients, even one that left a request
@@ -2465,7 +2484,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_permits_identification_only)
+    GB_TEST_IF(on_windows, util, win_pipe_client_permits_identification_only)
     {
 #if defined(GBWINDOWS)
         // a server (or a process squatting on the name) can identify the client but not act as it
@@ -2500,7 +2519,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_can_opt_into_impersonation)
+    GB_TEST_IF(on_windows, util, win_pipe_client_can_opt_into_impersonation)
     {
 #if defined(GBWINDOWS)
         const auto pipename = unique_test_pipe_name(L"client_impersonation");
@@ -2534,7 +2553,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_ace_admits_use_but_not_instances)
+    GB_TEST_IF(on_windows, util, win_pipe_client_ace_admits_use_but_not_instances)
     {
 #if defined(GBWINDOWS)
         gbassert(pipe_client_access == 0x12018bu);
@@ -2573,7 +2592,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_verifies_same_user_server)
+    GB_TEST_IF(on_windows, util, win_pipe_client_verifies_same_user_server)
     {
 #if defined(GBWINDOWS)
         // the test server runs in this process, so it matches this process's user and integrity
@@ -2601,7 +2620,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_rejects_unexpected_server)
+    GB_TEST_IF(on_windows, util, win_pipe_client_rejects_unexpected_server)
     {
 #if defined(GBWINDOWS)
         const auto connect_error = [](const std::wstring& pipename, const pipe_client_options& options)
@@ -2652,7 +2671,7 @@ unset multiplot)*";
 #endif
     }
 
-    GB_TEST(util, win_pipe_client_checks_the_server_process_not_its_own)
+    GB_TEST_IF(on_windows, util, win_pipe_client_checks_the_server_process_not_its_own)
     {
 #if defined(GBWINDOWS)
         // The server is a child process of this user at low integrity, so the outcome below

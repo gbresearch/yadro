@@ -32,6 +32,9 @@
 #include <algorithm>
 #include <ranges>
 #include <concepts>
+#include <functional>
+#include <tuple>
+#include <array>
 #include <immintrin.h>
 
 /**
@@ -145,7 +148,7 @@ namespace gb::yadro::container
         static constexpr auto epsilon() { return Eps; }
 
         objective_t() = default;
-        objective_t(Proj p, Dir d) : proj(std::move(p)) {}
+        objective_t(Proj p, Dir) : proj(std::move(p)) {}
 
         using Projection = Proj;
         using Direction = Dir;
@@ -273,7 +276,7 @@ namespace gb::yadro::container
             if (data_.size() <= n) return;
 
             using Dir = typename Dominates::template Direction<0>;
-            auto& proj = dominates_.get_proj<0>();
+            auto& proj = dominates_.template get_proj<0>();
 
             std::nth_element(data_.begin(), data_.begin() + n, data_.end(),
                 [&](const T& a, const T& b) {
@@ -475,7 +478,7 @@ namespace gb::yadro::container
 
         public:
             pareto_set() = default;
-            explicit pareto_set(auto&&... args) : dom(decltype(args)(args)) {}
+            explicit pareto_set(auto&&... args) : dom(decltype(args)(args)...) {}
 
             auto& get_dominates() const noexcept { return dom; }
 
@@ -523,7 +526,7 @@ namespace gb::yadro::container
             void resize(std::size_t n) noexcept
             {
                 if (data_.size() <= n) return;
-                auto& proj = dom.get_proj<0>();
+                auto& proj = dom.template get_proj<0>();
                 using Dir = typename Dominates::template Direction<0>;
 
                 std::nth_element(data_.begin(), data_.begin() + n, data_.end(),
@@ -577,10 +580,10 @@ namespace gb::yadro::container
             vec4 project_stats(const S& s)
             {
                 return vec4{
-                    dom.get_proj<0>(s),
-                    dom.get_proj<1>(s),
-                    dom.get_proj<2>(s),
-                    dom.get_proj<3>(s),
+                    dom.template get_proj<0>(s),
+                    dom.template get_proj<1>(s),
+                    dom.template get_proj<2>(s),
+                    dom.template get_proj<3>(s),
                 };
             }
         };

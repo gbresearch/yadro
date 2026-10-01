@@ -8,8 +8,8 @@
       - one per header under util\, container\, archive\ and async\, containing only #include <dir/header.h>. The
         test project includes everything through include\yadro.h, so a header that relies on another header having
         been included first is invisible there;
-      - a GB_TEST with and without its optional policy argument, since the macro must expand to a valid call under
-        both preprocessors;
+      - GB_TEST and GB_TEST_IF with and without their optional policy argument, since the macros must expand to a
+        valid call under both preprocessors;
       - each library .cpp under algorithm\, container\, simulator\ and util\.
 
     Flags: /std:c++latest /permissive- /W4 /WX /utf-8 /EHsc /Zc:__cplusplus /DUNICODE /D_UNICODE
@@ -83,7 +83,9 @@ foreach ($header in Get-RelativeFiles 'util', 'container', 'archive', 'async' '*
 }
 if ($units.Contains('util/gbtest.h')) {
     $units['GB_TEST usage'] = "#include <util/gbtest.h>`r`nGB_TEST(header_check, without_policy) {}`r`n" +
-                              "GB_TEST(header_check, with_policy, std::launch::async) {}`r`n"
+                              "GB_TEST(header_check, with_policy, std::launch::async) {}`r`n" +
+                              "GB_TEST_IF(true, header_check, if_without_policy) {}`r`n" +
+                              "GB_TEST_IF(false, header_check, if_with_policy, std::launch::async) {}`r`n"
 }
 foreach ($source in Get-RelativeFiles 'algorithm', 'container', 'simulator', 'util' '*.cpp' | Sort-Object) {
     if ($source -like $Filter) { $units[$source] = $null }

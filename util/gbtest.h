@@ -567,3 +567,13 @@ inline gb::yadro::util::test_base::test_base(const char* test_name, const char* 
         void run() const;\
         } x;\
         void x::run() const
+
+// GB_TEST_IF(condition, suite, name[, launch_policy]): a test that runs only when the constant condition holds, e.g. on
+// one platform or with an optional dependency; otherwise it is registered disabled, so a run reports it as DISABLED
+// instead of passing a body that has nothing to check. The body must compile either way.
+#define GB_TEST_IF(c, s, x, ...) \
+        struct x : gb::yadro::util::test_base { \
+        x()  : gb::yadro::util::test_base(#x, #s, gb::yadro::util::test_launch_policy(__VA_ARGS__)) { _enabled = (c); } \
+        void run() const;\
+        } x;\
+        void x::run() const

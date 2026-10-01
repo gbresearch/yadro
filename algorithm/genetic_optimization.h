@@ -1512,7 +1512,7 @@ namespace gb::yadro::algorithm::conv {
                 self.elite_perturbation_count,
                 self.last_diversity,
                 self.elapsed,
-                serialize_as<int>(self.last_stop_reason)
+                gb::yadro::archive::serialize_as<int>(self.last_stop_reason)
             );
         }
     };

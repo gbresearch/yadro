@@ -33,6 +33,25 @@
 
 namespace gb::sim
 {
+    namespace detail
+    {
+        // invokes the callback with the signals if CallBack is invocable with them, otherwise without
+        // arguments. The choice depends on this template's parameters, so the branch not taken is never
+        // instantiated; in a generic lambda inside always() or once(), the call without arguments would
+        // not depend on the lambda's parameters, and Clang rejects it when it is ill-formed
+        template<class CallBack>
+        void invoke_callback(auto&& call_back, auto&& ... sig)
+        {
+            if constexpr (std::invocable<CallBack, decltype(sig)...>)
+                std::invoke(decltype(call_back)(call_back), decltype(sig)(sig)...);
+            else
+            {
+                static_assert(std::invocable<CallBack>);
+                std::invoke(decltype(call_back)(call_back));
+            }
+        }
+    }
+
     //---------------------------------------------------------------------------------------------
     // support for callbacks taking signals as parameters
     inline auto always(auto&& call_back, auto&& first_signal, auto&& ... signals)
@@ -43,13 +62,7 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        if constexpr(std::invocable<decltype(call_back), decltype(sig)...>)
-                            std::invoke(cbw.get(), decltype(sig)(sig)...);
-                        else
-                        {
-                            static_assert(std::invocable<decltype(call_back)>);
-                            std::invoke(cbw.get());
-                        }
+                        detail::invoke_callback<decltype(call_back)>(cbw.get(), decltype(sig)(sig)...);
                     }, sigt);
             }), ...);
 
@@ -59,13 +72,7 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        if constexpr (std::invocable<decltype(call_back), decltype(sig)...>)
-                            std::invoke(cbw.get(), decltype(sig)(sig)...);
-                        else
-                        {
-                            static_assert(std::invocable<decltype(call_back)>);
-                            std::invoke(cbw.get());
-                        }
+                        detail::invoke_callback<decltype(call_back)>(cbw.get(), decltype(sig)(sig)...);
                     }, sigt);
             });
     }
@@ -80,13 +87,7 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        if constexpr (std::invocable<decltype(call_back), decltype(sig)...>)
-                            std::invoke(cbw.get(), decltype(sig)(sig)...);
-                        else
-                        {
-                            static_assert(std::invocable<decltype(call_back)>);
-                            std::invoke(cbw.get());
-                        }
+                        detail::invoke_callback<decltype(call_back)>(cbw.get(), decltype(sig)(sig)...);
                     }, sigt);
             }), ...);
 
@@ -96,13 +97,7 @@ namespace gb::sim
             {
                 std::apply([&](auto&& ... sig)
                     {
-                        if constexpr (std::invocable<decltype(call_back), decltype(sig)...>)
-                            std::invoke(cbw.get(), decltype(sig)(sig)...);
-                        else
-                        {
-                            static_assert(std::invocable<decltype(call_back)>);
-                            std::invoke(cbw.get());
-                        }
+                        detail::invoke_callback<decltype(call_back)>(cbw.get(), decltype(sig)(sig)...);
                     }, sigt);
             });
     }
@@ -113,7 +108,7 @@ namespace gb::sim
         template<class T, class EventType>
         struct const_signal : EventType
         {
-            const_signal() requires(std::default_initializable) : _value{} {}
+            const_signal() requires(std::default_initializable<T>) : _value{} {}
             const_signal(std::convertible_to<T> auto&& initial) : _value(decltype(initial)(initial)) {}
             auto&& read() const { return _value; }
         private:
@@ -127,7 +122,7 @@ namespace gb::sim
         {
             using type = T;
 
-            signal_base() requires(std::default_initializable) : _value{} {}
+            signal_base() requires(std::default_initializable<T>) : _value{} {}
             signal_base(std::convertible_to<T> auto&& initial) : _value(decltype(initial)(initial)) {}
             auto&& read() const { return _value; }
             operator const T& () const { return read(); }
@@ -207,7 +202,7 @@ namespace gb::sim
         struct conditional_event
         {
             conditional_event(conditional_event&& other) : _s(other._s), _old_value(std::move(other._old_value)) {}
-            conditional_event(Signal& s, Compare comp = {}) : _s(s), _old_value(s.read()) {}
+            conditional_event(Signal& s, Compare = {}) : _s(s), _old_value(s.read()) {}
             void bind(auto fun) { _s.bind(always_callback(std::move(fun))); }
             void bind_once(auto fun) { _s.bind_once(wait_callback(std::move(fun))); }
             void bind_cancellable(void* p, auto&& f) { _s.bind_cancellable(p, decltype(f)(f)); }

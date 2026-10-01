@@ -32,6 +32,7 @@
 #include <ranges>
 #include <bit>
 #include <concepts>
+#include <cstdint>
 #include <cstring>
 #include <span>
 #include <immintrin.h>

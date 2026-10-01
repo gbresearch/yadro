@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <string>
 #include <stdexcept>
 #include <array>
@@ -44,7 +45,9 @@
 #include "../util/string_util.h"
 #include "../archive/archive.h"
 
+#if defined(_MSC_VER)
 #pragma warning( disable: 4996 )
+#endif
 
 namespace gb::yadro::container
 {
@@ -230,16 +233,16 @@ namespace gb::yadro::container
             return util::compare<CharT, Traits>(s1.c_str(), s2.c_str(), s1.size(), s2.size());
         }
         //---------------------
-        template<std::size_t N>
-        friend auto operator<=> (const static_string& s1, const CharT s2[N])
+        template<std::size_t M>
+        friend auto operator<=> (const static_string& s1, const CharT s2[M])
         {
-            return util::compare<CharT, Traits>(s1.c_str(), s2, s1.size(), N);
+            return util::compare<CharT, Traits>(s1.c_str(), s2, s1.size(), M);
         }
         //---------------------
-        template<std::size_t N>
-        friend auto operator<=> (const CharT s2[N], const static_string& s1)
+        template<std::size_t M>
+        friend auto operator<=> (const CharT s2[M], const static_string& s1)
         {
-            return util::compare<CharT, Traits>(s2, s1.c_str(), N, s1.size());
+            return util::compare<CharT, Traits>(s2, s1.c_str(), M, s1.size());
         }
         //---------------------
         friend auto operator<=> (const static_string& s1, const CharT* s2)
@@ -247,9 +250,9 @@ namespace gb::yadro::container
             return util::compare<CharT, Traits>(s1.c_str(), s2, s1.size(), std::strlen(s2));
         }
         //---------------------
-        friend auto operator== (const static_string& s1, const auto& s2) { return std::is_eq(s1 <=> s2); }
+        friend bool operator== (const static_string& s1, const auto& s2) { return std::is_eq(s1 <=> s2); }
         //---------------------
-        friend auto operator!= (const static_string& s1, const auto& s2) { return std::is_neq(s1 <=> s2); }
+        friend bool operator!= (const static_string& s1, const auto& s2) { return std::is_neq(s1 <=> s2); }
 
     private:
         std::array<CharT, N + 1> _buf; // 0-terminated

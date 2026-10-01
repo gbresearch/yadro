@@ -229,7 +229,7 @@ namespace
         gbassert(replaced("\xE2\x82" "A", true) == "\"\\ufffdA\"");
     }
 
-    GB_TEST(json, json_utf8_decoder_matches_axe_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_utf8_decoder_matches_axe_test)
     {
         if constexpr (json_parser_axe_enabled) {
 #if defined(GB_YADRO_ENABLE_AXE_JSON)
@@ -475,7 +475,7 @@ namespace
         throw std::logic_error("nth_open: not enough brackets");
     }
 
-    GB_TEST(json, json_events_basic_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_basic_test)
     {
         gbassert(events_of(R"({"a":[1,-2,3.5,"x",true,false,null],"b":{}})")
             == "{|Ka|[|U1|I-2|D3.5|Sx|B1|B0|N|]|Kb|{|}|}|");
@@ -487,7 +487,7 @@ namespace
         gbassert(events_of(R"({"":0})") == "{|K|U0|}|");
     }
 
-    GB_TEST(json, json_events_syntax_errors_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_syntax_errors_test)
     {
         struct error_case { std::string_view input; json_parse_errc code; std::size_t offset; };
         const error_case cases[] = {
@@ -525,7 +525,7 @@ namespace
         gbassert(events_of("[1]", no_scalar_root) == "[|U1|]|");
     }
 
-    GB_TEST(json, json_events_string_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_string_test)
     {
         gbassert(events_of(R"(["\"\\\/\b\f\n\r\t"])") == "[|S\"\\/\b\f\n\r\t|]|");
         {
@@ -572,7 +572,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_events_surrogate_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_surrogate_test)
     {
         auto single_string = [](std::string_view text) {
             event_recorder recorder;
@@ -595,7 +595,7 @@ namespace
         expect_error(R"(["\ud800\n"])", json_parse_errc::lone_surrogate, 2);
     }
 
-    GB_TEST(json, json_events_integer_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_integer_test)
     {
         gbassert(events_of("-9223372036854775808") == "I-9223372036854775808|");
         gbassert(events_of("9223372036854775807") == "U9223372036854775807|");
@@ -619,7 +619,7 @@ namespace
         expect_error(huge, json_parse_errc::number_out_of_range, 0);
     }
 
-    GB_TEST(json, json_events_double_boundary_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_double_boundary_test)
     {
         auto bits_of = [](std::string_view token) {
             event_recorder recorder;
@@ -659,7 +659,7 @@ namespace
         gbassert(bits_of("0." + std::string(400, '0') + "1e-" + std::string(400, '9')) == positive_zero);
     }
 
-    GB_TEST(json, json_events_depth_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_depth_test)
     {
         const std::string_view leaves[] = { "", "1", "\"s\"", "true", "null" };
         for (std::size_t limit : { 1, 2, 3, 256 }) {
@@ -693,7 +693,7 @@ namespace
         expect_error(std::string(1'000'000, '[') + "x", json_parse_errc::depth_exceeded, 256);
     }
 
-    GB_TEST(json, json_events_input_cap_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_input_cap_test)
     {
         const std::string text = R"({"a":[1,2,3],"b":"text"})";
         json_parse_options options;
@@ -708,7 +708,7 @@ namespace
         gbassert(recorder.events.empty());
     }
 
-    GB_TEST(json, json_events_handler_error_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_handler_error_test)
     {
         struct duplicate_rejecter : null_handler
         {
@@ -753,7 +753,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_events_line_column_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_events_line_column_test)
     {
         auto error = catch_parse_error([] { null_handler handler; parse_json_events("{\n\"a\":1,\n\"\xC3\xA9\" 2}", handler); });
         gbassert(error.code == json_parse_errc::syntax);
@@ -805,7 +805,7 @@ namespace
         }
     };
 
-    GB_TEST(json, gbdb_read_rejects_hardened_inputs_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_rejects_hardened_inputs_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             expect_db_error("{\"a\":\"x\x01\"}", json_parse_errc::control_character, 7);
@@ -859,7 +859,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_read_surrogate_pair_stored_as_utf8_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_surrogate_pair_stored_as_utf8_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             auto db = read_json("{\"s\":\"\\ud83d\\ude00\",\"t\":\"\\u00e9\"}");
@@ -868,7 +868,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_read_underflow_and_overflow_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_underflow_and_overflow_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             auto db = read_json(R"({"p":1e-400,"n":-1e-400,"d":2.5})");
@@ -880,7 +880,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_read_unchanged_contracts_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_read_unchanged_contracts_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             expect_db_error("1", json_parse_errc::syntax, 0);
@@ -907,7 +907,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_stream_caps_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_stream_caps_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             const std::string document = "{\n  \"market\": {\n    \"symbol\": \"AAPL\",\n    \"price\": 193.25\n  },\n  \"note\": \"x\"\n}\n";
@@ -986,7 +986,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_manifest_cannot_loosen_limits_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_manifest_cannot_loosen_limits_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             const std::string manifest =
@@ -1028,7 +1028,7 @@ namespace
         }
     }
 
-    GB_TEST(json, gbdb_defaults_persist_new_read_options_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_defaults_persist_new_read_options_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             json_db_defaults defaults;
@@ -1076,7 +1076,7 @@ namespace
         must_throw<std::logic_error>([&] { (void)write_json(nan); });
     }
 
-    GB_TEST(json, gbdb_json_path_insert_limits_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_json_path_insert_limits_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             const std::string text = R"({"k":1})";
@@ -1501,7 +1501,7 @@ namespace
         return options;
     }
 
-    GB_TEST(json, json_parse_value_basic_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_basic_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto value = parse_json_value(R"({"i":5,"n":-7,"u":18446744073709551615,"z":-0,"d":1.0,"s":"t","b":false,"x":null,"a":[1,[2]],"o":{}})");
@@ -1528,7 +1528,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_parse_value_duplicate_keys_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_duplicate_keys_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto error = catch_parse_error([] { (void)parse_json_value(R"({"a":1,"b":2,"a":3})"); });
@@ -1560,7 +1560,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_parse_value_duplicate_after_nesting_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_duplicate_after_nesting_test)
     {
         if constexpr (json_parser_axe_enabled) {
             // an object with an index (12 members), then a 64-level nested member that reallocates the
@@ -1587,7 +1587,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_try_parse_value_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_try_parse_value_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto ok = try_parse_json_value(R"({"a":[1,2]})");
@@ -1604,7 +1604,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_parse_value_stream_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_parse_value_stream_test)
     {
         if constexpr (json_parser_axe_enabled) {
             const std::string text = "{\"a\":\n[1,2,3],\n\"b\":\"text\"}";
@@ -1632,7 +1632,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_realistic_shapes_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_realistic_shapes_test)
     {
         if constexpr (json_parser_axe_enabled) {
             const std::string_view message = R"({"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hi"},)"
@@ -1909,7 +1909,7 @@ namespace
         return cases;
     }
 
-    GB_TEST(json, json_conformance_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_conformance_test)
     {
         if constexpr (json_parser_axe_enabled) {
             auto cases = conformance_cases();
@@ -2090,7 +2090,7 @@ namespace
         std::mt19937_64 _rng;
     };
 
-    GB_TEST(json, json_round_trip_property_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_round_trip_property_test)
     {
         if constexpr (json_parser_axe_enabled) {
             json_format compact;
@@ -2114,7 +2114,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_format_fixed_point_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_format_fixed_point_test)
     {
         if constexpr (json_parser_axe_enabled) {
             json_format formats[2];
@@ -2201,7 +2201,7 @@ namespace
         return measurement.peak;
     }
 
-    GB_TEST(json, json_stack_peak_gate_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_stack_peak_gate_test)
     {
         if constexpr (json_parser_axe_enabled) {
             constexpr std::size_t gate = 640 * 1024;
@@ -2274,7 +2274,7 @@ namespace
         void begin_object() { record(); }
     };
 
-    GB_TEST(json, json_stack_per_level_slope_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_stack_per_level_slope_test)
     {
         if constexpr (json_parser_axe_enabled) {
             for (auto shape : { nest_shape::arrays, nest_shape::objects }) {
@@ -2363,7 +2363,7 @@ namespace
         gbassert(ratio < 8.0);
     }
 
-    GB_TEST(json, json_performance_smoke_test)
+    GB_TEST_IF(json_parser_axe_enabled, json, json_performance_smoke_test)
     {
         if constexpr (json_parser_axe_enabled) {
 #if defined(NDEBUG)
@@ -2393,7 +2393,7 @@ namespace
     // review regressions
     //-------------------------------------------------------------------------
 
-    GB_TEST(json, gbdb_json_path_text_cannot_escape_its_path_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, gbdb_json_path_text_cannot_escape_its_path_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             // text that closes the path wrapper must not insert members outside the path
@@ -2414,7 +2414,7 @@ namespace
         }
     }
 
-    GB_TEST(json, json_read_capped_leaves_stream_state_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, json, json_read_capped_leaves_stream_state_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             // a stream with exceptions enabled reads to its end without throwing, and its state is untouched

@@ -2395,7 +2395,7 @@ namespace
         });
     }
 
-    GB_TEST(container, gbdb_json_write_path_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, container, gbdb_json_write_path_test)
     {
         if constexpr (!gbdb_json_axe_enabled)
             return;
@@ -2417,7 +2417,7 @@ namespace
         });
     }
 
-    GB_TEST(container, gbdb_json_insert_at_path_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, container, gbdb_json_insert_at_path_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             json_db db;
@@ -2536,7 +2536,7 @@ namespace
         gbassert(text == R"({"market":[[1716249600,150.25,1542000],[1716336000,154.19999999999999,1285000]]})");
     }
 
-    GB_TEST(container, gbdb_json_row_arrays_format_round_trips_positional_tables_test)
+    GB_TEST_IF(gbdb_json_axe_enabled, container, gbdb_json_row_arrays_format_round_trips_positional_tables_test)
     {
         if constexpr (gbdb_json_axe_enabled) {
             json_read_options read_options;

@@ -27,6 +27,7 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <concepts>
@@ -106,7 +107,9 @@ namespace gb::yadro::util
             T _t;
         };
 
-        template<class T, bool FWD>
+        // used through the aliases fwd_wrapper and copy_wrapper, which supply FWD; FWD has a default
+        // because every guide parameter must be deducible or defaulted
+        template<class T, bool FWD = true>
         fwd_or_copy_wrapper(T&& t) -> fwd_or_copy_wrapper<T, FWD>;
     }
 

@@ -99,7 +99,7 @@ namespace gb::yadro::util
         }
 
         const auto& get_duration() const { return _duration; }
-        const auto get_count() const { return _count; }
+        auto get_count() const { return _count; }
 
         auto make_scope_timer() { return scope_timer(this); }
 

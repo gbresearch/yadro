@@ -182,7 +182,7 @@ namespace gb::yadro::container
         struct node_payload
         {
             string_id key{};
-            std::optional<value_type> value;
+            std::optional<value_type> value{};
         };
 
         using tree_type = indexed_tree<node_payload>;
@@ -657,10 +657,10 @@ namespace gb::yadro::container
         struct log_event
         {
             log_level level = log_level::info;
-            std::string category;
-            std::string event;
-            std::string path;
-            std::string message;
+            std::string category{};
+            std::string event{};
+            std::string path{};
+            std::string message{};
             bool force = false;
         };
 
@@ -691,9 +691,9 @@ namespace gb::yadro::container
         struct scan_issue
         {
             scan_severity severity = scan_severity::info;
-            std::string category;
-            std::string path;
-            std::string message;
+            std::string category{};
+            std::string path{};
+            std::string message{};
         };
 
         struct scan_statistics

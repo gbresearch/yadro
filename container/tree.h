@@ -220,10 +220,10 @@ namespace gb::yadro::container
         void delete_subtree(index_t node);
 
         // Copy a subtree under a parent; sibling order is not preserved.
-        auto copy_subtree(index_t to_parent, index_t node);
+        index_t copy_subtree(index_t to_parent, index_t node);
 
         // Copy a subtree immediately after a sibling; descendant order is not preserved.
-        auto copy_subtree_after_sibling(index_t sibling, index_t node);
+        index_t copy_subtree_after_sibling(index_t sibling, index_t node);
 
         // Copy all children from one parent to another.
         void copy_children(index_t from_parent, index_t to_parent);
@@ -360,17 +360,17 @@ namespace gb::yadro::container
         { 
             if (!is_valid_index(index)) 
                 throw std::out_of_range("Invalid tree node index");
-            return storage_traits< container_t>::template get(_nodes, index); 
+            return storage_traits<container_t>::get(_nodes, index); 
         }
         auto& get_node(index_t index) const 
         { 
             if (!is_valid_index(index)) 
                 throw std::out_of_range("Invalid tree node index");
-            return storage_traits<container_t>::template get(_nodes, index); 
+            return storage_traits<container_t>::get(_nodes, index); 
         }
 
         template<class...Args>
-        void emplace_back(Args&& ...args) { storage_traits<container_t>::template emplace_back(_nodes, std::forward<Args>(args)...); }
+        void emplace_back(Args&& ...args) { storage_traits<container_t>::emplace_back(_nodes, std::forward<Args>(args)...); }
 
         // Number of allocated node slots, including detached logical deletions.
         constexpr auto nodes_size() const { return storage_traits<container_t>::size(_nodes); }
@@ -458,7 +458,7 @@ namespace gb::yadro::container
 
     //---------------------------------------------------------------------
     template<class T, template<class> class StorageT>
-    auto indexed_tree<T, StorageT>::copy_subtree(index_t to_parent, index_t node)
+    auto indexed_tree<T, StorageT>::copy_subtree(index_t to_parent, index_t node) -> index_t
     {
         index_t new_subtree = invalid_index;
 
@@ -474,7 +474,7 @@ namespace gb::yadro::container
 
     //---------------------------------------------------------------------
     template<class T, template<class> class StorageT>
-    auto indexed_tree<T, StorageT>::copy_subtree_after_sibling(index_t sibling, index_t node)
+    auto indexed_tree<T, StorageT>::copy_subtree_after_sibling(index_t sibling, index_t node) -> index_t
     {
         index_t new_subtree = invalid_index;
 
