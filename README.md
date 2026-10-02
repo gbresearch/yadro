@@ -225,6 +225,12 @@ Namespace `gb::yadro::async`, aggregate header `async/async.h`.
   - `then(fn, deps...)` schedules a continuation that runs when all its dependencies
     (tasks or futures) are ready. Their values become `fn`'s arguments, and exceptions
     propagate down the chain.
+  - A `Task<T>` dependency notifies its continuations when it completes, so waiting for it
+    costs no thread. A `std::shared_future` (or another future-like type) has no such
+    hook: a pending one is waited for on a helper thread the pool starts for it, never on
+    a worker, so any number of them cannot starve the pool, but each holds a blocked
+    thread until it is ready. Pass the `Task<T>` itself rather than `task.share()` where
+    you can. A graceful `shutdown()` waits for these futures too, and joins the helpers.
   - `Task<T>` is copyable and shareable. It supports `get()`/`wait()`/`is_ready()` and
     converts to `std::future<T>`.
   - `shutdown(true)` drains accepted work; `shutdown(false)` abandons pending work.
