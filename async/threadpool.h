@@ -100,6 +100,22 @@
  * Chains work because then() accepts any Task<X> (or any type whose .get()
  * compiles); each Task's SharedState carries its own waiter list.
  *
+ * Future-like dependencies (std::shared_future, …)
+ * ─────────────────────────────────────────────────
+ * A dependency that is not a Task<X> has no waiter list, so its readiness can
+ * only be observed by blocking in its wait().  then() never does that on a
+ * pool worker: waits that outnumbered the workers would hold all of them while
+ * the tasks fulfilling those futures sat queued behind them — a deadlock.  A
+ * dependency already ready when then() is called notifies at once; a pending
+ * one is waited for on one of the pool's helper threads (detail::
+ * dependency_waiters), which notifies the continuation when the future is
+ * ready.  The cost is one blocked helper thread per pending future dependency;
+ * prefer passing the Task<X> itself (not Task<X>::share()) to then(), which
+ * needs no thread at all.  Such a continuation counts in pending_continuations_
+ * (not tasks_in_system_) while it waits, like one awaiting another pool's
+ * Task, so a graceful shutdown() waits for its future, and a std::shared_future
+ * that is never fulfilled keeps it waiting.
+ *
  * ── Why std::promise<R> was replaced ─────────────────────────────────────
  * std::promise<R> fulfils std::future<R> exactly once and provides no hook
  * for attaching callbacks.  SharedState<R> is the analogous structure with
@@ -145,6 +161,8 @@
  *   run_task:         idle_.mutex (via notify_idle)
  *   SharedState:      SharedState::mu_ (leaf; never held with any pool lock)
  *   shutdown():       shutdown_mutex_ (leaf)
+ *   then(), shutdown(): dependency_waiters::state::mu (leaf; the waits and
+ *                     notifications run unlocked)
  *
  * SharedState::mu_ is acquired only inside ContinuationHandle::notify() /
  * SharedState::register_waiter() / SharedState::fire().  None of these are
@@ -157,6 +175,10 @@
  * ── Shutdown semantics ────────────────────────────────────────────────────
  *   shutdown(true)   [graceful, default]
  *   shutdown(false)  [immediate — unstarted tasks receive broken_promise]
+ *   Both join the workers and the dependency helper threads.  A continuation
+ *   still waiting for a future after shutdown(false) receives broken_promise
+ *   at once; the helper blocked on that future is detached and exits when
+ *   the future is ready (or with the process), without notifying.
  *   After shutdown(), submit() throws.  then() must not be called after
  *   shutdown (submit_fn may execute against a stopped pool).  Idempotent.
  *   Must not be called from a pool worker thread.
@@ -169,11 +191,15 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <limits>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -630,8 +656,9 @@ namespace gb::yadro::async {
 
         // For std::shared_future, std::future, or any other future-like type:
         // we don't control their internals so cannot bypass their locking.
-        // .get() returns immediately here because the blocking worker task
-        // already waited for the dep before decrementing dep_count.
+        // .get() returns immediately here because the dep was ready before it
+        // decremented dep_count (then() saw it ready, or a dependency waiter
+        // thread waited for it).
         template <typename Fut>
             requires (!requires { std::declval<Fut&>().state(); })
         auto task_arg_tuple_ready(Fut& f) {
@@ -644,6 +671,238 @@ namespace gb::yadro::async {
                 return std::make_tuple(f.get());
             }
         }
+
+        // ── Future-like dependencies (no completion callback) ─────────────
+        // then() uses these for every dependency that is not a Task<T>.
+
+        // A future with no shared state has no value to wait for; std leaves
+        // waiting on one undefined, so then() rejects it up front.
+        template <typename Fut>
+        void require_valid_dependency(const Fut& f) {
+            if constexpr (requires { { f.valid() } -> std::convertible_to<bool>; }) {
+                if (!f.valid())
+                    throw std::future_error(std::future_errc::no_state);
+            }
+        }
+
+        // True if f is ready now.  A type without a std-style wait_for() and a
+        // deferred std::shared_future (whose function runs on the first wait)
+        // count as not ready.
+        template <typename Fut>
+        [[nodiscard]] bool dependency_ready(const Fut& f) {
+            if constexpr (requires { { f.wait_for(std::chrono::seconds{ 0 }) } -> std::same_as<std::future_status>; })
+                return f.wait_for(std::chrono::seconds{ 0 }) == std::future_status::ready;
+            else
+                return false;
+        }
+
+        // Blocks until f is ready.  A stored exception is not an error here:
+        // the dependency is ready, and the continuation's own f.get() rethrows
+        // it into the continuation's result.
+        template <typename Fut>
+        void wait_for_dependency(Fut& f) {
+            if constexpr (requires { f.wait(); })
+                f.wait();
+            else {
+                try { (void)f.get(); }
+                catch (...) {}
+            }
+        }
+
+        // ── Dependency waiters ────────────────────────────────────────────
+        // A dependency without a completion callback (std::shared_future, or
+        // any future-like type that is not a Task<T>) can only be observed by
+        // blocking in its wait().  That wait must not run on a pool worker:
+        // waits that outnumber the workers would hold every worker while the
+        // tasks that fulfil those futures sit queued behind them, and the pool
+        // would deadlock.  Each threadpool owns a dependency_waiters, which
+        // runs such waits on helper threads of its own, one per dependency
+        // pending at once (one already ready when then() is called needs
+        // none), and notifies the continuation when the wait returns.  Helpers
+        // are reused, and exit after kLinger without work.
+        //
+        // stop(), called by threadpool::shutdown() once the workers are joined,
+        // joins the helpers that are idle or notifying.  A helper still blocked
+        // in a wait (only possible after shutdown(false): a graceful drain
+        // waits for every continuation's dependencies) cannot be interrupted,
+        // and its future may never become ready.  stop() therefore fails its
+        // continuation (broken_promise) at once and detaches it; when its wait
+        // returns, the helper sees `stopping` and exits without notifying, so
+        // that dependency never counts down and the continuation cannot also
+        // fire.  A detached helper uses only the reference-counted state below.
+        // Waits no helper has started are failed too.
+        //
+        // state::mu is a leaf lock: no wait, notification or pool lock runs
+        // while it is held.
+        class dependency_waiters {
+        public:
+            static constexpr std::chrono::seconds kLinger{ 10 };
+
+            dependency_waiters() = default;
+            dependency_waiters(const dependency_waiters&) = delete;
+            dependency_waiters& operator=(const dependency_waiters&) = delete;
+            ~dependency_waiters() { stop(); }
+
+            // Calls wait() on a helper thread, then notifies cont, or fails it
+            // if wait() returns false.  wait() must not throw.  Throws if
+            // stopped, or if no helper is idle and none can be started; nothing
+            // is retained then.
+            void post(std::function<bool()> wait, std::shared_ptr<ContinuationHandle> cont) {
+                thread_reaper reaped;   // joins exited helpers after mu is released
+                std::lock_guard lk{ state_->mu };
+                if (state_->stopping)
+                    throw std::runtime_error("gb::yadro::async::threadpool::then: pool is stopped");
+                reap_exited(reaped.threads);
+
+                state_->jobs.push_back({ std::move(wait), std::move(cont) });
+                if (state_->jobs.size() <= state_->idle) {   // an idle helper will take it
+                    state_->cv.notify_one();
+                    return;
+                }
+                try {
+                    auto& slot = state_->helpers.emplace_back();
+                    try { slot.thread = std::thread{ &dependency_waiters::helper, state_, &slot }; }
+                    catch (...) { state_->helpers.pop_back(); throw; }
+                }
+                catch (...) {
+                    state_->jobs.pop_back();   // still ours: a helper needs mu to take it
+                    throw;
+                }
+            }
+
+            // Idempotent; see above.  Called by threadpool::shutdown().
+            void stop() noexcept {
+                std::deque<job> unstarted;
+                {
+                    std::lock_guard lk{ state_->mu };
+                    if (state_->stopping)
+                        return;
+                    state_->stopping = true;
+                    unstarted.swap(state_->jobs);
+                    for (auto& slot : state_->helpers)
+                        if (slot.waiting_for && slot.thread.joinable())
+                            slot.thread.detach();
+                }
+                state_->cv.notify_all();
+
+                // stopping freezes the list (post() no longer reaps), and from
+                // here only stop() touches slot.thread and slot.waiting_for: a
+                // helper that sees stopping after its wait leaves waiting_for
+                // to us.  So both are used unlocked.  Join first: a helper
+                // past its wait may be dispatching its continuation, which the
+                // caller's sweep must then find.
+                for (auto& slot : state_->helpers) {
+                    if (slot.thread.joinable()) {
+                        try { slot.thread.join(); }
+                        catch (...) {}
+                    }
+                }
+                for (auto& slot : state_->helpers) {
+                    if (slot.waiting_for) {
+                        slot.waiting_for->fail();
+                        slot.waiting_for.reset();
+                    }
+                }
+                for (auto& j : unstarted)
+                    j.cont->fail();
+            }
+
+            // Helpers that have not exited (test access).
+            [[nodiscard]] std::size_t live_helpers() const {
+                std::lock_guard lk{ state_->mu };
+                return static_cast<std::size_t>(std::count_if(
+                    state_->helpers.begin(), state_->helpers.end(),
+                    [](const helper_slot& slot) { return !slot.exited; }));
+            }
+
+        private:
+            struct job {
+                std::function<bool()>               wait;
+                std::shared_ptr<ContinuationHandle> cont;
+            };
+
+            struct helper_slot {
+                std::thread thread;   // touched only by post() and stop()
+                // The continuation of the job in wait(), null otherwise.
+                // Guarded by mu until stopping, then owned by stop().
+                std::shared_ptr<ContinuationHandle> waiting_for;
+                bool exited = false;  // left helper(); guarded by mu
+            };
+
+            struct state {
+                std::mutex              mu;
+                std::condition_variable cv;
+                std::deque<job>         jobs;
+                std::list<helper_slot>  helpers;   // stable addresses for helper()
+                std::size_t             idle = 0;  // helpers waiting on cv
+                bool                    stopping = false;
+            };
+
+            struct thread_reaper {
+                std::vector<std::thread> threads;
+                ~thread_reaper() {
+                    for (auto& t : threads) {
+                        try { t.join(); }
+                        catch (...) {}
+                    }
+                }
+            };
+
+            // Moves the threads of helpers that exited after lingering into
+            // reaped, to be joined once mu is released.  Caller holds mu.
+            void reap_exited(std::vector<std::thread>& reaped) {
+                for (auto it = state_->helpers.begin(); it != state_->helpers.end();) {
+                    if (it->exited) {
+                        reaped.push_back(std::move(it->thread));
+                        it = state_->helpers.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
+                }
+            }
+
+            static void helper(std::shared_ptr<state> s, helper_slot* slot) noexcept {
+                std::unique_lock lk{ s->mu };
+                for (;;) {
+                    ++s->idle;
+                    const bool woken = s->cv.wait_for(lk, kLinger,
+                        [&] { return s->stopping || !s->jobs.empty(); });
+                    --s->idle;
+                    if (!woken || s->stopping)
+                        break;
+
+                    job j = std::move(s->jobs.front());
+                    s->jobs.pop_front();
+                    slot->waiting_for = j.cont;
+                    lk.unlock();
+                    const bool ready = j.wait();
+                    lk.lock();
+                    // stop() ran during the wait: it has failed the
+                    // continuation and owns waiting_for.  Notifying now could
+                    // fire the continuation after that fault.
+                    const bool abandoned = s->stopping;
+                    if (!abandoned)
+                        slot->waiting_for.reset();
+                    lk.unlock();
+
+                    if (!abandoned) {
+                        if (ready) {
+                            try { j.cont->notify(); }
+                            catch (...) { j.cont->fail(); }
+                        }
+                        else {
+                            j.cont->fail();
+                        }
+                    }
+                    j = {};   // release the dependency and continuation unlocked
+                    lk.lock();
+                }
+                slot->exited = true;
+            }
+
+            std::shared_ptr<state> state_ = std::make_shared<state>();
+        };
 
     } // namespace detail
 
@@ -748,6 +1007,13 @@ namespace gb::yadro::async {
             for (auto& t : threads_)
                 if (t.joinable()) t.join();
 
+            // Stop the helpers waiting for future-like dependencies (after a
+            // graceful drain none is waiting for one of ours) BEFORE the sweep:
+            // a helper that read the state as Running may still be enqueuing a
+            // continuation, and stop() joins it so the sweep below faults that
+            // continuation instead of stranding it in an inbox.
+            waiters_.stop();
+
             for (auto& ctl : ctls_) {
                 std::lock_guard inbox_lk{ ctl->mutex };
                 for (auto* t : ctl->inbox) t->abandon();
@@ -797,7 +1063,8 @@ namespace gb::yadro::async {
          * @brief Schedule task(futures.get()...) when all futures are ready.
          *
          * @param task     Callable invoked with each dependency's .get() value.
-         * @param futures  Dependencies — any type whose .get() compiles (Task<X>).
+         * @param futures  Dependencies — Task<X>, std::shared_future<X>, or any
+         *                 copyable type whose .get() compiles.
          * @return         Task<R> for the continuation's result.
          *
          * All futures are captured by value (Task<X> is a shared_ptr wrapper).
@@ -807,6 +1074,13 @@ namespace gb::yadro::async {
          * If N == 0: task is submitted immediately (no waiting).
          * If all futures are already ready: task is submitted synchronously
          * within the then() call (on the calling thread via enqueue()).
+         *
+         * A pending dependency that is not a Task<X> is waited for on a helper
+         * thread, never a worker (see "Future-like dependencies" above), so
+         * any number of them cannot starve the pool.  An exception stored in
+         * one propagates to the result like a Task's.  Throws
+         * std::future_error(no_state) for an invalid std::shared_future, and
+         * std::system_error if a helper thread cannot be started.
          */
         template <typename F, typename... Futures>
         [[nodiscard]] auto then(F&& task, Futures... futures)
@@ -886,13 +1160,26 @@ namespace gb::yadro::async {
                             cont->notify();   // already ready
                     }
                     else {
-                        // std::shared_future or similar: no push mechanism.
-                        // Occupy one worker thread for the wait duration.  If this
-                        // waiter task is abandoned it never notifies, so fault the
-                        // continuation directly so out doesn't hang.
-                        enqueue_continuation(
-                            [dep, c = cont]() mutable { dep.get(); c->notify(); },
-                            [c = cont]() noexcept { c->fail(); });
+                        // std::shared_future or similar: no push mechanism, so
+                        // readiness is observed by blocking.  Never on a worker
+                        // (see detail::dependency_waiters): a ready dep notifies
+                        // now, a pending one is waited for on a helper thread.
+                        detail::require_valid_dependency(dep);
+                        if (detail::dependency_ready(dep)) {
+                            cont->notify();
+                        }
+                        else {
+                            // A wait that throws never saw the dep ready: the
+                            // helper then fails the continuation rather than
+                            // notify it (dep_count stays above zero, so
+                            // execute_fn can no longer run).
+                            waiters_.post(
+                                [dep]() mutable noexcept {
+                                    try { detail::wait_for_dependency(dep); return true; }
+                                    catch (...) { return false; }
+                                },
+                                cont);
+                        }
                     }
                     };
                 try {
@@ -1426,6 +1713,7 @@ namespace gb::yadro::async {
         std::atomic<PoolState>  state_;
         std::mutex              shutdown_mutex_;
         std::condition_variable drain_cv_;
+        detail::dependency_waiters waiters_;   // helper threads for future-like then() dependencies
         std::shared_ptr<LifetimeToken> token_{ std::make_shared<LifetimeToken>(this) };   // constructed with raw this
     };
 #if defined(_MSC_VER)
@@ -1448,6 +1736,11 @@ namespace gb::yadro::async {
             [[nodiscard]] static std::size_t pending_continuations(
                 const threadpool& pool) noexcept {
                 return pool.pending_continuations_.load();
+            }
+
+            [[nodiscard]] static std::size_t dependency_helpers(
+                const threadpool& pool) {
+                return pool.waiters_.live_helpers();
             }
         };
     }
@@ -1492,7 +1785,8 @@ namespace gb::yadro::async {
     }
 
     inline void ContinuationHandle::fail() noexcept {
-        // Several non-Task dependency waiters can be abandoned concurrently.
+        // Several non-Task dependency waiters of one continuation can fail
+        // concurrently on their helper threads.
         // Only the winner may consume fail_fn; moving the same std::function from
         // multiple threads is a data race even though the fault and reservation
         // primitives invoked by the callback are independently idempotent.

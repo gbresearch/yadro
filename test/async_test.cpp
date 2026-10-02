@@ -123,15 +123,9 @@ namespace
         std::vector< std::future<void>> void_futures;
         std::vector< std::future<int>> int_futures;
 
-        // then() waits for a std::shared_future dependency by occupying a worker until it is ready, and each
-        // iteration registers four such waits (f3 and fvoid on one each, f on two). With no more workers than
-        // waits, the waits can take every worker while the tasks they wait for are still queued, which
-        // deadlocks a default-sized pool on a machine with 4 hardware threads; one more worker than waits
-        // always leaves a worker to run them
-        constexpr auto iterations = 10;
-        threadpool tp(4 * iterations + 1);
+        threadpool tp;
 
-        for (auto i = 0; i < iterations; ++i)
+        for (auto i = 0; i < 10; ++i)
         {
             auto f1 = tp.submit([]
                 {
@@ -161,6 +155,195 @@ namespace
 
         for (auto& f : void_futures) f.get();
         for (auto& f : int_futures) gbassert(f.get() == 1);
+    }
+
+    // then() must not wait for a std::shared_future dependency on a pool worker: waits that outnumber the
+    // workers would hold all of them while the tasks fulfilling the futures sit queued behind them. Each
+    // iteration registers four such waits, 200 in all on 2 workers (async_test_loop deadlocked this way on
+    // a default pool of 4 workers)
+    GB_TEST(async, then_shared_future_dependencies_on_small_pool)
+    {
+        threadpool tp(2);
+        constexpr int iterations = 50;
+        std::vector<Task<int>> results;
+
+        for (int i = 0; i < iterations; ++i)
+        {
+            auto f1 = tp.submit([i] { std::this_thread::sleep_for(100us); return i; }).share();
+            auto f2 = tp.then([](int x) { return 2 * x; }, f1).share();
+            auto f3 = tp.then([](int x, int y) { return x + y; }, f1, f2).share();
+            results.push_back(tp.then([](int x) { return x; }, f3));
+        }
+
+        for (int i = 0; i < iterations; ++i)
+            gbassert(results[i].get() == 3 * i);
+    }
+
+    // Pending std::shared_future waits put no work on the pool, so pool tasks that fulfil the futures after
+    // every wait is registered still find the workers free. A wait that took a worker would count in
+    // tasks_in_system; the promises are then kept from this thread, which releases those workers, so the
+    // test fails instead of deadlocking
+    GB_TEST(async, then_shared_future_waits_never_hold_workers)
+    {
+        constexpr int waits = 32;
+        std::vector<std::promise<int>> promises(waits);   // outlives the pool, whose tasks keep them
+        threadpool tp(2);
+
+        std::vector<std::future<int>> results;
+        for (auto& promise : promises)
+            results.push_back(tp.then([](int x) { return x + 1; }, promise.get_future().share()));
+
+        const auto pool_work = tp.tasks_in_system();
+        std::vector<Task<void>> producers;
+        for (int i = 0; i < waits; ++i)
+        {
+            if (pool_work == 0)
+                producers.push_back(tp.submit([&promises, i] { promises[i].set_value(i); }));
+            else
+                promises[i].set_value(i);
+        }
+
+        gbassert(pool_work == 0 && "std::shared_future waits occupy the pool's workers");
+        for (int i = 0; i < waits; ++i)
+            gbassert(results[i].get() == i + 1);
+        for (auto& producer : producers)
+            producer.get();
+    }
+
+    // An exception stored in a std::shared_future dependency reaches the continuation's result, as a Task
+    // dependency's does (waiting for the dependency used to rethrow it in a noexcept worker task and
+    // terminate). The promised one is still pending when then() is called, so it is waited for
+    GB_TEST(async, then_shared_future_dependency_exception_propagates)
+    {
+        struct promised_error : std::exception {};
+        threadpool tp(2);
+        std::promise<int> promise;
+
+        auto failing = tp.submit([]() -> int { throw std::runtime_error("upstream"); }).share();
+        auto from_task = tp.then([](int x) { return x + 1; }, failing);
+        auto from_promise = tp.then([](int x, int y) { return x + y; },
+            tp.submit([] { return 1; }), promise.get_future().share());
+        promise.set_exception(std::make_exception_ptr(promised_error{}));
+
+        bool upstream = false;
+        try { (void)from_task.get(); }
+        catch (const std::runtime_error& e) { upstream = std::string(e.what()) == "upstream"; }
+        gbassert(upstream);
+
+        bool promised = false;
+        try { (void)from_promise.get(); }
+        catch (const promised_error&) { promised = true; }
+        gbassert(promised);
+    }
+
+    // then() rejects a std::shared_future without a shared state, and rolls back its accounting
+    GB_TEST(async, then_rejects_invalid_shared_future)
+    {
+        threadpool tp(1);
+
+        bool threw = false;
+        try { (void)tp.then([](int x) { return x; }, std::shared_future<int>{}); }
+        catch (const std::future_error& e) { threw = e.code() == std::make_error_code(std::future_errc::no_state); }
+
+        gbassert(threw);
+        gbassert(gb::yadro::async::detail::threadpool_test_access::pending_continuations(tp) == 0);
+    }
+
+    // A continuation waiting for a std::shared_future is accepted work, though no worker waits for it:
+    // graceful shutdown drains it once the future is ready instead of faulting it
+    GB_TEST(async, then_graceful_shutdown_drains_shared_future_continuation)
+    {
+        threadpool tp(1);
+        std::promise<int> promise;
+        auto cont = tp.then([](int x) { return x * 2; }, promise.get_future().share());
+
+        std::jthread shutdown_thread([&] { tp.shutdown(true); });
+        while (tp.state() == threadpool::PoolState::Running)
+            std::this_thread::yield();
+        gbassert(tp.state() == threadpool::PoolState::Draining);
+
+        promise.set_value(21);
+        shutdown_thread.join();
+        gbassert(cont.get() == 42);
+    }
+
+    // The pool starts one helper thread per pending std::shared_future dependency, and shutdown joins them
+    // (they would otherwise linger for dependency_waiters::kLinger)
+    GB_TEST(async, then_shutdown_joins_dependency_helpers)
+    {
+        using gb::yadro::async::detail::threadpool_test_access;
+        threadpool tp(1);
+        std::vector<std::promise<int>> promises(4);
+        std::vector<Task<int>> results;
+        for (auto& promise : promises)
+            results.push_back(tp.then([](int x) { return x; }, promise.get_future().share()));
+        gbassert(threadpool_test_access::dependency_helpers(tp) == promises.size());
+
+        for (int i = 0; i < static_cast<int>(promises.size()); ++i)
+            promises[i].set_value(i);
+        for (int i = 0; i < static_cast<int>(results.size()); ++i)
+            gbassert(results[i].get() == i);
+
+        const auto start = std::chrono::steady_clock::now();
+        tp.shutdown();
+        gbassert(threadpool_test_access::dependency_helpers(tp) == 0);
+        gbassert(std::chrono::steady_clock::now() - start < 5s && "shutdown waited for helpers to linger out");
+    }
+
+    // Immediate shutdown faults a continuation still waiting for a std::shared_future with broken_promise at
+    // once, though the promise is alive and may never be kept. The helper blocked on the future is detached;
+    // when the future becomes ready after the pool is gone, the helper exits without notifying
+    GB_TEST(async, then_immediate_shutdown_faults_pending_shared_future_continuation)
+    {
+        std::promise<int> promise;
+        Task<int> cont;
+        {
+            threadpool tp(1);
+            cont = tp.then([](int x) { return x; }, promise.get_future().share());
+            tp.shutdown(false);
+            gbassert(cont.state()->is_ready() && "shutdown(false) left the continuation pending");
+        }
+
+        bool broken = false;
+        try { (void)cont.get(); }
+        catch (const std::future_error& e) { broken = e.code() == std::make_error_code(std::future_errc::broken_promise); }
+        gbassert(broken);
+
+        promise.set_value(1);   // wakes the detached helper after its pool is gone
+    }
+
+    // Futures kept while shutdown(false) runs: each continuation ends with its value or broken_promise, and is
+    // resolved when shutdown returns. A continuation that fired after its fault, or a second fault, would hit
+    // SharedState's "fulfilled twice" assertion in a Debug build
+    GB_TEST(async, then_immediate_shutdown_races_shared_future_fulfilment)
+    {
+        constexpr int rounds = 50;
+        constexpr int waits = 16;
+        for (int round = 0; round < rounds; ++round)
+        {
+            std::vector<std::promise<int>> promises(waits);
+            std::vector<Task<int>> results;
+            {
+                threadpool tp(2);
+                for (auto& promise : promises)
+                    results.push_back(tp.then([](int x) { return x; }, promise.get_future().share()));
+
+                std::jthread keeper([&] {
+                    for (int i = 0; i < waits; ++i)
+                        promises[i].set_value(i);
+                    });
+                tp.shutdown(false);
+            }
+
+            for (int i = 0; i < waits; ++i)
+            {
+                gbassert(results[i].state()->is_ready() && "a continuation was left pending");
+                try { gbassert(results[i].get() == i); }
+                catch (const std::future_error& e) {
+                    gbassert(e.code() == std::make_error_code(std::future_errc::broken_promise));
+                }
+            }
+        }
     }
 
     GB_TEST(async, zldeque_steal_test)
@@ -554,8 +737,8 @@ namespace
         gbassert(pending == 0);
     }
 
-    // Multiple dependency-waiter tasks may be abandoned concurrently during
-    // immediate shutdown.  Exactly one caller may consume the shared failure
+    // Several dependency waiters of one continuation may fail concurrently on
+    // their helper threads.  Exactly one caller may consume the shared failure
     // callback; all later callers must observe that the failure was claimed.
     GB_TEST(async, continuation_failure_is_claimed_exactly_once) {
         threadpool pool{ 1 };
