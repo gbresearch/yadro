@@ -573,6 +573,29 @@ namespace
         }
     }
 
+    GB_TEST(async, eventcount_graceful_shutdown_runs_stranded_work) {
+        using gb::yadro::async::detail::threadpool_test_access;
+        threadpool pool{ 4 };
+        wait_for([&] {
+            return threadpool_test_access::parked_workers(pool) == pool.thread_count();
+            });
+
+        // Every worker has finished its last scan, and nothing publishes after
+        // this task is queued, so only shutdown() can lead a worker to it.
+        auto stranded = threadpool_test_access::queue_without_wake(pool, [] { return 42; });
+
+        auto drained = std::async(std::launch::async, [&] { pool.shutdown(true); });
+        // Not a timing assertion: with the shutdown wake the drain completes
+        // at once.  Without it the drain never would, so after the deadline
+        // wake the workers here to report a failure instead of hanging.
+        const bool drained_in_time = drained.wait_for(30s) == std::future_status::ready;
+        if (!drained_in_time)
+            threadpool_test_access::wake_all_workers(pool);
+        drained.get();
+        gbassert(drained_in_time && "graceful shutdown left queued work stranded");
+        gbassert(stranded.get() == 42);
+    }
+
     GB_TEST(async, eventcount_graceful_shutdown_drains_accepted_work) {
         threadpool pool{ 4 };
         std::atomic<int> completed{ 0 };

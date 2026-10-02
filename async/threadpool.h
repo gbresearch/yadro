@@ -194,6 +194,13 @@
  * ── Shutdown semantics ────────────────────────────────────────────────────
  *   shutdown(true)   [graceful, default]
  *   shutdown(false)  [immediate — unstarted tasks receive broken_promise]
+ *   shutdown(true) wakes every parked worker before it waits for the drain,
+ *   so queued work whose publication woke no worker (a lost wake) still runs
+ *   instead of hanging the drain and ~threadpool().  The exception is
+ *   wraparound: this wake is itself a publication, and if its increment
+ *   brings work_generation_ back to a worker's snapshot, that worker can
+ *   sleep through it and the work can stay stranded (see "Work publication
+ *   and worker parking").
  *   Both join the workers and the dependency helper threads.  A continuation
  *   still waiting for a future after shutdown(false) receives broken_promise
  *   at once; the helper blocked on that future is detached and exits when
@@ -1004,6 +1011,18 @@ namespace gb::yadro::async {
                 std::memory_order_release);
 
             if (wait_for_completion) {
+                // Wake every parked worker first, so each rescans every deque
+                // and inbox.  Queued work whose publication woke no worker
+                // would otherwise never run, and the drain below (and so
+                // ~threadpool()) would wait for it forever.  The exception is
+                // wraparound: this wake is itself a publication, and if its
+                // increment brings work_generation_ back to a worker's
+                // snapshot, that worker can sleep through it (see "Work
+                // publication and worker parking").  Workers keep running
+                // tasks until stop_ is set, so for a worker this wake while
+                // Draining is just another scan.
+                signal_all_workers();
+
                 // Graceful drain waits for BOTH runnable/executing work
                 // (tasks_in_system_) AND continuations that are registered but
                 // not yet runnable because a dependency is still pending
@@ -1773,6 +1792,36 @@ namespace gb::yadro::async {
             [[nodiscard]] static std::size_t dependency_helpers(
                 const threadpool& pool) {
                 return pool.waiters_.live_helpers();
+            }
+
+            // Queue f in an inbox as an external submit() does, but without the
+            // work_generation_ publication: a lost wake.  Once every worker has
+            // parked, no worker looks for f until something wakes one.
+            template <typename F>
+            [[nodiscard]] static auto queue_without_wake(threadpool& pool, F f)
+                -> Task<std::invoke_result_t<F&>> {
+                using R = std::invoke_result_t<F&>;
+                auto node = std::make_shared<TaskNode<F, R>>(std::move(f));
+                std::shared_ptr<SharedState<R>> state_ptr(
+                    node, static_cast<SharedState<R>*>(node.get()));
+                node->self_ = node;
+                {
+                    std::lock_guard idle_lk{ pool.idle_.mutex };
+                    pool.tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
+                }
+                try {
+                    std::lock_guard inbox_lk{ pool.ctls_[0]->mutex };
+                    pool.ctls_[0]->inbox.push_back(node.get());
+                }
+                catch (...) {
+                    pool.tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
+                    node->abandon();
+                }
+                return Task<R>{ std::move(state_ptr), &pool, pool.token_ };
+            }
+
+            static void wake_all_workers(threadpool& pool) noexcept {
+                pool.signal_all_workers();
             }
         };
     }
