@@ -130,7 +130,26 @@
  * pass.  Only after every source is observed empty does the worker call
  * work_generation_.wait(snapshot).  Publication before the snapshot is found
  * by the scan; publication after it changes the value, so wait(snapshot)
- * cannot strand work.
+ * cannot strand work unless the value wraps back to the snapshot (see the
+ * wraparound cost below).
+ *
+ * work_generation_ is 32-bit so that notify_one() wakes one worker.
+ * In libstdc++ 14 (used by GCC 14, and by Clang 20 on Linux), only
+ * int-sized atomics wait directly on the futex.  Other sizes wait on a
+ * proxy word shared through a hashed waiter pool, and notify_one() on that
+ * proxy wakes all its waiters.  A 64-bit counter would therefore wake every
+ * parked worker on each publication.  (MSVC's WaitOnAddress wakes one
+ * waiter at any size.)
+ *
+ * The cost is wraparound.  If a worker stalls between its snapshot and its
+ * wait while exactly a multiple of 2^32 publications land, wait(snapshot)
+ * sees an equal value and blocks, and the notify for work queued in that
+ * window may already have gone to no one.  That work then waits for the
+ * next publication, whose notify wakes a worker that scans every source; if
+ * nothing is published again, it is stranded.  A futex compares 32 bits,
+ * so no direct futex wait closes this window; only a timed wait would bound
+ * it.  Reaching it takes about 4.3 billion publications while one worker is
+ * held between its scan and its wait.
  *
  * WorkerCtl::mutex protects only its inbox.  Workers do not use per-worker
  * condition variables.
@@ -1138,8 +1157,12 @@ namespace gb::yadro::async {
                 }
 
                 // ── Step 4: conclusive search, then eventcount park ─────────────
-                // Snapshot before searching.  A publication during or after the
-                // scan changes the generation, so wait(snapshot) cannot block.
+                // Snapshot before searching.  Any publication between this load
+                // and the wait(snapshot) call keeps the worker from sleeping,
+                // unless a multiple of 2^32 publications wraps the counter back
+                // to this snapshot.  That case can strand queued work until
+                // another publication; see "Work publication and worker
+                // parking" above.
                 // Visit every deque and inbox; Abort is contention, not emptiness.
                 const auto observed_generation = work_generation_.load();
                 const auto start = static_cast<std::size_t>(rng() % n);
@@ -1414,7 +1437,11 @@ namespace gb::yadro::async {
         // still pending).  Counted as accepted work so graceful shutdown drains
         // them; see shutdown()'s drain predicate and release_pending_continuation().
         alignas(kCacheLineSize) std::atomic<std::size_t> pending_continuations_{ 0 };
-        alignas(kCacheLineSize) std::atomic<std::uint64_t> work_generation_{ 0 };
+        // 32-bit for a direct futex wait on Linux; see "Work publication and
+        // worker parking" above.
+        alignas(kCacheLineSize) std::atomic<std::uint32_t> work_generation_{ 0 };
+        static_assert(std::is_same_v<decltype(work_generation_), std::atomic<std::uint32_t>>,
+            "work_generation_ must remain 32-bit for direct Linux futex waits");
         alignas(kCacheLineSize) std::atomic<std::size_t> parked_workers_{ 0 };
         alignas(kCacheLineSize) std::atomic<std::uint64_t> park_returns_{ 0 };
 
@@ -1435,7 +1462,7 @@ namespace gb::yadro::async {
 #ifdef GB_YADRO_THREADPOOL_TESTING
     namespace detail {
         struct threadpool_test_access {
-            [[nodiscard]] static std::uint64_t work_generation(
+            [[nodiscard]] static std::uint32_t work_generation(
                 const threadpool& pool) noexcept {
                 return pool.work_generation_.load();
             }
