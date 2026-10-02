@@ -27,7 +27,10 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#include <concepts>
+#include <cstdint>
 #include <functional>
+#include "../util/gberror.h"
 
 namespace gb::sim::fibers
 {
@@ -70,6 +73,15 @@ namespace gb::sim::fibers
     // wait functions
     inline void wait(sim_time_t t = 0) { this_fiber()->wait(t); }
 
+    // wait for a time period of any integral type, e.g. wait(5); without this overload an int argument
+    // would be an exact match for the variadic wait below, which would call itself forever
+    inline void wait(std::integral auto t)
+    {
+        if constexpr (std::signed_integral<decltype(t)>)
+            gb::yadro::util::gbassert(t >= 0, "negative wait time");
+        wait(static_cast<sim_time_t>(t));
+    }
+
     // wait on event-like type
     inline void wait(auto&& e) requires requires{ e.bind_once(nullptr); } 
     {
@@ -78,5 +90,5 @@ namespace gb::sim::fibers
     }
 
     // wait on multiple events or time periods in specified order
-    inline void wait(auto&&...w) { (wait(decltype(w)(w)), ...); }
+    inline void wait(auto&&...w) requires(sizeof...(w) > 1) { (wait(decltype(w)(w)), ...); }
 }
