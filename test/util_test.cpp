@@ -1010,6 +1010,14 @@ unset multiplot)*";
         // error_t formatting includes the [E<num>] tag
         try { throw generic_error("xyz"); }
         catch (const std::exception& e) { gbassert(std::string(e.what()).find("[E1000]") != std::string::npos); }
+
+        // copying a non-const error_t lvalue copies its message, it does not stream the source into a new one
+        generic_error original("xyz");
+        generic_error copy(original);
+        gbassert(std::string(copy.what()) == original.what());
+        unreachable_error logic_original("abc");
+        unreachable_error logic_copy(logic_original);
+        gbassert(std::string(logic_copy.what()) == logic_original.what());
     }
 
     // what() of the exception fun throws, or empty when it does not throw

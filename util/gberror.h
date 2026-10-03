@@ -150,7 +150,11 @@ namespace gb::yadro::util
     template<unsigned ErrNo, class ErrorBase = std::runtime_error>
     struct error_t : public ErrorBase
     {
+        // a lone error_t argument is a copy, left to the implicit copy and move constructors; unconstrained,
+        // this template outbids the copy constructor for a non-const lvalue and streams the source into a new
+        // message, which also breaks the MS ABI's throw info that instantiates the copy constructor
         template <class... Args>
+            requires(!(sizeof...(Args) == 1 && (std::derived_from<std::remove_cvref_t<Args>, error_t> && ...)))
         explicit error_t(Args&&... args)
             : ErrorBase(to_string("[E", ErrNo, "] ", std::forward<Args>(args)...))
         {
