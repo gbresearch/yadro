@@ -680,6 +680,108 @@ namespace
         }
     }
 
+    // Model a foreign notifier that already read Running in fire_continuation,
+    // then was paused until immediate shutdown finished sweeping the queues.
+    // Enter at its next step: the real enqueue_continuation() path.  No worker
+    // remains to rescue a late enqueue, so rejection must fault synchronously.
+    GB_TEST(async, eventcount_immediate_shutdown_rejects_late_continuation) {
+        threadpool pool{ 1 };
+        auto out = std::make_shared<SharedState<int>>();
+        auto executions = std::make_shared<std::atomic<int>>(0);
+        pool.shutdown(false);
+
+        gb::yadro::async::detail::threadpool_test_access::enqueue_prechecked_continuation(
+            pool,
+            [out, executions] {
+                executions->fetch_add(1);
+                out->set_value(42);
+            },
+            [out] { out->fault_broken_promise(); });
+
+        gbassert(out->is_ready() && "late continuation must not be stranded after the sweep");
+        gbassert(executions->load() == 0);
+        gbassert(pool.tasks_in_system() == 0 && "rejection must roll back the task count");
+        bool broken = false;
+        try { (void)out->get(); }
+        catch (const std::future_error& error) {
+            broken = error.code() == std::make_error_code(std::future_errc::broken_promise);
+        }
+        gbassert(broken);
+    }
+
+    // Exercise the public cross-pool notification path while immediate
+    // shutdown races dependency completion, and check every outcome: each
+    // continuation either runs exactly once or is faulted with broken_promise
+    // without running.  Joining the source guarantees every foreign
+    // notification has finished before readiness is checked.  This is a smoke
+    // test, not the regression test for a late enqueue: the window between
+    // fire_continuation's state check and the inbox push is far shorter than
+    // shutdown's join, and without the fix this test passed thousands of
+    // rounds.  The two rejects_late_* tests hit that window deterministically.
+    GB_TEST(async, eventcount_immediate_shutdown_races_cross_pool_completion) {
+        constexpr int count = 16;
+        for (int round = 0; round < 50; ++round) {
+            threadpool source{ 2 };
+            threadpool target{ 2 };
+            std::atomic release{ false };
+            std::vector<std::atomic<int>> executions(count);
+            std::vector<Task<int>> results;
+            for (int i = 0; i < count; ++i) {
+                auto dep = source.submit([&, i] { release.wait(false); return i; });
+                results.push_back(target.then([&, i](int value) {
+                    executions[i].fetch_add(1);
+                    return value * 2;
+                }, dep));
+            }
+            std::jthread shutdown_thread([&] {
+                release.wait(false);
+                target.shutdown(false);
+            });
+            release.store(true);
+            release.notify_all();
+            source.shutdown(true);
+            shutdown_thread.join();
+
+            for (int i = 0; i < count; ++i) {
+                gbassert(results[i].state()->is_ready() && "foreign notification left a pending result");
+                try {
+                    gbassert(results[i].get() == i * 2);
+                    gbassert(executions[i].load() == 1);
+                }
+                catch (const std::future_error& error) {
+                    gbassert(error.code() == std::make_error_code(std::future_errc::broken_promise));
+                    gbassert(executions[i].load() == 0);
+                }
+            }
+            gbassert(gb::yadro::async::detail::threadpool_test_access::pending_continuations(target) == 0);
+        }
+    }
+
+    // submit() shares the same external queue admission.  A callable move can
+    // run arbitrary code after submit's Running check; stop the pool there to
+    // deterministically check that its rejected node also faults its result.
+    GB_TEST(async, eventcount_immediate_shutdown_rejects_late_submission) {
+        struct stop_on_move {
+            threadpool& pool;
+            explicit stop_on_move(threadpool& p) : pool{ p } {}
+            stop_on_move(stop_on_move&& other) : pool{ other.pool } {
+                pool.shutdown(false);
+            }
+            int operator()() const noexcept { return 42; }
+        };
+
+        threadpool pool{ 1 };
+        auto result = pool.submit(stop_on_move{ pool });
+        gbassert(result.state()->is_ready());
+        gbassert(pool.tasks_in_system() == 0);
+        bool broken = false;
+        try { (void)result.get(); }
+        catch (const std::future_error& error) {
+            broken = error.code() == std::make_error_code(std::future_errc::broken_promise);
+        }
+        gbassert(broken);
+    }
+
     // Graceful shutdown must DRAIN a continuation registered before shutdown,
     // not fault it.  The dependency completes while the pool is Draining; the
     // continuation must run and yield its value.  Deterministic via pool.state().
