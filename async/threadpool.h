@@ -1259,8 +1259,13 @@ namespace gb::yadro::async {
         // ── Per-worker control block ──────────────────────────────────────────
 
         struct WorkerCtl {
+            static constexpr std::uint64_t kNotParked = std::numeric_limits<std::uint64_t>::max();
+
             std::mutex              mutex;
             std::vector<TaskBase*>  inbox;
+            // The work_generation_ snapshot this worker is parked on, or
+            // kNotParked.  Only threadpool_test_access reads it.
+            std::atomic<std::uint64_t> parked_generation{ kNotParked };
         };
 
         // ── Internal enqueue ──────────────────────────────────────────────────
@@ -1520,10 +1525,16 @@ namespace gb::yadro::async {
                 if (stop_.load(std::memory_order_relaxed))
                     break;
 
+                // parked_generation is set after the park is counted and
+                // cleared after the return is, so a worker seen parked on a
+                // generation is in parked_workers_, and its earlier returns
+                // are in park_returns_.
                 parked_workers_.fetch_add(1);
+                my_ctl.parked_generation.store(observed_generation);
                 work_generation_.wait(observed_generation);
                 parked_workers_.fetch_sub(1);
                 park_returns_.fetch_add(1);
+                my_ctl.parked_generation.store(WorkerCtl::kNotParked);
             }
 
             local_id_ = kNoWorker;
@@ -1800,6 +1811,23 @@ namespace gb::yadro::async {
             [[nodiscard]] static std::uint64_t park_returns(
                 const threadpool& pool) noexcept {
                 return pool.park_returns_.load();
+            }
+
+            // Workers parked on the current work_generation_; each returns from
+            // its wait only after a later publication.  parked_workers() also
+            // counts workers parked on an older snapshot, which return for a
+            // publication already made: at once if it preceded the wait, else
+            // when a notify or a spurious wakeup reaches them (notify_one wakes
+            // one sleeper and passes over the rest).
+            [[nodiscard]] static std::size_t parked_on_current_generation(
+                const threadpool& pool) noexcept {
+                const std::uint64_t generation = pool.work_generation_.load();
+                std::size_t parked = 0;
+                for (const auto& ctl : pool.ctls_) {
+                    if (ctl->parked_generation.load() == generation)
+                        ++parked;
+                }
+                return parked;
             }
 
             [[nodiscard]] static std::size_t pending_continuations(
