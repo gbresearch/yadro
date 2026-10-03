@@ -31,7 +31,9 @@
 #include "../archive/archive.h"
 #include "../algorithm/gbalgorithm.h"
 #include "../async/async.h"
+#include <cmath>
 #include <iostream>
+#include <set>
 #include <sstream>
 
 namespace
@@ -332,11 +334,161 @@ namespace
         auto selection_engine = cdetail::make_deterministic_rng(17, 1, 4,
             cdetail::deterministic_rng_domain::normal_breeding, 2);
         const std::vector<int> fitnesses(8, 5);
-        const std::size_t expected = std::uniform_int_distribution<std::size_t>{
-            0, fitnesses.size() - 1 }(first_draw_engine);
+        const std::size_t expected = conv::portable::uniform_int(
+            first_draw_engine, std::size_t{ 0 }, fitnesses.size() - 1);
         const std::size_t selected = cdetail::tournament_select(
             selection_engine, fitnesses, 5, std::less<int>{});
         gbassert(selected == expected);
+    }
+
+    // conv::portable defines every bit of its draws, so these values are the same with every
+    // compiler and standard library; the std distributions' algorithms are implementation-defined.
+    // The draws are separate statements: function arguments are evaluated in unspecified order.
+    GB_TEST(algorithm, deterministic_genetic_optimization_portable_distributions,
+        std::launch::deferred)
+    {
+        namespace portable = gb::yadro::algorithm::conv::portable;
+        namespace cdetail = gb::yadro::algorithm::conv::detail;
+
+        // the engine itself is specified by the standard, down to its 10000th output
+        std::mt19937_64 reference;
+        reference.discard(9'999);
+        gbassert_eq(reference(), 9'981'545'732'273'789'042ULL);
+
+        std::mt19937_64 engine;
+        for (const int expected : { 6, -5, 4, 9, -10, -2, -5, -10 })
+            gbassert_eq(portable::uniform_int(engine, -10, 10), expected);
+        gbassert_eq(portable::uniform_int(engine, std::uint64_t{ 0 }, ~std::uint64_t{ 0 }),
+            9'604'170'989'252'516'556ULL);
+        for (const int expected : { -40, -58, 15, -93 })
+            gbassert_eq(int{ portable::uniform_int(engine, std::int8_t{ -128 }, std::int8_t{ 127 }) }, expected);
+        for (const std::uint64_t expected : { 543'856'067'505ULL, 521'915'710'071ULL })
+            gbassert_eq(portable::uniform_int(engine, std::uint64_t{ 0 }, std::uint64_t{ 999'999'999'999 }), expected);
+        for (const double expected : { 0x1.b6d2d56e01fd6p-1, 0x1.ffc4d98e6764ap-2, 0x1.ad6f55e8f2444p-2 })
+            gbassert_eq(portable::uniform_01(engine), expected);
+        for (const float expected : { 0x1.38add8p+1f, -0x1.411096p+1f, -0x1.4db9d6p+1f })
+            gbassert_eq(portable::uniform_real(engine, -5.0f, 5.0f), expected);
+        for (const double expected : { -0x1.67dec685215fp+8, 0x1.9a8037d5f0df8p+9, -0x1.4f2ac1a0857f4p+9 })
+            gbassert_eq(portable::uniform_real(engine, -1000.0, 1000.0), expected);
+        std::uint32_t coins = 0;
+        for (unsigned i = 0; i < 32; ++i)
+            coins |= std::uint32_t{ portable::bernoulli(engine, 0.3) } << i;
+        gbassert_eq(coins, 0x1934c0a3U);
+        for (const double expected : { 0x1.ec4fc5b0760bfp-1, -0x1.8c603cafc318dp-1, -0x1.212a7d7490b99p-2,
+            -0x1.76320e364b781p+0, -0x1.b088885458b8fp-2, 0x1.25c9d2f263956p-1 })
+            gbassert_eq(portable::standard_normal(engine), expected);
+
+        // a 32-bit engine gives 64 bits from two draws, 3499211612 and 581869302, high half first
+        std::mt19937 engine32;
+        gbassert_eq(portable::random_bits64(engine32), 0xd091bb5c22ae9ef6ULL);
+        gbassert_eq(portable::uniform_int(engine32, 1, 6), 6);
+
+        // the log, exp and pow behind the normal deviates and SBX crossover, the same bits everywhere
+        gbassert_eq(cdetail::portable_log(0.1), -0x1.26bb1bbb55515p+1);
+        gbassert_eq(cdetail::portable_log(10.0), 0x1.26bb1bbb55516p+1);
+        gbassert_eq(cdetail::portable_log(1.0), 0.0);
+        gbassert_eq(cdetail::portable_exp(1.0), 0x1.5bf0a8b14576ap+1);
+        gbassert_eq(cdetail::portable_exp(-1.0), 0x1.78b56362cef38p-2);
+        gbassert_eq(cdetail::portable_exp(0.0), 1.0);
+        gbassert_eq(cdetail::portable_pow(0.3, 1.0 / 3.0), 0x1.56bfea66ef78cp-1);
+        gbassert_eq(cdetail::portable_pow(0.0, 0.5), 0.0);
+
+        // and within a few ulps of the C runtime's, across their domains
+        const auto ulp = [](double value) {
+            const double magnitude = std::abs(value);
+            return std::nextafter(magnitude, std::numeric_limits<double>::infinity()) - magnitude;
+            };
+        std::mt19937_64 sweep{ 7 };
+        for (int i = 0; i < 10'000; ++i) {
+            const double mantissa = 1.0 + portable::uniform_01(sweep);
+            const double x = std::ldexp(mantissa, portable::uniform_int(sweep, -1000, 1000));
+            gbassert(std::abs(cdetail::portable_log(x) - std::log(x)) <= 4 * ulp(std::log(x)));
+            const double y = 1400.0 * (portable::uniform_01(sweep) - 0.5);
+            gbassert(std::abs(cdetail::portable_exp(y) - std::exp(y)) <= 4 * ulp(std::exp(y)));
+        }
+    }
+
+    // A seeded run gives the same result with every compiler and standard library.  The values
+    // below are what MSVC and Clang (x64 and x86, with and without FMA contraction) produce.
+    GB_TEST(algorithm, deterministic_genetic_optimization_portable_result,
+        std::launch::deferred)
+    {
+        using namespace std::chrono_literals;
+        using namespace gb::yadro::algorithm::conv;
+        using container_t = container_range<std::vector<double>, min_max_value_range<double>>;
+        using chromosome_t = std::tuple<int, int, float, double, std::vector<double>>;
+        using entry_t = std::pair<double, chromosome_t>;
+
+        // The fitness only adds and subtracts, so no compiler can contract it into fused
+        // multiply-adds, and it calls no C runtime function whose last bit differs between
+        // runtimes: it returns the same values everywhere, as the guarantee requires.  Each gene
+        // kind takes part: integer, discrete, float, double and container.
+        auto optimizer = genetic_optimization_t(
+            [](int a, int b, float c, double d, const std::vector<double>& e) {
+                double sum = std::abs(a - 3.0) + std::abs(b + 4.0) + std::abs(c - 0.25)
+                    + std::abs(d - 1.5);
+                for (const double x : e)
+                    sum += std::abs(x - 0.5);
+                return sum;
+            },
+            std::less<double>{},
+            min_max_value_range<int>{ -50, 50 },
+            discrete_value_range<int>({ -9, -7, -4, 0, 2, 5, 8 }),
+            min_max_value_range<float>{ -5.0f, 5.0f, 0.15, 2.0, /*diversity_epsilon=*/ 0.5 },
+            min_max_value_range<double>{ -10.0, 10.0, 0.15, 2.0, /*diversity_epsilon=*/ 2.0 },
+            container_t(3, min_max_value_range<double>{ -1.0, 1.0, 0.15, 2.0, /*diversity_epsilon=*/ 0.5 }));
+        // with quantized diversity measured against a high threshold, both runs go through
+        // cataclysms and elite perturbations as well as breeding
+        optimizer.stop_criteria.diversity_threshold = 0.5;
+
+        const auto verify_history = [](const auto& history, const std::vector<entry_t>& expected) {
+            gbassert_eq(history.size(), expected.size());
+            for (std::size_t i = 0; i < expected.size(); ++i) {
+                gbassert_eq(history.all()[i].first, expected[i].first);
+                gbassert(history.all()[i].second == expected[i].second);
+            }
+            };
+
+        const auto [serial_stats, serial_history] = optimizer.optimize(
+            deterministic_ga_options{ 4, /*generation_budget=*/ 40,
+                /*evaluation_budget=*/ 100'000, /*failure_timeout=*/ 10s },
+            /*population_size=*/ 40, /*max_history=*/ 3);
+        gbassert(serial_stats.last_stop_reason == stop_reason::generation_budget);
+        gbassert_eq(serial_stats.generations, 40);
+        gbassert_eq(serial_stats.total_evaluations, 1'605);
+        gbassert_eq(serial_stats.cache_hits, 64);
+        gbassert_eq(serial_stats.cataclysm_count, 3);
+        gbassert_eq(serial_stats.elite_perturbation_count, 1);
+        gbassert_eq(serial_stats.last_diversity, 0x1.ccccccccccccdp-1);
+        verify_history(serial_history, {
+            { 0x1.88c60e0843434p-4, { 3, -4, 0x1.d9008ap-3f, 0x1.77604db0832fdp+0,
+                { 0x1.052a527424c3ap-1, 0x1.e0090dee8ce54p-2, 0x1.fe1897b59f11fp-2 } } },
+            { 0x1.a9b6617cb75ecp-4, { 3, -4, 0x1.d16248p-3f, 0x1.89b260f3fdffcp+0,
+                { 0x1.052a527424c3ap-1, 0x1.e0090dee8ce54p-2, 0x1.fdf65e6a86c95p-2 } } },
+            { 0x1.bea6d9ec0a6ep-4, { 3, -4, 0x1.d0b342p-3f, 0x1.88a47dee25edep+0,
+                { 0x1.052a527424c3ap-1, 0x1.e0090dee8ce54p-2, 0x1.f4da373751bep-2 } } } });
+
+        // a warm restart through three adaptive phases on three logical threads
+        gb::yadro::async::threadpool thread_pool(3);
+        const auto [adaptive_stats, adaptive_history] = optimizer.optimize(thread_pool,
+            /*num_phases=*/ 3,
+            deterministic_ga_options{ 5, /*generation_budget=*/ 30,
+                /*evaluation_budget=*/ 100'000, /*failure_timeout=*/ 10s },
+            /*population_size=*/ 40, /*max_history=*/ 3);
+        gbassert(adaptive_stats.last_stop_reason == stop_reason::elite_converged);
+        gbassert_eq(adaptive_stats.generations, 66);
+        gbassert_eq(adaptive_stats.total_evaluations, 2'619);
+        gbassert_eq(adaptive_stats.cache_hits, 111);
+        gbassert_eq(adaptive_stats.cataclysm_count, 5);
+        gbassert_eq(adaptive_stats.elite_perturbation_count, 2);
+        gbassert_eq(adaptive_stats.last_diversity, 0x1.199999999999ap-1);
+        verify_history(adaptive_history, {
+            { 0x1.f157d378da13p-6, { 3, -4, 0x1.edbe84p-3f, 0x1.80838369f0616p+0,
+                { 0x1.052a527424c3ap-1, 0x1.03d5522e90d33p-1, 0x1.fe1897b59f11fp-2 } } },
+            { 0x1.f157d378da17p-6, { 3, -4, 0x1.edbe84p-3f, 0x1.80838369f0617p+0,
+                { 0x1.052a527424c3ap-1, 0x1.03d5522e90d33p-1, 0x1.fe1897b59f11fp-2 } } },
+            { 0x1.0c4fc32c79938p-5, { 3, -4, 0x1.edbe84p-3f, 0x1.8120a23570c5bp+0,
+                { 0x1.052a527424c3ap-1, 0x1.03d5522e90d33p-1, 0x1.fe1897b59f11fp-2 } } } });
     }
 
     GB_TEST(algorithm, deterministic_genetic_optimization_breeding_streams,
@@ -1352,6 +1504,84 @@ namespace
         gbassert(!oss.str().empty());
     }
 
+    // A long double gene computes in long double, so it keeps the range and precision double
+    // lacks where long double is wider (x87 on x86 Linux, binary128 on AArch64 Linux).  With MSVC
+    // long double is double, and only the bounds checks apply.
+    GB_TEST(algorithm, genetic_optimization_long_double_genes, std::launch::deferred)
+    {
+        using namespace gb::yadro::algorithm::conv;
+        using limits = std::numeric_limits<long double>;
+
+        // every draw, mutation and crossover stays finite and within [lo, hi]; returns the
+        // distinct random values and the distinct mutations of lo
+        const auto sample = [](long double lo, long double hi) {
+            const min_max_value_range<long double> wrapper{ lo, hi };
+            std::mt19937_64 rng{ 1 };
+            std::set<long double> values;
+            std::set<long double> mutations;
+            for (int i = 0; i < 1'000; ++i) {
+                const long double value = wrapper.random_value(rng);
+                gbassert(std::isfinite(value) && lo <= value && value <= hi);
+                values.insert(value);
+                const long double mutated = wrapper.mutate(lo, rng);
+                gbassert(std::isfinite(mutated) && lo <= mutated && mutated <= hi);
+                mutations.insert(mutated);
+                const long double child = wrapper.crossover(value, mutated, rng);
+                gbassert(std::isfinite(child) && lo <= child && child <= hi);
+            }
+            return std::pair{ values.size(), mutations.size() };
+            };
+
+        // [1, 1 + 2^-60] holds 2^(digits - 61) + 1 values: 9 for x87, one where long double is double
+        const auto [narrow_values, narrow_mutations] = sample(1.0L, 1.0L + 0x1p-60L);
+        if constexpr (limits::digits >= 64) {
+            gbassert_ge(narrow_values, 9);
+            gbassert_gt(narrow_mutations, 1);
+            // SBX crosses identical parents into the parent, up to rounding that grows with
+            // beta.  With 1 + beta and 1 - beta rounded to double, the child misses by about
+            // 2^-53, 1024 x87 ulps, in four crossings of ten; computed in long double it stays
+            // well within the 256 ulps between this range's midpoint and either endpoint.
+            const min_max_value_range<long double> narrow{ 1.0L, 1.0L + 0x1p-54L };
+            const long double parent = 1.0L + 0x1p-55L;
+            std::mt19937_64 crossover_rng{ 1 };
+            for (int i = 0; i < 1'000; ++i) {
+                const long double child = narrow.crossover(parent, parent, crossover_rng);
+                gbassert(child > narrow.get_min_value() && child < narrow.get_max_value());
+            }
+            // a diversity grid finer than the range is accepted and snaps in long double:
+            // 1 + 1.5 * 2^-62 lies 1.5 steps of 2^-62 above the base and rounds to 2 steps
+            const min_max_value_range<long double> quantized{ 1.0L, 1.0L + 0x1p-60L,
+                0.15, 2.0, /*diversity_epsilon=*/ 0x1p-62 };
+            gbassert_eq(quantized.quantize_for_diversity(1.0L + 0x1.8p-62L), 1.0L + 0x1p-61L);
+        }
+        else {
+            gbassert_eq(narrow_values, 1);
+        }
+
+        // [2^13287, 2^13288], about [1e4000, 2e4000], is beyond double's range
+        if constexpr (limits::max_exponent > 13'288) {
+            const long double lo = std::ldexp(1.0L, 13'287);
+            const auto [wide_values, wide_mutations] = sample(lo, 2 * lo);
+            gbassert_eq(wide_values, 1'000);
+            gbassert_gt(wide_mutations, 1);
+            const min_max_value_range<long double> quantized{ lo, 2 * lo,
+                0.15, 2.0, /*diversity_epsilon=*/ 1e300 };
+            const long double snapped = quantized.quantize_for_diversity(1.5L * lo);
+            gbassert(std::isfinite(snapped) && lo <= snapped && snapped <= 2 * lo);
+        }
+
+        // uniform_01 randomizes every significand bit, not just the 53 a double holds
+        if constexpr (limits::digits > 53) {
+            std::mt19937_64 rng{ 2 };
+            bool below_double_precision = false;
+            for (int i = 0; i < 64; ++i) {
+                const long double scaled = portable::uniform_01<long double>(rng) * 0x1p53L;
+                below_double_precision = below_double_precision || scaled != std::floor(scaled);
+            }
+            gbassert(below_double_precision);
+        }
+    }
+
     // Verifies several genetic_optimization review fixes:
     //   • ga_config validation rejects out-of-range knobs (finding 1)
     //   • memo_capacity == 0 disables memoization instead of throwing (finding 3)
@@ -1484,17 +1714,15 @@ namespace
 
         // Wall-clock runs seed their RNG from std::random_device and depend on machine
         // speed, so the target check below failed intermittently. Seeded, budget-driven
-        // runs are reproducible for one compiler and standard library, but differ between
-        // them: the random distributions are the standard library's own algorithms, and
-        // fused multiply-adds (GCC contracts by default when optimizing) change rounding.
-        // Seed 20 reaches the target with MSVC on x64 and Win32 after 15 of the 1'000
-        // generations the second run allows; seed 22 reaches it with GCC and Clang on
-        // libstdc++ after 30 to 33, with and without -ffp-contract=off.
-#if defined(_MSC_VER)
+        // runs are reproducible, with every compiler and standard library: the optimizer
+        // draws through conv::portable and rounds its own arithmetic the same everywhere.
+        // Seed 20 reaches the target after 26 of the 1'000 generations the second run
+        // allows. This fitness function's own rounding can still differ (GCC contracts
+        // x * x + y * y into a fused multiply-add, and C runtimes round std::exp and
+        // std::sin differently), but with seed 20 neither changes the outcome: the
+        // target falls in generation 26 also with -ffp-contract=fast, and with std::exp
+        // and std::sin results one ulp off for a tenth of their arguments.
         constexpr std::uint64_t seed = 20;
-#else
-        constexpr std::uint64_t seed = 22;
-#endif
 
         // first optimization run to populate history and test multithreading;
         // its 10-generation budget stops it short of the target
@@ -1566,7 +1794,7 @@ namespace
         opt.stop_criteria.elite_convergence_epsilon = 1e-10;
 
         // Seeded, budget-driven runs for the same reason as genetic_optimization_test_conv;
-        // seed 20 converges to about 1e-29 on x64 and Win32, well within the budgets.
+        // seed 20 converges to about 4e-28, well within the budgets.
         constexpr std::uint64_t seed = 20;
 
         // first optimization run to populate history and test multithreading
@@ -1637,7 +1865,7 @@ namespace
 
         // A wall-clock run seeds its RNG from std::random_device and usually stops early on
         // elite convergence, so roughly 1% of runs settled outside the tolerances below.
-        // A seeded, budget-driven run is reproducible; seed 4 converges well on x64 and Win32.
+        // A seeded, budget-driven run is reproducible; seed 4 converges well within these tolerances.
         const auto run = conv::deterministic_ga_options{ 4, 1'000, 100'000, 10s };
 
         {
