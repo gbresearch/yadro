@@ -32,6 +32,9 @@
 #include <functional>
 #include <tuple>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <numbers>
 #include <random>
 #include <ostream>
 #include <fstream>
@@ -626,12 +629,32 @@
 //     be safe for the selected parallel execution.  Violating these preconditions
 //     is outside the reproducibility guarantee.
 //
+//   Portability across compilers and standard libraries
+//     The same seed gives bit-identical results with MSVC, GCC and Clang and
+//     their standard libraries, on x64 and on 32-bit x86.  Every draw goes through
+//     conv::portable, whose distributions are defined bit for bit by the engine's
+//     output (the algorithms of the std distributions are implementation-defined);
+//     genes draw in tuple order; and the optimizer's floating-point arithmetic
+//     rounds each product on its own (detail::no_contract), so fused multiply-add
+//     contraction (GCC's default -ffp-contract=fast, Clang's -ffp-contract=on,
+//     with FMA instructions enabled) cannot change it.  This holds where double is
+//     IEEE-754 binary64 evaluated without excess precision (FLT_EVAL_METHOD == 0:
+//     x86-64, AArch64, 32-bit x86 with SSE2 math), in the default rounding mode,
+//     and without value-changing optimizations (-ffast-math, /fp:fast).  long
+//     double genes compute in long double, keeping its range and precision, and
+//     so in each platform's own format (64-bit on MSVC, 80-bit x87 on x86 Linux,
+//     binary128 on AArch64 Linux), which no other platform reproduces.  The
+//     fitness function must return the same values everywhere too, which the
+//     optimizer cannot arrange: compile it without contraction (-ffp-contract=off
+//     for GCC and Clang; MSVC's default /fp:precise does not contract), and keep
+//     in mind that std::exp, std::sin, std::pow and the other transcendental
+//     functions can differ in the last bit between C runtimes.  A custom wrapper
+//     stays portable by drawing through conv::portable.
+//
 //   Exclusions
 //     - optimization_stats::elapsed is observational and excluded.
 //     - Changing the logical thread count may change results; each count is
 //       independently reproducible.
-//     - Cross-toolchain, cross-standard-library, cross-architecture, and altered
-//       floating-point-mode reproducibility are not promised.
 //     - deterministic_ga_options is transient: it is not part of ga_config, is
 //       not serialized, and is not printed by report().  The memo table is not
 //       serialized either, so a loaded optimizer is not equivalent to the
@@ -790,6 +813,272 @@ namespace gb::yadro::algorithm::conv {
 
 
     // =============================================================================
+    // SECTION 1b — Portable random distributions
+    // =============================================================================
+    //     The standard specifies std::mt19937_64 and std::seed_seq bit for bit, but
+    //     leaves the algorithms of std::uniform_int_distribution,
+    //     std::uniform_real_distribution, std::normal_distribution and
+    //     std::bernoulli_distribution to the implementation, so one seed draws
+    //     different values with MSVC's standard library, libstdc++ and libc++.  The
+    //     optimizer and its wrappers draw through conv::portable instead, whose
+    //     results follow from the engine's output bits alone: integer arithmetic, and
+    //     IEEE-754 double operations that round the same on every compiler, which
+    //     means no fused multiply-adds and no C runtime transcendental functions
+    //     (std::log, std::exp and std::pow differ between runtimes in the last bit).
+    // -----------------------------------------------------------------------------
+    namespace detail {
+
+        // The type a floating-point gene's arithmetic runs in: double for float and
+        // double, and long double for long double, which keeps its range and precision.
+        template<typename T>
+        using float_compute_t = std::common_type_t<T, double>;
+
+        // Returns x, opaque to the optimizer, so the product that computed x is
+        // rounded on its own and is not contracted with a following addition into a
+        // fused multiply-add, which rounds once and so gives a different result.  GCC
+        // contracts across statements by default (-ffp-contract=fast) and Clang within
+        // an expression (-ffp-contract=on) once FMA instructions are enabled (-mfma,
+        // -march=haswell or later).  MSVC contracts under /fp:contract and /fp:fast;
+        // the volatile round trip covers those and, conservatively, ARM64.
+        template<std::floating_point F>
+        [[nodiscard]] inline F no_contract(F x) noexcept
+        {
+#if defined(__GNUC__) || defined(__clang__)
+            if constexpr (std::same_as<F, long double>) {
+                __asm__("" : "+m"(x));  // x87 or binary128, outside the vector registers
+            }
+            else {
+#if defined(__x86_64__)
+                __asm__("" : "+x"(x));
+#elif defined(__aarch64__)
+                __asm__("" : "+w"(x));
+#else
+                __asm__("" : "+m"(x));
+#endif
+            }
+#elif defined(_M_FP_CONTRACT) || defined(_M_FP_FAST) || defined(_M_ARM64) || defined(_M_ARM64EC)
+            volatile F opaque = x;
+            x = opaque;
+#endif
+            return x;
+        }
+
+        // High half of the 128-bit product a * b, with the low half stored in `low`,
+        // from 32-bit limbs, so no 128-bit integer type or intrinsic is needed.
+        [[nodiscard]] constexpr std::uint64_t multiply_high(
+            std::uint64_t a, std::uint64_t b, std::uint64_t& low) noexcept
+        {
+            constexpr std::uint64_t mask = 0xffff'ffffULL;
+            const std::uint64_t ll = (a & mask) * (b & mask);
+            const std::uint64_t hl = (a >> 32) * (b & mask);
+            const std::uint64_t lh = (a & mask) * (b >> 32);
+            const std::uint64_t hh = (a >> 32) * (b >> 32);
+            const std::uint64_t middle = (ll >> 32) + (hl & mask) + lh;
+            low = (middle << 32) | (ll & mask);
+            return hh + (hl >> 32) + (middle >> 32);
+        }
+
+        // ln 2 split so that e * ln2_hi is exact for every binary exponent e of a double.
+        inline constexpr double ln2_hi = 0x1.62e42fee00000p-1;
+        inline constexpr double ln2_lo = 0x1.a39ef35793c76p-33;
+
+        // Natural logarithm of a positive finite x, within about an ulp, from IEEE
+        // operations alone: x = m * 2^e with m in [sqrt(1/2), sqrt(2)), and
+        //   ln(m) = 2 atanh(f) = 2 (f + f^3/3 + f^5/5 + ...),   f = (m - 1) / (m + 1),
+        // where |f| < 0.172, so the terms through f^21/21 reach double precision.
+        [[nodiscard]] inline double portable_log(double x) noexcept
+        {
+            constexpr auto coefficients = [] {
+                std::array<double, 11> c{};
+                for (std::size_t k = 0; k < c.size(); ++k)
+                    c[k] = 1.0 / static_cast<double>(2 * k + 1);
+                return c;
+            }();
+
+            int exponent = 0;
+            double m = std::frexp(x, &exponent);    // m in [1/2, 1), exact
+            if (m < std::numbers::sqrt2 / 2) {
+                m *= 2.0;                           // exact, so contracting m * 2 - 1 changes nothing
+                --exponent;
+            }
+            const double f = (m - 1.0) / (m + 1.0);
+            const double f2 = f * f;
+            double series = coefficients.back();
+            for (std::size_t k = coefficients.size() - 1; k-- > 0;)
+                series = no_contract(series * f2) + coefficients[k];
+            const double log_m = no_contract(2.0 * f * series);
+            const double e = static_cast<double>(exponent);
+            return no_contract(e * ln2_hi) + (no_contract(e * ln2_lo) + log_m);
+        }
+
+        // e^x for |x| < 708, within about an ulp, from IEEE operations alone:
+        // x = k ln 2 + r with integer k and |r| <= (ln 2)/2, and
+        //   e^x = 2^k (1 + r + r^2/2! + ... + r^14/14!).
+        [[nodiscard]] inline double portable_exp(double x) noexcept
+        {
+            constexpr auto coefficients = [] {
+                std::array<double, 15> c{};
+                std::uint64_t factorial = 1;
+                for (std::size_t n = 0; n < c.size(); ++n) {
+                    if (n > 0)
+                        factorial *= n;
+                    c[n] = 1.0 / static_cast<double>(factorial);  // 14! < 2^53, exact
+                }
+                return c;
+            }();
+
+            x = no_contract(x);  // a caller's product must not fuse into x - k ln 2
+            const double k = std::round(x * std::numbers::log2e);
+            const double r = (x - no_contract(k * ln2_hi)) - no_contract(k * ln2_lo);
+            double series = coefficients.back();
+            for (std::size_t n = coefficients.size() - 1; n-- > 0;)
+                series = no_contract(series * r) + coefficients[n];
+            return std::ldexp(series, static_cast<int>(k));
+        }
+
+        // base^exponent = e^(exponent ln base) for base >= 0, with 0^exponent = 0, for
+        // |exponent ln base| < 708.
+        [[nodiscard]] inline double portable_pow(double base, double exponent) noexcept
+        {
+            if (base == 0.0)
+                return 0.0;
+            return portable_exp(no_contract(exponent * portable_log(base)));
+        }
+
+    } // namespace detail
+
+    namespace portable {
+
+        // An engine whose outputs are uniform over all 64 or all 32 bits, such as
+        // std::mt19937_64 or std::mt19937; the distributions below are defined on
+        // those bits.
+        template<typename URBG>
+        concept full_range_engine = std::uniform_random_bit_generator<URBG>
+            && URBG::min() == 0
+            && (URBG::max() == std::numeric_limits<std::uint64_t>::max()
+                || URBG::max() == std::numeric_limits<std::uint32_t>::max());
+
+        // 64 random bits: one draw of a 64-bit engine, or two of a 32-bit engine, the
+        // first giving the high half.
+        template<full_range_engine URBG>
+        [[nodiscard]] std::uint64_t random_bits64(URBG& engine)
+        {
+            if constexpr (URBG::max() == std::numeric_limits<std::uint64_t>::max()) {
+                return static_cast<std::uint64_t>(engine());
+            }
+            else {
+                const std::uint64_t high = static_cast<std::uint64_t>(engine());
+                return (high << 32) | static_cast<std::uint64_t>(engine());
+            }
+        }
+
+        // Uniform integer in [lo, hi] (lo <= hi) by Lemire's multiply-and-reject
+        // method (D. Lemire, "Fast Random Integer Generation in an Interval", 2019):
+        // the high half of draw * n for n = hi - lo + 1, drawing again while the low
+        // half is below 2^64 mod n.  The work is done on the 64-bit span, so the result
+        // depends only on lo and hi, not on the width of T.
+        template<std::integral T, full_range_engine URBG>
+            requires (!std::same_as<std::remove_cv_t<T>, bool>)
+        [[nodiscard]] T uniform_int(URBG& engine, T lo, T hi)
+        {
+            static_assert(sizeof(T) <= sizeof(std::uint64_t),
+                "integral types wider than 64 bits are not supported");
+            using U = std::make_unsigned_t<T>;
+            const std::uint64_t span = static_cast<U>(
+                static_cast<U>(hi) - static_cast<U>(lo));
+            std::uint64_t offset;
+            if (span == std::numeric_limits<std::uint64_t>::max()) {
+                offset = random_bits64(engine);
+            }
+            else {
+                const std::uint64_t n = span + 1;
+                std::uint64_t low;
+                offset = detail::multiply_high(random_bits64(engine), n, low);
+                if (low < n) {
+                    const std::uint64_t threshold = (0 - n) % n;  // 2^64 mod n
+                    while (low < threshold)
+                        offset = detail::multiply_high(random_bits64(engine), n, low);
+                }
+            }
+            return static_cast<T>(static_cast<U>(
+                static_cast<U>(lo) + static_cast<U>(offset)));
+        }
+
+        // Uniform value in [0, 1) with a random bit in every significand bit of F: the
+        // top `digits` bits of a 64-bit draw times 2^-digits (for double the top 53 bits
+        // times 2^-53), or, for a significand wider than 64 bits (binary128 long double),
+        // the bits of two draws, the first the high ones.  Exact in every case.
+        template<std::floating_point F = double, full_range_engine URBG>
+        [[nodiscard]] F uniform_01(URBG& engine)
+        {
+            constexpr int digits = std::numeric_limits<F>::digits;
+            static_assert(digits <= 128, "significands wider than 128 bits are not supported");
+            constexpr F scale = [] {  // 2^-digits
+                F s = 1;
+                for (int i = 0; i < digits; ++i)
+                    s /= 2;
+                return s;
+            }();
+            if constexpr (digits <= 64) {
+                return static_cast<F>(random_bits64(engine) >> (64 - digits)) * scale;
+            }
+            else {
+                constexpr F shift = [] {  // 2^(digits - 64)
+                    F s = 1;
+                    for (int i = 64; i < digits; ++i)
+                        s *= 2;
+                    return s;
+                }();
+                const F high = static_cast<F>(random_bits64(engine));
+                const F low = static_cast<F>(random_bits64(engine) >> (128 - digits));
+                return (high * shift + low) * scale;
+            }
+        }
+
+        // Uniform value in [lo, hi] (lo <= hi, hi - lo finite): lo + (hi - lo) u with u
+        // from uniform_01, clamped to the bounds, which rounding can otherwise pass.
+        // float and double compute in double, long double in long double with every
+        // significand bit of u random, so it keeps its range and precision.
+        template<std::floating_point T, full_range_engine URBG>
+        [[nodiscard]] T uniform_real(URBG& engine, T lo, T hi)
+        {
+            using F = detail::float_compute_t<T>;
+            const F a = static_cast<F>(lo);
+            const F b = static_cast<F>(hi);
+            const F u = uniform_01<F>(engine);
+            return std::clamp(static_cast<T>(a + detail::no_contract((b - a) * u)), lo, hi);
+        }
+
+        // true with probability p: uniform_01 < p, one draw whatever p is.
+        template<full_range_engine URBG>
+        [[nodiscard]] bool bernoulli(URBG& engine, double p)
+        {
+            return uniform_01(engine) < p;
+        }
+
+        // Standard normal deviate by Marsaglia's polar method: u and v uniform in
+        // [-1, 1), u drawn first, until 0 < s = u^2 + v^2 < 1, then
+        // u sqrt(-2 ln(s) / s).  The method's second deviate, v sqrt(-2 ln(s) / s), is
+        // discarded, so a call depends only on the draws it makes.  std::sqrt is
+        // correctly rounded everywhere (IEEE 754 requires it), and ln is
+        // detail::portable_log.
+        template<full_range_engine URBG>
+        [[nodiscard]] double standard_normal(URBG& engine)
+        {
+            while (true) {
+                // 2 x - 1 is exact for x from uniform_01, so contraction cannot change it
+                const double u = 2.0 * uniform_01(engine) - 1.0;
+                const double v = 2.0 * uniform_01(engine) - 1.0;
+                const double s = detail::no_contract(u * u) + detail::no_contract(v * v);
+                if (s > 0.0 && s < 1.0)
+                    return u * std::sqrt(-2.0 * detail::portable_log(s) / s);
+            }
+        }
+
+    } // namespace portable
+
+
+    // =============================================================================
     // SECTION 2 — Type Wrappers for Arithmetic Types
     // =============================================================================
     //     Continuous range [min_value, max_value].
@@ -845,9 +1134,9 @@ namespace gb::yadro::algorithm::conv {
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
             if constexpr (std::is_integral_v<T>)
-                return std::uniform_int_distribution<T>{min_value, max_value}(rng);
+                return portable::uniform_int(rng, min_value, max_value);
             else
-                return std::uniform_real_distribution<T>{min_value, max_value}(rng);
+                return portable::uniform_real(rng, min_value, max_value);
         }
 
         template<typename RNG>
@@ -859,7 +1148,7 @@ namespace gb::yadro::algorithm::conv {
             {
                 static_assert(sizeof(T) <= sizeof(std::uint64_t), "integral types wider than 64-bit are not supported");
 
-                if (std::bernoulli_distribution{ random_reset_prob }(rng)) return random_value(rng);
+                if (portable::bernoulli(rng, random_reset_prob)) return random_value(rng);
 
                 if constexpr (std::is_unsigned_v<T>) {
                     using U = std::make_unsigned_t<T>;
@@ -870,8 +1159,8 @@ namespace gb::yadro::algorithm::conv {
                     U step_hi = span / U{ 10 };
                     if (step_hi == 0) step_hi = 1;
 
-                    const U step = std::uniform_int_distribution<U>(0, step_hi)(rng);
-                    if (std::bernoulli_distribution(0.5)(rng)) {
+                    const U step = portable::uniform_int(rng, U{ 0 }, step_hi);
+                    if (portable::bernoulli(rng, 0.5)) {
                         const U room = maxv - val;
                         return static_cast<T>(step > room ? maxv : static_cast<U>(val + step));
                     }
@@ -897,8 +1186,8 @@ namespace gb::yadro::algorithm::conv {
                     // limit to S max to safely cast to S later
                     step_hi_u = std::min(step_hi_u, static_cast<U>(std::numeric_limits<S>::max()));
 
-                    const S step = std::uniform_int_distribution<S>(0, static_cast<S>(step_hi_u))(rng);
-                    if (std::bernoulli_distribution(0.5)(rng)) {
+                    const S step = portable::uniform_int(rng, S{ 0 }, static_cast<S>(step_hi_u));
+                    if (portable::bernoulli(rng, 0.5)) {
                         const U room = static_cast<U>(maxv - val_s);
                         return static_cast<T>(static_cast<U>(step) > room ? maxv : static_cast<S>(val_s + step));
                     }
@@ -910,8 +1199,11 @@ namespace gb::yadro::algorithm::conv {
             }
             else
             {
-                auto span = static_cast<double>(max_value) - static_cast<double>(min_value);
-                T result = value + static_cast<T>(std::normal_distribution<double>{ 0.0, span* mutation_sigma_frac}(rng));
+                using F = detail::float_compute_t<T>;
+                const F span = static_cast<F>(max_value) - static_cast<F>(min_value);
+                const F sigma = span * mutation_sigma_frac;
+                const F step = detail::no_contract(sigma * portable::standard_normal(rng));
+                T result = value + static_cast<T>(step);
                 return std::clamp(result, min_value, max_value);
             }
         }
@@ -921,21 +1213,26 @@ namespace gb::yadro::algorithm::conv {
             if constexpr (std::is_floating_point_v<T>) {
                 // Precompute the shared exponent to avoid calling pow twice.
                 const double inv_eta1 = 1.0 / (eta + 1.0);
-                double u = std::uniform_real_distribution<double>{ 0.0, 1.0 }(rng);
-                double beta = (u <= 0.5) ? std::pow(2.0 * u, inv_eta1)
-                    : std::pow(0.5 / (1.0 - u), inv_eta1);
+                const double u = portable::uniform_01(rng);
+                const double beta = (u <= 0.5) ? detail::portable_pow(2.0 * u, inv_eta1)
+                    : detail::portable_pow(0.5 / (1.0 - u), inv_eta1);
                 // SBX produces two complementary children:
                 //   c1 = 0.5*((1+β)a + (1-β)b)
                 //   c2 = 0.5*((1-β)a + (1+β)b)
                 // Returning only c1 introduces a directional bias when a ≠ b.
-                // Pick one at random so the operator is symmetric.
-                double child = std::bernoulli_distribution(0.5)(rng)
-                    ? 0.5 * ((1.0 + beta) * a + (1.0 - beta) * b)
-                    : 0.5 * ((1.0 - beta) * a + (1.0 + beta) * b);
+                // Pick one at random so the operator is symmetric.  Each product is
+                // rounded on its own (detail::no_contract) on every compiler.
+                using F = detail::float_compute_t<T>;
+                const F beta_f = static_cast<F>(beta);
+                const F x = static_cast<F>(a);
+                const F y = static_cast<F>(b);
+                const F child = portable::bernoulli(rng, 0.5)
+                    ? F{ 0.5 } * (detail::no_contract((F{ 1 } + beta_f) * x) + detail::no_contract((F{ 1 } - beta_f) * y))
+                    : F{ 0.5 } * (detail::no_contract((F{ 1 } - beta_f) * x) + detail::no_contract((F{ 1 } + beta_f) * y));
                 return std::clamp(static_cast<T>(child), min_value, max_value);
             }
             else {
-                return std::bernoulli_distribution(0.5)(rng) ? a : b;
+                return portable::bernoulli(rng, 0.5) ? a : b;
             }
         }
 
@@ -945,10 +1242,11 @@ namespace gb::yadro::algorithm::conv {
             if constexpr (std::is_floating_point_v<T>) {
                 if (diversity_epsilon > 0.0)
                 {
-                    const double base = static_cast<double>(min_value);
-                    const double x = static_cast<double>(value);
-                    const double snapped =
-                        base + std::round((x - base) / diversity_epsilon) * diversity_epsilon;
+                    using F = detail::float_compute_t<T>;
+                    const F base = static_cast<F>(min_value);
+                    const F x = static_cast<F>(value);
+                    const F snapped = base + detail::no_contract(
+                        std::round((x - base) / diversity_epsilon) * diversity_epsilon);
                     return std::clamp(static_cast<T>(snapped), min_value, max_value);
                 }
             }
@@ -987,8 +1285,8 @@ namespace gb::yadro::algorithm::conv {
             double random_reset_prob;
 
             constexpr void validate_params(double sigma, double eta_in, double eps, double reset_prob) const {
-                const double span =
-                    static_cast<double>(max_value) - static_cast<double>(min_value);
+                using F = detail::float_compute_t<T>;
+                const F span = static_cast<F>(max_value) - static_cast<F>(min_value);
                 if (sigma < 0.0 || sigma > 1.0)
                     throw std::invalid_argument("mutation_sigma_frac must be in the range [0, 1]");
                 if (eta_in <= 0.0)
@@ -1036,18 +1334,17 @@ namespace gb::yadro::algorithm::conv {
 
         template<typename RNG>
         [[nodiscard]] T random_value(RNG& rng) const {
-            size_t i = std::uniform_int_distribution<size_t>{ 0, allowed_values.size() - 1 }(rng);  
+            const size_t i = portable::uniform_int(rng, size_t{ 0 }, allowed_values.size() - 1);
             return allowed_values[i];
         }
 
         template<typename RNG>
         [[nodiscard]] T mutate(T value, RNG& rng) const {
-            std::bernoulli_distribution creep(local_mutation_prob);
-            if (creep(rng)) {   // 70% local creep, 30% random reset
+            if (portable::bernoulli(rng, local_mutation_prob)) {   // 70% local creep, 30% random reset
                 auto it = std::ranges::lower_bound(allowed_values, value);
                 const std::ptrdiff_t idx = std::distance(allowed_values.begin(), it);
-                const std::ptrdiff_t offset =
-                    std::uniform_int_distribution<std::ptrdiff_t>{ -local_mutation_radius, local_mutation_radius }(rng);
+                const std::ptrdiff_t offset = portable::uniform_int(rng,
+                    std::ptrdiff_t{ -local_mutation_radius }, std::ptrdiff_t{ local_mutation_radius });
                 // Clamp in the SIGNED domain first.  Casting (idx + offset) to
                 // size_t before clamping turns any negative index into a huge
                 // value that then clamps to the last element, so a local step
@@ -1061,8 +1358,7 @@ namespace gb::yadro::algorithm::conv {
 
         template<typename RNG>
         [[nodiscard]] T crossover(T a, T b, RNG& rng) const {
-            static thread_local std::bernoulli_distribution dist(0.5);
-            return dist(rng) ? a : b;
+            return portable::bernoulli(rng, 0.5) ? a : b;
         }
 
         /// Discrete values are already exact — no quantization needed.
@@ -1166,9 +1462,8 @@ namespace gb::yadro::algorithm::conv {
             double prob = (per_element_mut_prob >= 0.0)
                 ? per_element_mut_prob
                 : 1.0 / static_cast<double>(container_size);
-            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
             for (auto& el : value)
-                if (coin(rng) < prob)
+                if (portable::bernoulli(rng, prob))
                     el = element_wrapper.mutate(el, rng);
             return value;
         }
@@ -1200,7 +1495,7 @@ namespace gb::yadro::algorithm::conv {
 
             // Restrict cut to [1, container_size-1] so the result is never a
             // verbatim clone of either parent.
-            size_t cut = std::uniform_int_distribution<size_t>{ 1, container_size - 1 }(rng);
+            size_t cut = portable::uniform_int(rng, size_t{ 1 }, container_size - 1);
             // separate declarations: a and b give const iterators, result a mutable one
             auto ia = std::begin(a);
             auto ib = std::begin(b);
@@ -1787,18 +2082,24 @@ namespace gb::yadro::algorithm::conv {
                 return wrapper.mutate(std::move(value), rng);
             }
             else {
-                if (std::uniform_real_distribution<double>{0.0, 1.0}(rng) < mutation_rate)
+                if (portable::bernoulli(rng, mutation_rate))
                     return wrapper.mutate(std::move(value), rng);
                 return value;
             }
         }
 
+        // The genes draw from rng in tuple order on every compiler: the comma fold is
+        // sequenced left to right, where the arguments of std::make_tuple would be
+        // evaluated in an unspecified order, which differs between compilers (MSVC
+        // evaluates them right to left, Clang on Linux left to right).
         template<typename... Wrappers>
         auto random_chromosome(std::mt19937_64& rng, const std::tuple<Wrappers...>& wrappers)
         {
-            return std::apply([&](const auto&... w) {
-                return std::make_tuple(w.random_value(rng)...);
-                }, wrappers);
+            std::tuple<typename Wrappers::value_type...> chrom;
+            [&] <size_t... Is>(std::index_sequence<Is...>) {
+                ((std::get<Is>(chrom) = std::get<Is>(wrappers).random_value(rng)), ...);
+            }(std::index_sequence_for<Wrappers...>{});
+            return chrom;
         }
 
         template<typename Chromosome, typename... Wrappers>
@@ -1817,16 +2118,20 @@ namespace gb::yadro::algorithm::conv {
             return chrom;
         }
             
+        // Genes recombine in tuple order, sequenced by the comma fold as in
+        // random_chromosome().
         template<typename Chromosome, typename... Wrappers>
         Chromosome crossover_chromosomes(std::mt19937_64& rng,
             const Chromosome& a,
             const Chromosome& b,
             const std::tuple<Wrappers...>& wrappers)
         {
-            return[&]<size_t... Is>(std::index_sequence<Is...>) {
-                return Chromosome{ std::get<Is>(wrappers).crossover(
-                    std::get<Is>(a), std::get<Is>(b), rng)... };
+            Chromosome child;
+            [&] <size_t... Is>(std::index_sequence<Is...>) {
+                ((std::get<Is>(child) = std::get<Is>(wrappers).crossover(
+                    std::get<Is>(a), std::get<Is>(b), rng)), ...);
             }(std::index_sequence_for<Wrappers...>{});
+            return child;
         }
 
         template<typename Target, typename CompareFn>
@@ -1834,10 +2139,10 @@ namespace gb::yadro::algorithm::conv {
             const std::vector<Target>& fitnesses,
             size_t k, CompareFn cmp)
         {
-            std::uniform_int_distribution<size_t> dist{ 0, fitnesses.size() - 1 };
-            size_t best = dist(rng);
+            const size_t last = fitnesses.size() - 1;
+            size_t best = portable::uniform_int(rng, size_t{ 0 }, last);
             for (size_t i = 1; i < k; ++i) {
-                size_t c = dist(rng);
+                size_t c = portable::uniform_int(rng, size_t{ 0 }, last);
                 if (cmp(fitnesses[c], fitnesses[best])) best = c;
             }
             return best;
@@ -1908,14 +2213,13 @@ namespace gb::yadro::algorithm::conv {
             auto rng = make_deterministic_rng(
                 seed, phase_index, phase_generation,
                 deterministic_rng_domain::normal_breeding, logical_stream);
-            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
 
             for (std::size_t offspring_index = begin;
                 offspring_index < end; ++offspring_index) {
                 const std::size_t p1 = tournament_select(
                     rng, fitnesses, config.tournament_size, compare);
                 chromosome_t child;
-                if (coin(rng) < config.crossover_rate) {
+                if (portable::bernoulli(rng, config.crossover_rate)) {
                     const std::size_t p2 = tournament_select(
                         rng, fitnesses, config.tournament_size, compare);
                     child = crossover_chromosomes(rng,
@@ -3439,8 +3743,9 @@ namespace gb::yadro::algorithm::conv {
             }
             const double t = static_cast<double>(phase)
                 / static_cast<double>(num_phases - 1);
-            const double mut_scale = 1.30 - 0.60 * t; // 1.30 -> 0.70
-            const double tour_scale = 0.80 + 0.40 * t; // 0.80 -> 1.20
+            // no_contract keeps each product's rounding the same on every compiler
+            const double mut_scale = 1.30 - detail::no_contract(0.60 * t); // 1.30 -> 0.70
+            const double tour_scale = 0.80 + detail::no_contract(0.40 * t); // 0.80 -> 1.20
 
             config.mutation_rate = std::clamp(
                 saved_config.mutation_rate * mut_scale,
@@ -4586,13 +4891,12 @@ namespace gb::yadro::algorithm::conv {
             for (size_t i = 0; i < elite_n && i < population_.size(); ++i)
                 next.push_back(population_[i]);
 
-            std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
             while (next.size() < pop_size) {
                 // p1 indexes into both fitnesses and population_ — they are 1:1.
                 size_t p1 = detail::tournament_select(rng, fitnesses,
                     config.tournament_size, compare_);
                 chromosome_t child;
-                if (coin(rng) < config.crossover_rate) {
+                if (portable::bernoulli(rng, config.crossover_rate)) {
                     size_t p2 = detail::tournament_select(rng, fitnesses,
                         config.tournament_size, compare_);
                     child = detail::crossover_chromosomes(rng,
@@ -4691,12 +4995,11 @@ namespace gb::yadro::algorithm::conv {
                     tp([this, &next, &fitnesses, begin, end, elite_n]() {
                         // Each task gets its own per-thread RNG — no shared state.
                         auto& rng = detail::thread_rng();
-                        std::uniform_real_distribution<double> coin{ 0.0, 1.0 };
                         for (size_t i = begin; i < end; ++i) {
                             size_t p1 = detail::tournament_select(
                                 rng, fitnesses, config.tournament_size, compare_);
                             chromosome_t child;
-                            if (coin(rng) < config.crossover_rate) {
+                            if (portable::bernoulli(rng, config.crossover_rate)) {
                                 size_t p2 = detail::tournament_select(
                                     rng, fitnesses, config.tournament_size, compare_);
                                 child = detail::crossover_chromosomes(rng,
