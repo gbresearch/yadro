@@ -1201,7 +1201,10 @@ namespace gb::yadro::algorithm::conv {
             // Restrict cut to [1, container_size-1] so the result is never a
             // verbatim clone of either parent.
             size_t cut = std::uniform_int_distribution<size_t>{ 1, container_size - 1 }(rng);
-            auto ia = std::begin(a), ib = std::begin(b), ir = std::begin(result);
+            // separate declarations: a and b give const iterators, result a mutable one
+            auto ia = std::begin(a);
+            auto ib = std::begin(b);
+            auto ir = std::begin(result);
             for (size_t i = 0; i < container_size; ++i, ++ia, ++ib, ++ir)
                 *ir = (i < cut) ? *ia : *ib;
             return result;
