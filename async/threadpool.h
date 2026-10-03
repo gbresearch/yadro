@@ -205,6 +205,12 @@
  *   still waiting for a future after shutdown(false) receives broken_promise
  *   at once; the helper blocked on that future is detached and exits when
  *   the future is ready (or with the process), without notifying.
+ *   Work published from outside the pool while shutdown(false) stops it (a
+ *   submit() past its state check, or a continuation fired by another
+ *   pool's worker) is never stranded: pushed before the sweep of its inbox,
+ *   it is faulted by the sweep; pushed after, it sees Stopped under the same
+ *   inbox mutex and is faulted without being queued.  Either way its result
+ *   receives broken_promise.
  *   After shutdown(), submit() throws.  then() must not be called after
  *   shutdown (submit_fn may execute against a stopped pool).  Idempotent.
  *   Must not be called from a pool worker thread.
@@ -1269,12 +1275,17 @@ namespace gb::yadro::async {
          *
          * External path: hold idle_.mutex during fetch_add (closes spurious-idle
          *   race), push to ctls_[target].inbox, release the inbox mutex, then
-         *   advance work_generation_.
+         *   advance work_generation_.  Recheck Stopped under the inbox mutex:
+         *   a foreign notifier may have read Running before shutdown swept the
+         *   queues.  Publication before the sweep is abandoned by the sweep;
+         *   publication after it observes Stopped through the same mutex.
          *
-         * On push failure: rolls back fetch_add and rethrows.
-         * Caller (enqueue_with_state) deletes the node on exception.
+         * Returns false if shutdown rejected the node.  On rejection or push
+         * failure, rolls back fetch_add; push failure is rethrown.  The caller
+         * abandons the node after all queue locks have been released, because
+         * faulting its result can synchronously dispatch more continuations.
          */
-        void enqueue(TaskBase* node) {
+        [[nodiscard]] bool enqueue(TaskBase* node) {
             if (auto* own = own_deque(); own != nullptr) {
                 tasks_in_system_.fetch_add(1, std::memory_order_acq_rel);
                 try { own->push_bottom(node); }
@@ -1292,6 +1303,10 @@ namespace gb::yadro::async {
                 }
                 try {
                     std::lock_guard inbox_lk{ ctls_[target]->mutex };
+                    if (state_.load(std::memory_order_acquire) == PoolState::Stopped) {
+                        tasks_in_system_.fetch_sub(1, std::memory_order_acq_rel);
+                        return false;
+                    }
                     ctls_[target]->inbox.push_back(node);
                 }
                 catch (...) {
@@ -1300,6 +1315,7 @@ namespace gb::yadro::async {
                 }
                 signal_work();
             }
+            return true;
         }
 
         /**
@@ -1326,7 +1342,8 @@ namespace gb::yadro::async {
             node->self_ = node;
 
             try {
-                enqueue(node.get());
+                if (!enqueue(node.get()))
+                    node->abandon();
             }
             catch (...) {
                 // enqueue rolled back tasks_in_system_.  Fault the SharedState<R>
@@ -1709,7 +1726,8 @@ namespace gb::yadro::async {
             }
             node->self_ = node;   // keep alive while raw TaskBase* is in the deque
             try {
-                enqueue(node.get());
+                if (!enqueue(node.get()))
+                    node->abandon();
             }
             catch (...) {
                 node->abandon();   // faults out_state (if any) and drops self_
@@ -1818,6 +1836,14 @@ namespace gb::yadro::async {
                     node->abandon();
                 }
                 return Task<R>{ std::move(state_ptr), &pool, pool.token_ };
+            }
+
+            // Resume the external dispatch path below fire_continuation's
+            // initial state check.  Tests can force shutdown to finish in that
+            // gap without timing assumptions or hooks in the production path.
+            static void enqueue_prechecked_continuation(threadpool& pool,
+                std::function<void()> work, std::function<void()> fail) noexcept {
+                pool.enqueue_continuation(std::move(work), std::move(fail));
             }
 
             static void wake_all_workers(threadpool& pool) noexcept {
