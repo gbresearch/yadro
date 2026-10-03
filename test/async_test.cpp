@@ -469,6 +469,7 @@ namespace
     }
 
     GB_TEST(async, eventcount_blocked_task_does_not_wake_other_workers) {
+        using gb::yadro::async::detail::threadpool_test_access;
         threadpool pool{ 4 };
         std::atomic started{ false };
         std::atomic release{ false };
@@ -484,15 +485,25 @@ namespace
         } };
         started.wait(false);
 
+        // parked_workers() == 3 is not yet a quiet pool: a worker counted as
+        // parked may hold a snapshot older than the blocker's own publication
+        // (its submission, or the migration of its inbox).  It returns for that
+        // publication, late under load, or, if notify_one passed it over,
+        // sleeps on until a spurious wakeup.  Wake every worker once so the
+        // three free ones park again on the current generation; from there a
+        // worker returns only after a later publication.
+        threadpool_test_access::wake_all_workers(pool);
         wait_for([&] {
-            return gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == 3;
+            return threadpool_test_access::parked_on_current_generation(pool) == 3;
             });
-        // A worker can return from an earlier publication after all three have
-        // been counted as parked. The generation tracks new work publication.
-        const auto generation = gb::yadro::async::detail::threadpool_test_access::work_generation(pool);
+        const auto generation = threadpool_test_access::work_generation(pool);
+        const auto returns = threadpool_test_access::park_returns(pool);
         std::this_thread::sleep_for(100ms);
-        gbassert(gb::yadro::async::detail::threadpool_test_access::parked_workers(pool) == 3);
-        gbassert(gb::yadro::async::detail::threadpool_test_access::work_generation(pool) == generation);
+        gbassert(threadpool_test_access::work_generation(pool) == generation
+            && "a blocked task published work");
+        gbassert(threadpool_test_access::park_returns(pool) == returns
+            && "a blocked task woke a parked worker");
+        gbassert(threadpool_test_access::parked_workers(pool) == 3);
 
         release.store(true);
         release.notify_one();
