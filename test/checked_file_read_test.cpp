@@ -272,3 +272,31 @@ GB_TEST_IF(gbdb_json_axe_enabled, file_read, checked_stream_preserves_eof_and_ca
     catch (const json_parse_error& error) { empty_is_parse_error = error.offset == 0; }
     gbassert(empty_is_parse_error);
 }
+
+GB_TEST_IF(gbdb_json_axe_enabled, file_read, json_db_input_rejections_are_distinct_from_programming_errors) {
+    json_read_options options;
+    options.reject_duplicate_keys = true;
+    options.blob_mode = json_blob_mode::tagged_base64;
+    for (const auto text : {
+        R"({"x":1,"x":2})",
+        R"({"x":[true,false]})",
+        R"({"x":{"$gbdb":"archive","encoding":"unsupported","format":"yadro.archive.custom"}})" }) {
+        bool identified{};
+        try { (void)read_json(text, options); }
+        catch (const json_db_decode_error&) { identified = true; }
+        gbassert(identified, "Input/model rejection needs a specific type; plain logic_error is also used for programming errors");
+    }
+    bool programming_error{};
+    try { json_db_builder builder; builder.end_object(); }
+    catch (const std::logic_error& error) { programming_error = typeid(error) == typeid(std::logic_error); }
+    gbassert(programming_error, "Invalid builder event sequencing must remain a programming error");
+    fixture f;
+    const auto p = f.file("valid.json"); write(p, "{}");
+    gb::yadro::util::detail::scoped_file_read_fault fault{[](const fs::path&, file_read_operation, std::uint64_t) {
+        throw std::logic_error("unexpected callback failure");
+    }};
+    bool propagated{};
+    try { (void)read_json_file(p, options); }
+    catch (const std::logic_error& error) { propagated = typeid(error) == typeid(std::logic_error); }
+    gbassert(propagated);
+}

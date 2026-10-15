@@ -7,6 +7,13 @@
 #include <utility>
 
 namespace gb::yadro::container {
+    // A syntactically valid document rejected by the gbdb value/archive model.
+    // Keep event sequencing, options and other programming errors as logic_error.
+    // Derived for existing callers which already catch that documented base type.
+    class json_db_decode_error final : public std::logic_error {
+    public:
+        using std::logic_error::logic_error;
+    };
     enum class blob_integrity_failure_kind { size_mismatch, digest_mismatch };
     struct blob_integrity_failure {
         std::filesystem::path path;

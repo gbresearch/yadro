@@ -403,13 +403,13 @@ namespace gb::yadro::container
 
             if (_array) {
                 if (_read_options.table_mode != json_table_mode::infer_tables)
-                    throw std::logic_error("JSON objects inside arrays are not supported by json_db_builder");
+                    throw json_db_decode_error("JSON objects inside arrays are not supported by json_db_builder");
                 if (_array->current_row_array)
-                    throw std::logic_error("JSON objects inside table row arrays are not supported");
+                    throw json_db_decode_error("JSON objects inside table row arrays are not supported");
                 if (_array->kind == array_kind::none)
                     _array->kind = array_kind::object_rows;
                 if (_array->kind != array_kind::object_rows || _array->current_object)
-                    throw std::logic_error("Mixed JSON table arrays are not supported");
+                    throw json_db_decode_error("Mixed JSON table arrays are not supported");
                 _array->current_object = row_object{};
                 return;
             }
@@ -496,7 +496,7 @@ namespace gb::yadro::container
             if (skip_scalar_value())
                 return;
             if (_array)
-                throw std::logic_error("Boolean arrays are not supported by the current json_db value model");
+                throw json_db_decode_error("Boolean arrays are not supported by the current json_db value model");
             set_value(value);
         }
 
@@ -555,13 +555,13 @@ namespace gb::yadro::container
 
             if (_array) {
                 if (_read_options.table_mode != json_table_mode::infer_tables)
-                    throw std::logic_error("Nested arrays are not supported by the current json_db value model");
+                    throw json_db_decode_error("Nested arrays are not supported by the current json_db value model");
                 if (_array->current_object || _array->current_row_array)
-                    throw std::logic_error("Nested table arrays are not supported");
+                    throw json_db_decode_error("Nested table arrays are not supported");
                 if (_array->kind == array_kind::none)
                     _array->kind = array_kind::row_arrays;
                 if (_array->kind != array_kind::row_arrays)
-                    throw std::logic_error("Mixed JSON table arrays are not supported");
+                    throw json_db_decode_error("Mixed JSON table arrays are not supported");
                 _array->current_row_array = std::vector<db_type::table_cell>{};
                 return;
             }
@@ -704,7 +704,7 @@ namespace gb::yadro::container
             if (!_read_options.reject_duplicate_keys)
                 return;
             if (_db.contains(std::span<const string_view>{ path.data(), path.size() }))
-                throw std::logic_error("Duplicate JSON object key");
+                throw json_db_decode_error("Duplicate JSON object key");
         }
 
         void ensure_not_array(const char* message) const
@@ -772,7 +772,7 @@ namespace gb::yadro::container
             if (_array->kind == array_kind::none)
                 _array->kind = array_kind::signed_int;
             if (_array->kind == array_kind::strings)
-                throw std::logic_error("Mixed JSON arrays are not supported by the current json_db value model");
+                throw json_db_decode_error("Mixed JSON arrays are not supported by the current json_db value model");
             if (_array->kind == array_kind::unsigned_int || _array->kind == array_kind::floating) {
                 convert_to_double();
                 _array->doubles.push_back(static_cast<double>(value));
@@ -789,7 +789,7 @@ namespace gb::yadro::container
             if (_array->kind == array_kind::none)
                 _array->kind = array_kind::unsigned_int;
             if (_array->kind == array_kind::strings)
-                throw std::logic_error("Mixed JSON arrays are not supported by the current json_db value model");
+                throw json_db_decode_error("Mixed JSON arrays are not supported by the current json_db value model");
             if (_array->kind == array_kind::signed_int || _array->kind == array_kind::floating) {
                 convert_to_double();
                 _array->doubles.push_back(static_cast<double>(value));
@@ -804,7 +804,7 @@ namespace gb::yadro::container
                 return;
             ensure_scalar_array();
             if (_array->kind == array_kind::strings)
-                throw std::logic_error("Mixed JSON arrays are not supported by the current json_db value model");
+                throw json_db_decode_error("Mixed JSON arrays are not supported by the current json_db value model");
             convert_to_double();
             _array->doubles.push_back(value);
         }
@@ -817,14 +817,14 @@ namespace gb::yadro::container
             if (_array->kind == array_kind::none)
                 _array->kind = array_kind::strings;
             if (_array->kind != array_kind::strings)
-                throw std::logic_error("Mixed JSON arrays are not supported by the current json_db value model");
+                throw json_db_decode_error("Mixed JSON arrays are not supported by the current json_db value model");
             _array->strings.emplace_back(value);
         }
 
         void ensure_scalar_array() const
         {
             if (_array->kind == array_kind::object_rows || _array->kind == array_kind::row_arrays)
-                throw std::logic_error("Mixed JSON table arrays are not supported");
+                throw json_db_decode_error("Mixed JSON table arrays are not supported");
         }
 
         [[nodiscard]] bool append_table_cell(db_type::table_cell cell)
@@ -871,7 +871,7 @@ namespace gb::yadro::container
             }
 
             if (has_string && (has_double || has_signed || has_unsigned))
-                throw std::logic_error("Mixed string and numeric JSON table columns are not supported");
+                throw json_db_decode_error("Mixed string and numeric JSON table columns are not supported");
             if (has_string)
                 return db_type::table_column_type::string;
             if (has_double)
@@ -889,24 +889,24 @@ namespace gb::yadro::container
         void set_object_rows_table(const std::vector<string_view>& path)
         {
             if (_array->object_rows.empty())
-                throw std::logic_error("JSON object-row table is empty");
+                throw json_db_decode_error("JSON object-row table is empty");
 
             std::vector<string_type> names;
             names.reserve(_array->object_rows.front().cells.size());
             for (auto& [name, _] : _array->object_rows.front().cells) {
                 if (std::ranges::find(names, name) != names.end())
-                    throw std::logic_error("Duplicate JSON table column");
+                    throw json_db_decode_error("Duplicate JSON table column");
                 names.push_back(name);
             }
 
             std::vector<std::vector<db_type::table_cell>> columns(names.size());
             for (auto& row : _array->object_rows) {
                 if (row.cells.size() != names.size())
-                    throw std::logic_error("JSON table rows must have the same columns");
+                    throw json_db_decode_error("JSON table rows must have the same columns");
                 for (std::size_t column = 0; column < names.size(); ++column) {
                     auto found = std::ranges::find_if(row.cells, [&](auto& cell) { return cell.first == names[column]; });
                     if (found == row.cells.end())
-                        throw std::logic_error("JSON table row is missing a column");
+                        throw json_db_decode_error("JSON table row is missing a column");
                     columns[column].push_back(found->second);
                 }
             }
@@ -923,7 +923,7 @@ namespace gb::yadro::container
             std::vector<std::vector<db_type::table_cell>> columns(names.size());
             for (auto& row : _array->row_arrays) {
                 if (row.size() != names.size())
-                    throw std::logic_error("JSON table row has wrong column count");
+                    throw json_db_decode_error("JSON table row has wrong column count");
                 for (std::size_t column = 0; column < names.size(); ++column)
                     columns[column].push_back(row[column]);
             }
@@ -939,7 +939,7 @@ namespace gb::yadro::container
         [[nodiscard]] std::vector<string_type> positional_column_names() const
         {
             if (_array->row_arrays.empty() || _array->row_arrays.front().empty())
-                throw std::logic_error("JSON nested row arrays must contain nonempty rows");
+                throw json_db_decode_error("JSON nested row arrays must contain nonempty rows");
 
             std::vector<string_type> names;
             names.reserve(_array->row_arrays.front().size());
@@ -1004,7 +1004,7 @@ namespace gb::yadro::container
                 return std::nullopt;
             auto ref = std::get_if<db_type::string_ref>(value);
             if (ref == nullptr)
-                throw std::logic_error("Tagged gbdb archive member must be a string");
+                throw json_db_decode_error("Tagged gbdb archive member must be a string");
             return _db.string(*ref);
         }
 
@@ -1012,7 +1012,7 @@ namespace gb::yadro::container
         {
             auto value = optional_string_member(path, member);
             if (!value)
-                throw std::logic_error("Tagged gbdb archive is missing a required string member");
+                throw json_db_decode_error("Tagged gbdb archive is missing a required string member");
             return *value;
         }
 
@@ -1023,30 +1023,30 @@ namespace gb::yadro::container
                 return std::nullopt;
             if (auto signed_value = std::get_if<std::int64_t>(value)) {
                 if (*signed_value < 0 || *signed_value > static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)()))
-                    throw std::logic_error("Tagged gbdb archive version is out of range");
+                    throw json_db_decode_error("Tagged gbdb archive version is out of range");
                 return static_cast<std::uint32_t>(*signed_value);
             }
             if (auto unsigned_value = std::get_if<std::uint64_t>(value)) {
                 if (*unsigned_value > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)()))
-                    throw std::logic_error("Tagged gbdb archive version is out of range");
+                    throw json_db_decode_error("Tagged gbdb archive version is out of range");
                 return static_cast<std::uint32_t>(*unsigned_value);
             }
-            throw std::logic_error("Tagged gbdb archive version must be an integer");
+            throw json_db_decode_error("Tagged gbdb archive version must be an integer");
         }
 
         [[nodiscard]] std::uint64_t required_uint64_member(const std::vector<string_view>& path, string_view member) const
         {
             auto* value = member_value(path, member);
             if (value == nullptr)
-                throw std::logic_error("Tagged gbdb archive is missing a required integer member");
+                throw json_db_decode_error("Tagged gbdb archive is missing a required integer member");
             if (auto signed_value = std::get_if<std::int64_t>(value)) {
                 if (*signed_value < 0)
-                    throw std::logic_error("Tagged gbdb archive integer member is negative");
+                    throw json_db_decode_error("Tagged gbdb archive integer member is negative");
                 return static_cast<std::uint64_t>(*signed_value);
             }
             if (auto unsigned_value = std::get_if<std::uint64_t>(value))
                 return *unsigned_value;
-            throw std::logic_error("Tagged gbdb archive member must be an integer");
+            throw json_db_decode_error("Tagged gbdb archive member must be an integer");
         }
 
         void validate_tagged_archive_members(const std::vector<string_view>& path) const
@@ -1059,7 +1059,7 @@ namespace gb::yadro::container
                 auto key = _db.key(child);
                 if (key != "$gbdb" && key != "encoding" && key != "format" && key != "type" && key != "version" && key != "data"
                     && key != "node_id" && key != "blob_uri" && key != "blob_size_bytes" && key != "blob_md5")
-                    throw std::logic_error("Tagged gbdb archive has an unsupported member");
+                    throw json_db_decode_error("Tagged gbdb archive has an unsupported member");
             }
         }
 
@@ -1104,14 +1104,14 @@ namespace gb::yadro::container
                 return false;
 
             if (*marker != "archive")
-                throw std::logic_error("Unsupported tagged gbdb object");
+                throw json_db_decode_error("Unsupported tagged gbdb object");
             if (_read_options.blob_mode != json_blob_mode::tagged_base64)
                 throw std::logic_error("Tagged gbdb archive JSON reading is not enabled");
 
             validate_tagged_archive_members(path);
 
             if (required_string_member(path, "format") != "yadro.archive.custom")
-                throw std::logic_error("Tagged gbdb archive has unsupported format");
+                throw json_db_decode_error("Tagged gbdb archive has unsupported format");
 
             auto encoding = required_string_member(path, "encoding");
             if (encoding == "base64") {
@@ -1156,7 +1156,7 @@ namespace gb::yadro::container
                 }
             }
             else {
-                throw std::logic_error("Tagged gbdb archive has unsupported encoding");
+                throw json_db_decode_error("Tagged gbdb archive has unsupported encoding");
             }
 
             return true;
@@ -2153,13 +2153,13 @@ namespace gb::yadro::container
     // byte offset, line and column: raw control characters in strings, invalid UTF-8, lone UTF-16
     // surrogate escapes, nesting beyond options.max_depth, input beyond options.max_input_bytes, and
     // integers outside int64/uint64 unless options.big_integers is to_double. Shapes the json_db
-    // value model cannot hold (for example, boolean or nested arrays) throw std::logic_error.
+    // value model cannot hold (for example, boolean or nested arrays) throw json_db_decode_error.
     [[nodiscard]] inline json_db read_json(std::string_view text, const json_read_options& options = {})
     {
 #if GB_YADRO_GBDB_JSON_HAS_AXE
         // The shared, hardened front end (json_parser.h). The json_db builder narrows what is
         // accepted further: the root must be an object (or, with infer_tables, an array), and
-        // value-model limits are reported as std::logic_error.
+        // value-model limits are reported as json_db_decode_error.
         json_parse_options parse_options;
         parse_options.max_depth = options.max_depth;
         parse_options.max_input_bytes = options.max_input_bytes;
