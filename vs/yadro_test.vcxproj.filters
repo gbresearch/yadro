@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="test">
@@ -6,6 +6,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\test\checked_file_read_test.cpp">
+      <Filter>test</Filter>
+    </ClCompile>
     <ClCompile Include="..\test\yadro_test.cpp">
       <Filter>test</Filter>
     </ClCompile>
@@ -36,5 +39,9 @@
     <ClCompile Include="..\test\json_test.cpp">
       <Filter>test</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\util\checked_file_read.h" />
+    <ClInclude Include="..\container\gbdb_read_error.h" />
   </ItemGroup>
 </Project>

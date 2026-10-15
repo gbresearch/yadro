@@ -19,10 +19,10 @@ namespace gb::yadro::container
     [[nodiscard]] inline json_db load_json_db_file(const std::filesystem::path& file)
     {
         json_db db;
-        std::ifstream in(file, std::ios::binary);
-        if (!in)
-            throw std::runtime_error("failed to open database file for reading: " + file.string());
-        db.serialize(gb::yadro::archive::bin_archive{ in });
+        gb::yadro::util::checked_file_input in{file};
+        try { db.serialize(gb::yadro::archive::bin_archive{ in }); }
+        catch (...) { in.rethrow_read_failure(); throw; }
+        in.rethrow_read_failure();
         return db;
     }
 

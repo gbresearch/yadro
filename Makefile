@@ -132,6 +132,7 @@ LIB_SOURCES := \
     util/win_service.cpp
 
 TEST_SOURCES := \
+    test/checked_file_read_test.cpp \
     test/algorithm_test.cpp \
     test/archive_test.cpp \
     test/async_test.cpp \

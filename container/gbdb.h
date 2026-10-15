@@ -54,6 +54,8 @@
 #include <vector>
 #include "../archive/archive.h"
 #include "../util/string_util.h"
+#include "../util/checked_file_read.h"
+#include "gbdb_read_error.h"
 #include "datapool.h"
 #include "tree.h"
 
@@ -2014,7 +2016,12 @@ namespace gb::yadro::container
                 metadata.external_cache = load_external_object_blob(metadata);
                 metadata.external_loaded = true;
             }
-            catch (const std::exception& e) {
+            catch (const gb::yadro::util::file_read_error& e) {
+                emit_log({ .level = log_level::critical, .category = "blob.io",
+                    .event = "load_failed", .message = e.what() });
+                throw;
+            }
+            catch (const blob_integrity_error& e) {
                 emit_log({
                     .level = log_level::critical,
                     .category = "blob.integrity",
@@ -2023,10 +2030,15 @@ namespace gb::yadro::container
                 });
                 throw;
             }
+            catch (const std::exception& e) {
+                emit_log({ .level = log_level::critical, .category = "blob.load",
+                    .event = "load_failed", .message = e.what() });
+                throw;
+            }
             catch (...) {
                 emit_log({
                     .level = log_level::critical,
-                    .category = "blob.integrity",
+                    .category = "blob.load",
                     .event = "load_failed",
                     .message = "Unknown gbdb external object blob load failure"
                 });
@@ -2256,17 +2268,20 @@ namespace gb::yadro::container
         {
             auto file = resolve_external_blob_uri(string(metadata.blob_uri));
 
-            std::ifstream in(file, std::ios::binary);
-            if (!in)
-                throw std::runtime_error("Failed to open gbdb external object blob");
+            gb::yadro::util::checked_file_input in{file};
 
             std::vector<char> data((std::istreambuf_iterator<char>(in)), {});
+            in.rethrow_read_failure();
             if (static_cast<std::uint64_t>(data.size()) != metadata.blob_size_bytes)
-                throw std::runtime_error("gbdb external object blob size mismatch");
+                throw blob_integrity_error{{file, blob_integrity_failure_kind::size_mismatch,
+                    metadata.blob_size_bytes, static_cast<std::uint64_t>(data.size()), {}, {}}};
 
             auto bytes = std::as_bytes(std::span{ data });
-            if (md5_bytes(bytes) != string(metadata.blob_md5))
-                throw std::runtime_error("gbdb external object blob MD5 mismatch");
+            const auto actual_digest = md5_bytes(bytes);
+            if (actual_digest != string(metadata.blob_md5))
+                throw blob_integrity_error{{file, blob_integrity_failure_kind::digest_mismatch,
+                    metadata.blob_size_bytes, static_cast<std::uint64_t>(data.size()),
+                    std::string{string(metadata.blob_md5)}, actual_digest}};
 
             std::vector<std::byte> result;
             result.reserve(data.size());

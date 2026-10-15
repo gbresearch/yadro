@@ -1831,15 +1831,20 @@ namespace
         db.set_deferred_serialized_object({ "assets", "payload" }, "missing_payload.bin", 10, "00000000000000000000000000000000", "missing_asset", 1);
         auto ref = std::get<json_db::object_ref>(*db.get({ "assets", "payload" }));
 
-        must_throw<std::runtime_error>([&] {
-            [[maybe_unused]] auto bytes = db.serialized_object(ref);
-        });
+        std::string cause;
+        try { [[maybe_unused]] auto bytes = db.serialized_object(ref); }
+        catch (const gb::yadro::util::file_read_error& error) {
+            cause = error.what();
+            gbassert(error.detail().path == export_dir / "missing_payload.bin");
+            gbassert(error.detail().operation == gb::yadro::util::file_read_operation::open);
+        }
+        gbassert(!cause.empty());
 
         gbassert(events.size() == 1);
         gbassert(events.back().level == json_db::log_level::critical);
-        gbassert(events.back().category == "blob.integrity");
+        gbassert(events.back().category == "blob.io");
         gbassert(events.back().event == "load_failed");
-        gbassert(events.back().message.find("Failed to open") != std::string::npos);
+        gbassert(events.back().message == cause);
 
         std::filesystem::remove_all(export_dir);
     }

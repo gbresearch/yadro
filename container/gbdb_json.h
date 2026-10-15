@@ -1076,17 +1076,19 @@ namespace gb::yadro::container
             if (file.is_relative())
                 file = _read_options.external_blob_base_directory / file;
 
-            std::ifstream in(file, std::ios::binary);
-            if (!in)
-                throw std::runtime_error("Failed to open external gbdb archive blob");
+            gb::yadro::util::checked_file_input in{file};
 
             std::vector<char> data((std::istreambuf_iterator<char>(in)), {});
+            in.rethrow_read_failure();
             if (static_cast<std::uint64_t>(data.size()) != size)
-                throw std::runtime_error("External gbdb archive blob size mismatch");
+                throw blob_integrity_error{{file, blob_integrity_failure_kind::size_mismatch,
+                    size, static_cast<std::uint64_t>(data.size()), {}, {}}};
 
             auto bytes = std::as_bytes(std::span{ data });
-            if (detail::md5_bytes(bytes) != expected_md5)
-                throw std::runtime_error("External gbdb archive blob MD5 mismatch");
+            const auto actual_digest = detail::md5_bytes(bytes);
+            if (actual_digest != expected_md5)
+                throw blob_integrity_error{{file, blob_integrity_failure_kind::digest_mismatch,
+                    size, static_cast<std::uint64_t>(data.size()), std::string{expected_md5}, actual_digest}};
 
             std::vector<std::byte> result;
             result.reserve(data.size());
@@ -2289,12 +2291,11 @@ namespace gb::yadro::container
 
     [[nodiscard]] inline json_db read_json_file(const std::filesystem::path& file, const json_read_options& options = {})
     {
-        std::ifstream in(file, std::ios::binary);
-        if (!in)
-            throw std::runtime_error("Failed to open JSON file for reading");
+        gb::yadro::util::checked_file_input in{file};
         // read_capped extracts at most max_input_bytes + 1 bytes and reports the offset, line and
         // column of the cap when the file is larger
         auto text = detail::read_capped(in, options.max_input_bytes);
+        in.rethrow_read_failure();
         auto effective_options = options;
         if (effective_options.external_blob_base_directory.empty())
             effective_options.external_blob_base_directory = file.parent_path();

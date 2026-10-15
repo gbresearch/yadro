@@ -159,6 +159,8 @@
     <ClInclude Include="..\simulator\signal.h" />
     <ClInclude Include="..\simulator\simulator.h" />
     <ClInclude Include="..\simulator\task.h" />
+    <ClInclude Include="..\util\checked_file_read.h" />
+    <ClInclude Include="..\container\gbdb_read_error.h" />
     <ClInclude Include="..\util\durable_file.h" />
     <ClInclude Include="..\util\file_mutex.h" />
     <ClInclude Include="..\util\gberror.h" />
